@@ -13,7 +13,6 @@ import {
   type VirtualItem,
   type VisibilityEvent,
   type VisibilityOptions,
-  type Viewport,
   EMPTY_STATE,
   layoutSignatureFor,
   needsRerender,
@@ -21,7 +20,6 @@ import {
 import {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -82,6 +80,8 @@ export interface UseVirtualListResult<T> {
   engine: Engine | null
 }
 
+const noopRef = (): undefined => undefined
+
 const NO_RESULT: ScrollResult = { settled: false, deviation: 0, iterations: 0, reason: 'empty' as const }
 
 /**
@@ -116,12 +116,66 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     windowScroller = false,
   } = options
 
-  const [engine, setEngine] = useState<Engine | null>(null)
-  const scrollElement = useRef<HTMLElement | null>(null)
   const containerElement = useRef<HTMLElement | null>(null)
-  const itemElements = useRef(new Map<ItemKey, HTMLElement>())
-  /** Last written top per element, so unchanged positions are not re-written. */
-  const writtenTops = useRef(new WeakMap<HTMLElement, number>())
+
+  /**
+   * The one thing that writes to the DOM.
+   *
+   * Declared before the engine because the engine takes it, and identity-stable
+   * because `containerRef` used to depend on `engine` — so React detached the container
+   * before attaching the item refs on the first commit, and the content-size write
+   * no-oped against a null container while the scroll write proceeded against a stale
+   * height. The closure reads the ref when the engine calls it, after commit, not
+   * during render.
+   */
+  const surface = useMemo(
+    () => createDomSurface({ getContainer: () => containerElement.current }),
+    [],
+  )
+
+  /**
+   * The scroll element is state, so the engine can be *derived* rather than assigned.
+   *
+   * The engine used to be built inside a `setState` updater, which React may invoke
+   * more than once — StrictMode does so by design — so two engines were constructed,
+   * only the second was kept, and the first leaked its scroller's DOM listeners for
+   * good. The window-scroller path had the same bug in another shape: `setEngine`
+   * called synchronously inside an effect, a cascading render that
+   * `react-hooks/set-state-in-effect` rightly rejects.
+   *
+   * A ref callback is not render, so setting state from one is fine.
+   */
+  const [scrollElement, setScrollElement] = useState<HTMLElement | null>(null)
+  const scrollRef = useCallback((element: HTMLElement | null) => {
+    setScrollElement(element)
+  }, [])
+
+  const engine = useMemo(() => {
+    if (windowScroller) {
+      return createEngine({
+        viewport: createWindowViewport(window),
+        keys: [],
+        surface,
+        layoutSignature: layoutSignatureFor(document.documentElement),
+      })
+    }
+    if (!scrollElement) return null
+    return createEngine({
+      viewport: createElementViewport(scrollElement),
+      keys: [],
+      surface,
+      layoutSignature: layoutSignatureFor(scrollElement),
+    })
+  }, [windowScroller, scrollElement, surface])
+
+  // Dispose whatever a previous derivation produced. Constructing an engine attaches
+  // no listeners — `mount()` does that — so building one during render is inert.
+  useEffect(
+    () => () => {
+      engine?.dispose()
+    },
+    [engine],
+  )
 
   // Keys are derived once per items reference, so the cache's identity check
   // short-circuits on every render where the data did not change.
@@ -153,55 +207,6 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
   // tear the engine down and lose the scroll position with it.
   const callbacks = useRef({ estimateSize, onVisibilityChange, getItemKey })
   callbacks.current = { estimateSize, onVisibilityChange, getItemKey }
-
-  const scrollRef = useCallback(
-    (element: HTMLElement | null) => {
-      scrollElement.current = element
-      if (windowScroller) return
-      setEngine((previous) => {
-        previous?.dispose()
-        if (!element) return null
-        return createEngine({
-          viewport: createElementViewport(element),
-          keys: [],
-          surface,
-          layoutSignature: layoutSignatureFor(element),
-        })
-      })
-    },
-    [windowScroller],
-  )
-
-  // The window scroller has no element to attach to, so its engine is created on
-  // mount instead of by a ref callback.
-  useEffect(() => {
-    if (!windowScroller) return
-    const viewport: Viewport = createWindowViewport(window)
-    const created = createEngine({
-      viewport,
-      keys: [],
-      surface,
-      layoutSignature: layoutSignatureFor(document.documentElement),
-    })
-    setEngine(created)
-    return () => {
-      created.dispose()
-      setEngine(null)
-    }
-  }, [windowScroller])
-
-  /**
-   * The one thing that writes to the DOM.
-   *
-   * Created once and identity-stable, which matters: `containerRef` previously
-   * depended on `engine`, so React detached it before attaching the item refs on the
-   * first commit — and the content-size write then no-oped against a null container
-   * while the scroll write proceeded against a stale height.
-   */
-  const surface = useMemo(
-    () => createDomSurface({ getContainer: () => containerElement.current }),
-    [],
-  )
 
   const containerRef = useCallback((element: HTMLElement | null) => {
     containerElement.current = element
@@ -259,46 +264,16 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
   )
 
   /**
-   * One ref callback per key, memoised.
+   * Stable per-key ref callbacks, from the engine.
    *
-   * `itemRef(key)` previously built a fresh closure on every call, and the component
-   * wrapped it in an inline arrow besides — so every mounted item's ref identity
-   * changed on every render and React dutifully ran the cleanup and re-attached. That
-   * cost a forced `getBoundingClientRect` and an unobserve/observe pair per item per
-   * render, and the cleanup's `lastSizes.delete` defeated the resizer's value-dedupe,
-   * so a full synthetic ResizeObserver batch was manufactured the following frame.
-   * During first-pass scrolling that is every frame — precisely when the claim of "no
-   * React work on most scroll frames" is supposed to hold.
+   * The cache lives with the element registry rather than in React: held here it was
+   * either a ref read during render or a mutated memo, and a mutable render-stable
+   * cache is not React's to hold.
    */
-  const itemRefs = useRef(new Map<ItemKey, (element: HTMLElement | null) => void>())
-
   const itemRef = useCallback(
-    (key: ItemKey) => {
-      const existing = itemRefs.current.get(key)
-      if (existing) return existing
-
-      const callback = (element: HTMLElement | null): (() => void) | undefined => {
-        if (!element || !engine) return undefined
-        const detach = engine.observeItem(element, key)
-        // React 19 ref cleanup. Returning it means React never calls this back with
-        // `null`, which is what made the component's own `else …delete()` branch
-        // unreachable and leaked every element ever mounted.
-        return detach
-      }
-      itemRefs.current.set(key, callback)
-      return callback
-    },
+    (key: ItemKey) => engine?.itemRef(key) ?? noopRef,
     [engine],
   )
-
-  // Keep the callback cache bounded by the rendered window rather than by everything
-  // ever scrolled past.
-  useEffect(() => {
-    const live = new Set(state.items.map((item) => item.key))
-    for (const key of itemRefs.current.keys()) {
-      if (!live.has(key)) itemRefs.current.delete(key)
-    }
-  }, [state.items])
 
   const rendered = useMemo<readonly RenderedItem<T>[]>(() => {
     const result: RenderedItem<T>[] = []

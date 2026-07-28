@@ -8,7 +8,6 @@ import {
   useCallback,
   useImperativeHandle,
   useMemo,
-  useRef,
   useState,
 } from 'react'
 import { useVirtualList, type RenderedItem, type UseVirtualListOptions } from './useVirtualList.js'

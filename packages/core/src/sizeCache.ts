@@ -26,6 +26,22 @@ export interface ResolvedItem {
   readonly size: number
 }
 
+/**
+ * A snapshot as it arrives from storage, where nothing has been verified.
+ *
+ * `SizeSnapshot` narrows `version` to the literal `1`, which is right for one this
+ * library produced — but a restored snapshot comes from `localStorage`, a URL, or a
+ * server, so its version is whatever is written there. Typing the restore input as
+ * `SizeSnapshot` made the version check provably dead to the compiler while remaining
+ * entirely live at runtime; this says what is actually true.
+ */
+export interface StoredSizeSnapshot {
+  readonly version: number
+  readonly layoutSignature: string
+  readonly estimate: number
+  readonly sizes: readonly (readonly [ItemKey, number])[]
+}
+
 export interface SizeCacheOptions {
   /** The loaded window, in display order. */
   keys?: readonly ItemKey[]
@@ -374,7 +390,7 @@ export class SizeCache {
    *
    * @returns whether the snapshot was accepted.
    */
-  restore(snapshot: SizeSnapshot): boolean {
+  restore(snapshot: StoredSizeSnapshot): boolean {
     if (snapshot.version !== 1) return false
     if (snapshot.layoutSignature !== this.#layoutSignature) return false
 

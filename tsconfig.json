@@ -1,0 +1,17 @@
+{
+  "//": "Covers the TypeScript that is not part of a publishable package — build and test configs, Playwright specs, the spike. Without it the ESLint project service falls back to a default program with no `strictNullChecks`, and four type-aware rules then report themselves as unusable once per file.",
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "allowJs": true,
+    "types": ["node"]
+  },
+  "include": [
+    "*.config.ts",
+    "eslint.config.js",
+    "e2e/**/*.ts",
+    "spike/**/*.ts",
+    "packages/*/tsup.config.ts",
+    "apps/*/vite.config.ts"
+  ]
+}

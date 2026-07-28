@@ -3,13 +3,13 @@ import type { SizeCache } from './sizeCache.js'
 import type { Anchor } from './types.js'
 
 /**
- * @deprecated Use {@link ListInsets} from `./listGeometry.js`.
+ * Alias of {@link ListInsets}, kept so the exported type name does not change.
  *
- * Kept as an alias so the exported type name does not change. The concept was named
- * after the anchor even though the anchor was only one of its four consumers, and
- * that is exactly why the other three re-derived the conversion rather than reusing
- * it — seven copies of `scrollOffset - margin + paddingStart` in total, one of which
- * was a real bug.
+ * The concept was originally named after the anchor even though the anchor was only
+ * one of its four consumers — which is exactly why the other three re-derived the
+ * conversion instead of reusing it. New code should say `ListInsets`; this is not
+ * marked `@deprecated` because that would warn at a dozen internal call sites for a
+ * rename that costs a consumer nothing.
  */
 export type AnchorGeometry = ListInsets
 
@@ -52,7 +52,7 @@ function geometryOf(insets: ListInsets | undefined): ListGeometry {
 export function deriveAnchor(
   scrollTop: number,
   cache: SizeCache,
-  geometry?: AnchorGeometry,
+  geometry?: ListInsets,
 ): Anchor | null {
   const probe = geometryOf(geometry).toList(scrollTop)
   const item = cache.itemAt(probe)
@@ -77,7 +77,7 @@ export function deriveAnchor(
 export function resolveAnchorOffset(
   anchor: Anchor,
   cache: SizeCache,
-  geometry?: AnchorGeometry,
+  geometry?: ListInsets,
 ): number | null {
   const index = cache.indexOf(anchor.key)
   if (index < 0) return null
@@ -97,7 +97,7 @@ export function resolveAnchorOffset(
 export function offsetForIndex(
   index: number,
   cache: SizeCache,
-  geometry?: AnchorGeometry,
+  geometry?: ListInsets,
 ): number {
   return geometryOf(geometry).toScroll(cache.offsetOf(index))
 }

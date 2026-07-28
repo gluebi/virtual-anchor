@@ -2,10 +2,9 @@ import {
   carryFor,
   deriveAnchor,
   isSelfWrite,
-  offsetForIndex,
   resolveAnchorOffset,
 } from './anchor.js'
-import { type Band, ListGeometry, type ListInsets } from './listGeometry.js'
+import { ListGeometry, type ListInsets } from './listGeometry.js'
 import { createScrollerGate, type ScrollerGate } from './gate.js'
 import { createResizer, type Resizer } from './resizer.js'
 import { createScroller, type Scroller } from './scroller.js'
@@ -57,6 +56,16 @@ export interface Engine {
   /** Attach the scrollport. Returns its own teardown. */
   mount(): () => void
   observeItem(element: Element, key: ItemKey): () => void
+  /**
+   * A stable ref callback for an item.
+   *
+   * Memoised per key *here*, because the identity has to survive every render and the
+   * cache belongs with the element registry rather than in React. Held in the adapter
+   * it was either a ref read during render or a mutated memo — both of which the
+   * React-compiler lint rules reject, and rightly: a mutable render-stable cache is
+   * not React's to hold.
+   */
+  itemRef(key: ItemKey): (element: HTMLElement | null) => (() => void) | undefined
   scrollToKey(key: ItemKey, options?: ScrollToOptions): Promise<ScrollResult>
   scrollToIndex(index: number, options?: ScrollToOptions): Promise<ScrollResult>
   getAnchor(): Anchor | null
@@ -103,6 +112,12 @@ export function createEngine(initial: EngineOptions): Engine {
   const store = createVirtualStore()
   const tracker = new VisibilityTracker(options.visibility ?? {})
   const visibilityListeners = new Map<ItemKey, Set<() => void>>()
+  /**
+   * One ref callback per key, so React never sees a changed ref identity.
+   *
+   * Pruned to the rendered window on every publish, so it cannot outgrow the list.
+   */
+  const itemRefCallbacks = new Map<ItemKey, (element: HTMLElement | null) => (() => void) | undefined>()
 
   /** The position of record. Everything else is derived from it. */
   let anchor: Anchor | null = null
@@ -275,6 +290,15 @@ export function createEngine(initial: EngineOptions): Engine {
     // exists, which is before paint.
     for (const item of items) surface.setItemOffset(item.key, item.start)
 
+    // Keep the ref-callback cache bounded by what is rendered rather than by
+    // everything ever scrolled past.
+    if (itemRefCallbacks.size > items.length * 4) {
+      const live = new Set(items.map((item) => item.key))
+      for (const key of itemRefCallbacks.keys()) {
+        if (!live.has(key)) itemRefCallbacks.delete(key)
+      }
+    }
+
     sampleVisibility(ranges.visible, scrollOffset)
   }
 
@@ -407,6 +431,11 @@ export function createEngine(initial: EngineOptions): Engine {
     },
 
     mount() {
+      // The scroller binds its input listeners here rather than at construction, so
+      // that building an engine has no side effects and a speculatively-constructed one
+      // cannot leak them.
+      scroller.attach()
+
       const element = viewport.getElement()
       const cleanups: (() => void)[] = []
 
@@ -454,10 +483,10 @@ export function createEngine(initial: EngineOptions): Engine {
         if (doc.visibilityState === 'hidden') tracker.pauseDwell(now())
       }
       doc.addEventListener('visibilitychange', onDocumentVisibility)
-      globalThis.addEventListener?.('pagehide', onPageHide)
+      globalThis.addEventListener('pagehide', onPageHide)
       cleanups.push(() => {
         doc.removeEventListener('visibilitychange', onDocumentVisibility)
-        globalThis.removeEventListener?.('pagehide', onPageHide)
+        globalThis.removeEventListener('pagehide', onPageHide)
       })
 
       anchor = deriveAnchor(viewport.getScrollOffset(), cache, geometry())
@@ -514,6 +543,18 @@ export function createEngine(initial: EngineOptions): Engine {
 
     takeSizeSnapshot: () => cache.snapshot(),
 
+    itemRef(key) {
+      const existing = itemRefCallbacks.get(key)
+      if (existing) return existing
+
+      const callback = (element: HTMLElement | null): (() => void) | undefined => {
+        if (element === null || disposed) return undefined
+        return this.observeItem(element, key)
+      }
+      itemRefCallbacks.set(key, callback)
+      return callback
+    },
+
     focusItem: (key) => surface.focusItem(key),
 
     getVisibility: (key) => tracker.get(key),
@@ -533,6 +574,7 @@ export function createEngine(initial: EngineOptions): Engine {
 
     dispose() {
       disposed = true
+      itemRefCallbacks.clear()
       surface.dispose()
       scroller.dispose()
       resizer.dispose()

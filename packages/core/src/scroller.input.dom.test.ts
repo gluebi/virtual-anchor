@@ -59,6 +59,10 @@ const harness = (): Harness => {
     },
   })
 
+  // Listeners are bound by `attach()`, not by construction — see the scroller's own
+  // note on why building one is inert.
+  scroller.attach()
+
   return {
     scroller,
     element,
@@ -114,13 +118,13 @@ describe('scroller cancellation on user input', () => {
     }
   })
 
-  it('attaches its input listeners passively', () => {
+  it('binds no listeners until attached, then binds them passively', () => {
     const element = document.createElement('div')
     document.body.appendChild(element)
     const add = vi.spyOn(element, 'addEventListener')
 
     const cache = new SizeCache({ keys: keysFor(10) })
-    createScroller({
+    const scroller = createScroller({
       viewport: {
         getScrollOffset: () => 0,
         getViewportSize: () => 600,
@@ -137,7 +141,18 @@ describe('scroller cancellation on user input', () => {
       applyCarry: () => {},
     })
 
+    // Construction is inert. It has to be: a scroller built speculatively — by a
+    // React `useMemo`, or a `setState` updater React chose to run twice — would
+    // otherwise bind listeners with nothing holding the handle that could remove them.
+    expect(add).not.toHaveBeenCalled()
+
+    scroller.attach()
     // A non-passive wheel listener on a scroller is a scroll-performance problem.
     expect(add).toHaveBeenCalledWith('wheel', expect.any(Function), { passive: true })
+
+    // Idempotent, so a double mount cannot double-bind.
+    add.mockClear()
+    scroller.attach()
+    expect(add).not.toHaveBeenCalled()
   })
 })

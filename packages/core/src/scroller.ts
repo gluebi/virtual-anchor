@@ -1,10 +1,10 @@
 import {
-  type AnchorGeometry,
   carryFor,
   convergenceTolerance,
   isSelfWrite,
   offsetForIndex,
 } from './anchor.js'
+import { type ListInsets } from './listGeometry.js'
 import { isIOSWebKit, prefersReducedMotion, supportsScrollEnd } from './env.js'
 import type { SizeCache } from './sizeCache.js'
 import type { ScrollAlign, ScrollEndReason, ScrollResult, ScrollToOptions } from './types.js'
@@ -39,7 +39,7 @@ export interface ScrollerOptions {
   viewport: Viewport
   /** Read the live cache — it is replaced as the window grows. */
   getCache: () => SizeCache
-  getGeometry: () => AnchorGeometry
+  getGeometry: () => ListInsets
   /**
    * Apply the sub-pixel remainder the browser refused to take.
    *
@@ -86,6 +86,8 @@ export interface Scroller {
    * scrollbar — which cancels any in-flight programmatic scroll.
    */
   markSelfWrite(offset: number): void
+  /** Bind the DOM listeners. Called once, from `engine.mount()`. */
+  attach(): void
   /** Abandon any in-flight scroll, resolving it honestly as unsettled. */
   cancel(): void
   dispose(): void
@@ -179,22 +181,33 @@ export function createScroller(options: ScrollerOptions): Scroller {
     if (pending) finish(false, 'input')
   }
 
-  {
-    const element = viewport.getElement()
-    if (element) {
-      const events = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const
-      for (const type of events) {
-        element.addEventListener(type, cancelOnInput, { passive: true })
-      }
-      cleanups.push(() => {
-        for (const type of events) element.removeEventListener(type, cancelOnInput)
-      })
-    }
-  }
+  /**
+   * Attach the DOM listeners.
+   *
+   * Separate from construction on purpose. Attaching in the constructor meant merely
+   * *building* a scroller bound 4–7 listeners to the scroll element, so anything that
+   * constructed one speculatively — a React `useMemo` or a `setState` updater React
+   * chose to run twice — leaked them with no way to reach the `dispose` that would
+   * have removed them. Constructing is now inert; `attach()` is called once from
+   * `engine.mount()`.
+   */
+  let attached = false
+  const attach = (): void => {
+    if (attached || disposed) return
+    attached = true
 
-  if (isIOS) {
     const element = viewport.getElement()
-    if (element) {
+    if (!element) return
+
+    const events = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const
+    for (const type of events) {
+      element.addEventListener(type, cancelOnInput, { passive: true })
+    }
+    cleanups.push(() => {
+      for (const type of events) element.removeEventListener(type, cancelOnInput)
+    })
+
+    if (isIOS) {
       const onTouchStart = (): void => {
         iosTouching = true
       }
@@ -484,6 +497,8 @@ export function createScroller(options: ScrollerOptions): Scroller {
     },
 
     isScrolling: () => pending !== null,
+
+    attach,
 
     markSelfWrite(offset) {
       rememberIntent(offset)

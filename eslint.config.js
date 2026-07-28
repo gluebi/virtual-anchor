@@ -1,9 +1,10 @@
+import { defineConfig } from 'eslint/config'
 import js from '@eslint/js'
 import tseslint from 'typescript-eslint'
 import reactHooks from 'eslint-plugin-react-hooks'
 import globals from 'globals'
 
-export default tseslint.config(
+export default defineConfig(
   {
     ignores: [
       '**/dist/**',
@@ -28,17 +29,11 @@ export default tseslint.config(
   {
     languageOptions: {
       parserOptions: {
-        projectService: {
-          // Build and test configs are not part of any package tsconfig, so the
-          // project service has no program for them. Listing them here lets the
-          // type-aware rules run against a default program instead of erroring.
-          allowDefaultProject: [
-            '*.config.ts',
-            '*.config.js',
-            'packages/*/tsup.config.ts',
-            'spike/*.ts',
-          ],
-        },
+        // `tsconfig.tools.json` covers the configs, e2e specs and spike, so every
+        // linted file belongs to a real program with `strictNullChecks` on. The
+        // alternative — `allowDefaultProject` — gives them a program *without* it, and
+        // four type-aware rules then report themselves as unusable once per file.
+        projectService: { allowDefaultProject: ['*.js'] },
         tsconfigRootDir: import.meta.dirname,
       },
       globals: { ...globals.browser, ...globals.node },
@@ -58,6 +53,9 @@ export default tseslint.config(
       ],
 
       'no-console': ['error', { allow: ['warn', 'error'] }],
+      // `() => {}` is the idiomatic no-op — null implementations, unsubscribe stubs,
+      // test doubles. Flagging 31 of them teaches nothing.
+      '@typescript-eslint/no-empty-function': ['error', { allow: ['arrowFunctions'] }],
       // Unused args are useful documentation on interface implementations.
       '@typescript-eslint/no-unused-vars': [
         'error',

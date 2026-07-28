@@ -103,6 +103,10 @@ const harness = (options: { max?: number } = {}): Harness => {
     },
   })
 
+  // Listeners are bound by `attach()`, not by construction — see the scroller's own
+  // note on why building one is inert.
+  scroller.attach()
+
   return {
     scroller,
     element,
