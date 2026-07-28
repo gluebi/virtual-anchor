@@ -18,7 +18,10 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm lint
       - run: pnpm typecheck
-      - run: pnpm test
+      # With coverage, so the per-file floors are actually enforced. Running plain
+      # `vitest run` here left them as a local-only courtesy — which is how the
+      # integration layer and the React adapter reached 0% behind a green build.
+      - run: pnpm test:coverage
       - run: pnpm build
       - run: pnpm size
 

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen } from '@testing-library/react'
-import { StrictMode, useState } from 'react'
+import { StrictMode, useState, type ReactNode } from 'react'
 import { VirtualList, type VirtualListHandle } from './VirtualList.js'
+import type { ItemKey } from 'virtual-anchor'
 import { useVirtualList } from './useVirtualList.js'
 import { useItemVisibility } from './useItemVisibility.js'
 
@@ -581,5 +582,133 @@ describe('sizeSnapshot through the component', () => {
     expect(
       withStaleSnapshot.container.querySelector<HTMLElement>('[role="feed"]')?.style.height,
     ).toBe(baseline)
+  })
+})
+
+describe('VirtualList keyboard navigation, edges', () => {
+  const list = () => (
+    <VirtualList
+      items={comments(50)}
+      getItemKey={(c) => c.id}
+      estimateSize={() => 100}
+      label="Thread"
+      renderItem={(c) => <span>{c.text}</span>}
+    />
+  )
+
+  const send = async (key: string, options: KeyboardEventInit = {}): Promise<boolean> => {
+    const event = new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...options })
+    await act(async () => {
+      ;(document.activeElement ?? screen.getByRole('feed')).dispatchEvent(event)
+      await Promise.resolve()
+    })
+    return event.defaultPrevented
+  }
+
+  it('ignores keys it does not handle', async () => {
+    render(list())
+    const rows = document.querySelectorAll<HTMLElement>('[data-virtual-key]')
+    act(() => {
+      rows[3]?.focus()
+    })
+
+    // Not consumed: a consumer's own shortcuts, and the browser's, must keep working.
+    expect(await send('ArrowDown')).toBe(false)
+    expect(await send('a')).toBe(false)
+    // A modifier the contract does not claim, on a key it does.
+    expect(await send('PageDown', { ctrlKey: true })).toBe(false)
+    expect(await send('f', { ctrlKey: true })).toBe(false)
+  })
+
+  it('does nothing at the ends of the collection', async () => {
+    // Off the end in either direction resolves to no key at all, which is what handles
+    // both boundaries without either branch needing its own bound check.
+    render(list())
+    const rows = document.querySelectorAll<HTMLElement>('[data-virtual-key]')
+
+    act(() => {
+      rows[0]?.focus()
+    })
+    expect(await send('PageUp')).toBe(false)
+  })
+})
+
+describe('useVirtualList before a scroller exists', () => {
+  it('answers safely for every accessor', () => {
+    // The element arrives via a ref callback, so the first render has no engine at all.
+    // Every accessor has to be callable then — a consumer's effect can run before it.
+    interface Probed {
+      keyAt: ItemKey | undefined
+      focusItem: boolean
+      count: number
+      anchor: unknown
+      snapshotSizes: number
+      scrolling: boolean
+    }
+    let probed: Probed | null = null
+
+    const Probe = (): ReactNode => {
+      const list = useVirtualList({ items: comments(10), getItemKey: (c) => c.id })
+      probed = {
+        keyAt: list.keyAt(3),
+        focusItem: list.focusItem('c3'),
+        count: list.count,
+        anchor: list.getAnchor(),
+        snapshotSizes: list.takeSizeSnapshot().sizes.length,
+        scrolling: list.scrolling,
+      }
+      // Never rendered into a scroller, so `scrollRef` is never called.
+      return null
+    }
+
+    render(<Probe />)
+
+    expect(probed).toEqual({
+      keyAt: undefined,
+      focusItem: false,
+      // The collection, not the mounted set — that is known before any scroller is.
+      count: 10,
+      anchor: null,
+      snapshotSizes: 0,
+      scrolling: false,
+    })
+  })
+
+  it('sets an anchor without a scroller without throwing', () => {
+    const handle = { current: null as VirtualListHandle | null }
+    render(
+      <VirtualList
+        ref={handle}
+        items={comments(10)}
+        getItemKey={(c) => c.id}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    expect(() => {
+      handle.current?.setAnchor({ key: 'c3', offsetWithinItem: 0 })
+    }).not.toThrow()
+  })
+})
+
+describe('windowScroller through the component', () => {
+  it('builds an engine against the document rather than a scrollport', () => {
+    // The host must not scroll as well — the DOM shape and the viewport choice used to be
+    // decided independently, giving a nested scroller inside a window-scrolled list.
+    const { container } = render(
+      <VirtualList
+        items={comments(100)}
+        getItemKey={(c) => c.id}
+        estimateSize={() => 100}
+        windowScroller
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    const host = container.firstElementChild as HTMLElement | null
+    expect(host?.style.overflowY).toBe('')
+    // The engine exists immediately: the window needs no ref, so items render on the
+    // first commit rather than the second.
+    expect(container.querySelectorAll('[data-virtual-key]').length).toBeGreaterThan(0)
   })
 })

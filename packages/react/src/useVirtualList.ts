@@ -77,6 +77,18 @@ export interface UseVirtualListResult<T> {
   takeSizeSnapshot: () => SizeSnapshot
   /** Total item count, for `aria-setsize` when the window is a slice. */
   count: number
+  /**
+   * The key at a collection index, mounted or not.
+   *
+   * Keyboard navigation is defined over the collection, not over what happens to be
+   * rendered, so it needs to name an item the DOM does not currently contain. Surfaced
+   * here rather than reached for through `engine`, because the README presents the
+   * headless hook as a first-class path and the library's own keyboard behaviour has to
+   * be expressible on it.
+   */
+  keyAt: (index: number) => ItemKey | undefined
+  /** Move focus to an item, if it is mounted. Returns whether it could. */
+  focusItem: (key: ItemKey) => boolean
   engine: Engine | null
 }
 
@@ -150,36 +162,20 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     setScrollElement(element)
   }, [])
 
-  /**
-   * The snapshot as it was on the first render.
-   *
-   * Captured rather than read live, because it is an input to *building* the engine: a
-   * later value would otherwise rebuild it and throw away everything measured since.
-   * Snapshots arriving later still work — they go through `setOptions`, which fills in
-   * only what has not been measured yet.
-   */
-  const [initialSnapshot] = useState(() => sizeSnapshot)
-
   const engine = useMemo(() => {
-    if (windowScroller) {
-      // The window is available immediately, so this needs no element and no ref.
-      return createEngine({
-        viewport: createWindowViewport(window),
-        keys: [],
-        surface,
-        layoutSignature: layoutSignatureFor(document.documentElement),
-        ...(initialSnapshot === undefined ? {} : { sizeSnapshot: initialSnapshot }),
-      })
-    }
-    if (!scrollElement) return null
+    // The window is available immediately, so that mode needs no element and no ref; an
+    // element scroller has to wait for one. Beyond the viewport and the element the
+    // signature is taken from, the two are the same engine.
+    const measured = windowScroller ? document.documentElement : scrollElement
+    if (!measured) return null
+
     return createEngine({
-      viewport: createElementViewport(scrollElement),
+      viewport: windowScroller ? createWindowViewport(window) : createElementViewport(measured),
       keys: [],
       surface,
-      layoutSignature: layoutSignatureFor(scrollElement),
-      ...(initialSnapshot === undefined ? {} : { sizeSnapshot: initialSnapshot }),
+      layoutSignature: layoutSignatureFor(measured),
     })
-  }, [windowScroller, scrollElement, surface, initialSnapshot])
+  }, [windowScroller, scrollElement, surface])
 
   // Dispose whatever a previous derivation produced. Constructing an engine attaches
   // no listeners — `mount()` does that — so building one during render is inert.
@@ -262,7 +258,16 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
             return
           }
           previous = next
-          onChange()
+          // A microtask, not a direct call: options are pushed into the engine *during
+          // render* so a prepend is positioned in the same commit, and the publish that
+          // follows would otherwise call this synchronously mid-render — React's
+          // "Cannot update a component while rendering a different component", which
+          // every consumer would see in development.
+          //
+          // Nothing is delayed that anyone can observe. React re-reads the snapshot for
+          // the render already in progress, item positions are written straight to the
+          // DOM rather than through React, and a microtask still runs before paint.
+          queueMicrotask(onChange)
         })
       },
       [engine],
@@ -313,6 +318,8 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     totalSize: state.totalSize,
     renderedRange: state.renderedRange,
     visibleRange: state.visibleRange,
+    keyAt: useCallback((index: number) => engine?.keyAt(index), [engine]),
+    focusItem: useCallback((key: ItemKey) => engine?.focusItem(key) ?? false, [engine]),
     scrolling: state.scrolling,
     scrollToKey,
     scrollToIndex,

@@ -17,8 +17,14 @@ import type {
 } from './types.js'
 import type { Viewport } from './viewport.js'
 
-/** How long without a measurement counts as "the model has stopped moving". */
-const MEASUREMENT_QUIET_MS = 150
+/**
+ * How long without the model moving counts as "it has stopped moving".
+ *
+ * Both a measurement landing and items being inserted count: either moves the offsets the
+ * target is computed from, so waiting only on measurements would let the loop settle in
+ * the gap after a prepend.
+ */
+const MODEL_QUIET_MS = 150
 /** Consecutive frames at the target before declaring victory. */
 const STABLE_FRAMES = 2
 /** Soft budget: past this, stop re-aiming and report what we got. */
@@ -106,6 +112,41 @@ export interface Scroller {
   dispose(): void
 }
 
+/**
+ * One frame's worth of convergence decision.
+ *
+ * Deliberately not an inline thunk inside `step`: a closure there forces a context
+ * object for the whole scope on every call, whether or not tracing is on, which is a new
+ * allocation in the tightest loop in this library. Here the closure belongs to this
+ * function instead, and `step` allocates nothing.
+ */
+function traceStep(
+  current: PendingScroll,
+  index: number,
+  target: number,
+  actual: number,
+  uncarried: number,
+  arrived: boolean,
+  targetMoved: boolean,
+  quiet: boolean,
+  settledExternally: boolean,
+  elapsed: number,
+): void {
+  trace('scroll.step', () => ({
+    key: current.key,
+    index,
+    target,
+    actual,
+    uncarried,
+    arrived,
+    targetMoved,
+    quiet,
+    settledExternally,
+    stableFrames: current.stableFrames,
+    elapsed,
+  }))
+}
+
 interface PendingScroll {
   /**
    * The destination *item*, not its ordinal.
@@ -117,18 +158,17 @@ interface PendingScroll {
    * upward is the case this library exists for, the target is tracked by key and the
    * index re-resolved every frame.
    */
-  key: ItemKey | undefined
+  key: ItemKey
   /** Last resolved index; the fallback if the key leaves the collection entirely. */
   index: number
-  /** The index currently pinned as mounted, so the pin can follow a moving target. */
-  pinnedIndex: number
   align: ScrollAlign
   offset: number
   smooth: boolean
   startedAt: number
   lastTarget: number
   stableFrames: number
-  lastMeasurementAt: number
+  /** When the model last moved — a measurement, or items inserted or removed. */
+  lastModelChangeAt: number
   iterations: number
   resolve: (result: ScrollResult) => void
 }
@@ -282,14 +322,6 @@ export function createScroller(options: ScrollerOptions): Scroller {
   }
 
   /**
-   * The offset that puts `index` where `align` asks for, clamped to reality.
-   *
-   * Clamped against the browser's own maximum, never against the cache's
-   * estimated total — clamping in the wrong space is the whole of TanStack
-   * #1001, where the error grew with the list's distance from the top of the
-   * page.
-   */
-  /**
    * Where the pending scroll's destination is *now*.
    *
    * Re-resolved rather than remembered, so a prepend that shifts every index does not
@@ -298,12 +330,19 @@ export function createScroller(options: ScrollerOptions): Scroller {
    * loop's deadline still ends it.
    */
   const indexFor = (current: PendingScroll): number => {
-    if (current.key === undefined) return current.index
     const index = getCache().indexOf(current.key)
     if (index >= 0) current.index = index
     return current.index
   }
 
+  /**
+   * The offset that puts `index` where `align` asks for, clamped to reality.
+   *
+   * Clamped against the browser's own maximum, never against the cache's
+   * estimated total — clamping in the wrong space is the whole of TanStack
+   * #1001, where the error grew with the list's distance from the top of the
+   * page.
+   */
   const targetFor = (index: number, align: ScrollAlign, extra: number): number => {
     const cache = getCache()
     const geometry = getGeometry()
@@ -407,11 +446,13 @@ export function createScroller(options: ScrollerOptions): Scroller {
       return
     }
 
+    const previousIndex = current.index
     const index = indexFor(current)
     // Follow the destination if it moved: the pin exists to keep it mounted and measured,
-    // and a pin left on the index it used to occupy holds the wrong row instead.
-    if (current.smooth && requestRange && current.pinnedIndex !== index) {
-      current.pinnedIndex = index
+    // and a pin left on the index it used to occupy holds the wrong row instead. The
+    // index from the previous frame is the only state this needs — `scrollToIndex` has
+    // already pinned the starting one.
+    if (current.smooth && requestRange && index !== previousIndex) {
       requestRange(index, index)
     }
     const target = targetFor(index, current.align, current.offset)
@@ -431,24 +472,9 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // scrolling itself is over. The second is strictly better information when it
     // arrives, and it usually arrives sooner.
     const quiet =
-      settledExternally || now() - current.lastMeasurementAt > MEASUREMENT_QUIET_MS
+      settledExternally || now() - current.lastModelChangeAt > MODEL_QUIET_MS
 
-    if (TRACING) {
-      trace('scroll.step', () => ({
-        key: current.key,
-        index,
-        target,
-        actual,
-        uncarried,
-        arrived,
-        targetMoved,
-        quiet,
-        settledExternally,
-        stableFrames: current.stableFrames,
-        sinceMeasurement: now() - current.lastMeasurementAt,
-        elapsed,
-      }))
-    }
+    if (TRACING) traceStep(current, index, target, actual, uncarried, arrived, targetMoved, quiet, settledExternally, elapsed)
 
     if (!targetMoved && arrived && quiet) {
       current.stableFrames++
@@ -511,6 +537,13 @@ export function createScroller(options: ScrollerOptions): Scroller {
       deferredCorrection = 0
 
       const clamped = Math.min(Math.max(index, 0), cache.length - 1)
+      const key = cache.keyAt(clamped)
+      // Unreachable given the length check above; narrowing it here is what lets the
+      // pending scroll hold a plain `ItemKey` instead of branching on `undefined` every
+      // frame for a case that cannot happen.
+      if (key === undefined) {
+        return Promise.resolve({ settled: false, deviation: 0, iterations: 0, reason: 'empty' })
+      }
       const align = scrollOptions.align ?? 'start'
       const extra = scrollOptions.offset ?? 0
       const smooth = scrollOptions.behavior === 'smooth' && !prefersReducedMotion()
@@ -526,16 +559,15 @@ export function createScroller(options: ScrollerOptions): Scroller {
 
       settledExternally = false
       pending = {
-        key: cache.keyAt(clamped),
+        key,
         index: clamped,
-        pinnedIndex: -1,
         align,
         offset: extra,
         smooth,
         startedAt,
         lastTarget: Number.NaN,
         stableFrames: 0,
-        lastMeasurementAt: startedAt,
+        lastModelChangeAt: startedAt,
         iterations: 0,
         resolve,
       }
@@ -543,7 +575,6 @@ export function createScroller(options: ScrollerOptions): Scroller {
 
       if (smooth && requestRange) {
         // Mount the destination so it is measured before the animation starts.
-        pending.pinnedIndex = clamped
         requestRange(clamped, clamped)
       }
 
@@ -585,7 +616,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     notifyModelChanged() {
       if (TRACING) trace('scroll.modelChanged', () => ({ pending: pending !== null }))
       if (pending) {
-        pending.lastMeasurementAt = now()
+        pending.lastModelChangeAt = now()
         // The scrolling may have stopped, but the model just moved — so the earlier
         // `scrollend` no longer tells us anything about the target being stable.
         settledExternally = false

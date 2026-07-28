@@ -475,10 +475,10 @@ describe('SizeCache layout signature', () => {
     source.setSize(0, 350)
 
     const target = new SizeCache({ keys: keysFor(3), layoutSignature: 'w=400' })
-    expect(target.restore(source.snapshot())).toBe(false)
+    expect(target.restore(source.snapshot())).toBe(0)
 
     target.setLayoutSignature('w=800')
-    expect(target.restore(source.snapshot())).toBe(true)
+    expect(target.restore(source.snapshot())).toBeGreaterThan(0)
     expect(target.sizeOf(0)).toBe(350)
   })
 })
@@ -507,14 +507,14 @@ describe('SizeCache snapshots', () => {
     cache.setSize(0, 310)
 
     const narrower = new SizeCache({ keys: keysFor(3), layoutSignature: 'w=400|f=16|dpr=2' })
-    expect(narrower.restore(cache.snapshot())).toBe(false)
+    expect(narrower.restore(cache.snapshot())).toBe(0)
     expect(narrower.isMeasured(0)).toBe(false)
   })
 
   it('refuses a snapshot from a future format version', () => {
     const cache = new SizeCache({ keys: keysFor(3) })
     const alien = { ...cache.snapshot(), version: 2 } as unknown as SizeSnapshot
-    expect(cache.restore(alien)).toBe(false)
+    expect(cache.restore(alien)).toBe(0)
   })
 
   it('restores sizes for keys that are not in the current window yet', () => {
@@ -571,7 +571,7 @@ describe('SizeCache at thread scale', () => {
   })
 })
 
-describe('restoreMissing', () => {
+describe('restore into a partly measured cache', () => {
   const cache = (signature = 'sig') =>
     new SizeCache({ keys: ['a', 'b', 'c'], defaultEstimate: 100, layoutSignature: signature })
 
@@ -583,10 +583,10 @@ describe('restoreMissing', () => {
   })
 
   it('fills in sizes for items that have not been measured', () => {
-    // For a snapshot that arrives after construction — fetched, or read in an effect.
-    // `restore` replaces the whole map, which is right when there is nothing to lose.
+    // One method for both arrival times: at construction nothing is measured, so
+    // fill-the-gaps and replace-everything are the same thing there.
     const c = cache()
-    expect(c.restoreMissing(snapshot([['a', 250], ['c', 310]]))).toBe(2)
+    expect(c.restore(snapshot([['a', 250], ['c', 310]]))).toBe(2)
     expect(c.sizeOf(0)).toBe(250)
     expect(c.sizeOf(2)).toBe(310)
     expect(c.isMeasured(1)).toBe(false)
@@ -596,25 +596,25 @@ describe('restoreMissing', () => {
     // A measured size is ground truth; a stored one is a recollection.
     const c = cache()
     c.setSize(0, 180)
-    expect(c.restoreMissing(snapshot([['a', 9999], ['b', 220]]))).toBe(1)
+    expect(c.restore(snapshot([['a', 9999], ['b', 220]]))).toBe(1)
     expect(c.sizeOf(0)).toBe(180)
     expect(c.sizeOf(1)).toBe(220)
   })
 
   it('refuses a snapshot from a different layout', () => {
     const c = cache('narrow')
-    expect(c.restoreMissing(snapshot([['a', 250]], 'wide'))).toBe(0)
+    expect(c.restore(snapshot([['a', 250]], 'wide'))).toBe(0)
     expect(c.isMeasured(0)).toBe(false)
   })
 
   it('refuses a snapshot from a future version', () => {
     const c = cache()
-    expect(c.restoreMissing({ ...snapshot([['a', 250]]), version: 2 })).toBe(0)
+    expect(c.restore({ ...snapshot([['a', 250]]), version: 2 })).toBe(0)
   })
 
   it('keeps the total consistent, so offsets stay right', () => {
     const c = cache()
-    c.restoreMissing(snapshot([['a', 200], ['b', 300]]))
+    c.restore(snapshot([['a', 200], ['b', 300]]))
     expect(c.offsetOf(1)).toBe(200)
     expect(c.offsetOf(2)).toBe(500)
     expect(c.totalSize()).toBe(600)
@@ -660,12 +660,12 @@ describe('restore tracing', () => {
     })
   })
 
-  it('reports what a late restore applied', () => {
+  it('reports how much of a snapshot it took up', () => {
     const cache = new SizeCache({ keys: ['a', 'b'], layoutSignature: 'sig' })
     cache.setSize(0, 150)
     events.length = 0
 
-    cache.restoreMissing({
+    cache.restore({
       version: 1,
       layoutSignature: 'sig',
       estimate: 100,
@@ -675,7 +675,7 @@ describe('restore tracing', () => {
       ],
     })
 
-    expect(events[0]?.topic).toBe('snapshot.restoreMissing')
+    expect(events[0]?.topic).toBe('snapshot.restore')
     expect(events[0]?.data).toMatchObject({ accepted: true, applied: 1 })
   })
 })

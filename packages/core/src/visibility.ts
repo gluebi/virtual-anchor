@@ -266,6 +266,31 @@ export class VisibilityTracker {
   }
 
   /**
+   * When this state's next purely time-driven change is due, or `null` if it has none.
+   *
+   * The single definition of every deadline in this module: `sample` fires when the
+   * moment has arrived, `nextDeadline` takes the earliest across the active set. Written
+   * twice, the two drifted silently — a deadline that fires while `sample` declines to
+   * report re-arms at delay zero and spins.
+   */
+  #dueAt(state: ItemState): number | null {
+    const { dwellMs = 0, dwell = 'continuous', once = false, leaveDelayMs = 0 } = this.#options
+
+    // A departure held back by hysteresis: the leave fires when the delay elapses.
+    if (state.leavePendingSince !== null && leaveDelayMs > 0) {
+      return state.leavePendingSince + leaveDelayMs
+    }
+
+    // A reported item has nothing left to wait for, and under `once` an item that has
+    // been seen will never report again however long it dwells.
+    if (state.reported || state.passingSince === null) return null
+    if (once && state.hasBeenSeen) return null
+
+    const banked = dwell === 'cumulative' ? state.accumulated : 0
+    return state.passingSince + Math.max(0, dwellMs - banked)
+  }
+
+  /**
    * When the next purely time-driven change is due, or `null` if none is.
    *
    * Sampling is driven by scrolls and measurements, and both stop when the user does.
@@ -278,32 +303,18 @@ export class VisibilityTracker {
    * considered, so a settled list reports `null` and schedules nothing.
    */
   nextDeadline(now: number): number | null {
-    const {
-      dwellMs = 0,
-      dwell = 'continuous',
-      once = false,
-      leaveDelayMs = 0,
-    } = this.#options
-
-    const deadlines: number[] = []
+    // A running minimum rather than an array and a spread: this is called once per
+    // sample, so once per frame during a scroll, and allocating there is exactly the
+    // cost this module is otherwise careful to avoid.
+    let earliest = Infinity
     for (const state of this.#active) {
-      if (state.leavePendingSince !== null && leaveDelayMs > 0) {
-        deadlines.push(state.leavePendingSince + leaveDelayMs)
-        continue
-      }
-
-      // A reported item has nothing left to wait for, and under `once` a seen item will
-      // never report again however long it dwells.
-      if (state.reported || state.passingSince === null) continue
-      if (once && state.hasBeenSeen) continue
-
-      const banked = dwell === 'cumulative' ? state.accumulated : 0
-      deadlines.push(state.passingSince + Math.max(0, dwellMs - banked))
+      const due = this.#dueAt(state)
+      if (due !== null && due < earliest) earliest = due
     }
 
     // Never in the past: the caller turns this into a delay, and a negative one would
-    // spin. `#active` holds only what is on screen, so this stays a handful of entries.
-    return deadlines.length === 0 ? null : Math.max(now, Math.min(...deadlines))
+    // spin.
+    return earliest === Infinity ? null : Math.max(now, earliest)
   }
 
   /** Keys currently reported as visible. */
@@ -343,15 +354,10 @@ export class VisibilityTracker {
       this.#needsTimingReset = false
     }
 
-    const {
-      rule = { mode: 'any' },
-      dwellMs = 0,
-      dwell = 'continuous',
-      once = false,
-      quiet = false,
-      leaveDelayMs = 0,
-      rootMargin = 0,
-    } = this.#options
+    // `dwellMs`, `dwell` and `once` are deliberately absent: they decide *when* a state
+    // changes, and that decision now lives in `#dueAt` alone.
+    const { rule = { mode: 'any' }, quiet = false, leaveDelayMs = 0, rootMargin = 0 } =
+      this.#options
 
     const bandStart = input.viewportStart - rootMargin
     const bandEnd = input.viewportEnd + rootMargin
@@ -398,16 +404,13 @@ export class VisibilityTracker {
         this.#active.add(state)
         this.#timed.add(state)
 
-        if (!state.reported && !(once && state.hasBeenSeen)) {
-          const elapsed = input.now - state.passingSince
-          const banked = dwell === 'cumulative' ? state.accumulated : 0
-          if (banked + elapsed >= dwellMs) {
-            state.reported = true
-            state.hasBeenSeen = true
-            this.#reported.add(state)
-            if (!adoptSilently) {
-              events.push(event(state, 'enter', itemFraction, viewportFraction, input.now))
-            }
+        const dueAt = this.#dueAt(state)
+        if (dueAt !== null && input.now >= dueAt) {
+          state.reported = true
+          state.hasBeenSeen = true
+          this.#reported.add(state)
+          if (!adoptSilently) {
+            events.push(event(state, 'enter', itemFraction, viewportFraction, input.now))
           }
         }
         continue

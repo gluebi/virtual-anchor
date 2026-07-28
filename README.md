@@ -231,10 +231,13 @@ import { setTraceSink } from 'react-virtual-anchor'
 setTraceSink(({ topic, data }) => { console.log(topic, data) })
 ```
 
-Off unless you install a sink, and absent from production builds: the payloads are
-built inside a thunk, and every call site folds away when a bundler inlines
-`NODE_ENV=production` (`setTraceSink` then returns `false`). The demo keeps the last
-3,000 events in a ring buffer behind `?trace=1`, readable as `__trace('scroll.')`.
+Off unless you install a sink, and inert in a production build: payloads are built
+inside a thunk so nothing is computed with no sink attached, and `setTraceSink` refuses
+to install one at all once `NODE_ENV` is inlined (it returns `false`, so you can tell).
+It costs a few hundred bytes of unreachable strings rather than nothing — minifiers do
+not propagate the constant across modules, which is measured, not assumed. The demo
+keeps the last 3,000 events in a ring buffer behind `?trace=1`, readable as
+`__trace('scroll.')`.
 
 Every bug found in this library so far was found by measuring rather than by
 reasoning about the code. This is that, made repeatable.
@@ -255,10 +258,11 @@ reasoning about the code. This is that, made repeatable.
 
 ```bash
 pnpm install
-pnpm dev          # the forum-thread demo
-pnpm test         # unit + property tests
-pnpm test:e2e     # accuracy across Chromium, WebKit and Firefox
-pnpm size         # bundle budget
+pnpm dev           # the forum-thread demo
+pnpm test          # unit + property tests
+pnpm test:coverage # the same, with the per-file floors enforced (what CI runs)
+pnpm test:e2e      # accuracy across Chromium, WebKit and Firefox
+pnpm size          # bundle budget
 ```
 
 WebKit is not optional in the e2e matrix. Three separate bugs in this library

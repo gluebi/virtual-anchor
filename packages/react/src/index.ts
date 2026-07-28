@@ -8,6 +8,8 @@ export type {
   ScrollResult,
   ScrollToOptions,
   SizeSnapshot,
+  TraceEvent,
+  TraceSink,
   VirtualItem,
   VisibilityEvent,
   VisibilityOptions,
@@ -28,7 +30,6 @@ export type { VirtualListHandle, VirtualListProps } from './VirtualList.js'
 
 /**
  * Tracing, re-exported so an app that only depends on the React package can turn it on.
- * No-ops and folds away in a production build — see the core's `trace` module.
+ * Inert in a production build — see the core's `trace` module.
  */
 export { isTracing, setTraceSink, TRACING } from 'virtual-anchor'
-export type { TraceEvent, TraceSink } from 'virtual-anchor'

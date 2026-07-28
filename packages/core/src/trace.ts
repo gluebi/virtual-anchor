@@ -6,13 +6,21 @@
  * Every bug found in this library so far was found by measuring rather than reasoning,
  * and this is that measurement made permanent instead of re-improvised each time.
  *
- * Off unless a sink is installed, and gone entirely in production:
+ * Off unless a sink is installed, and inert in production:
  *
- *   - `TRACING` folds to `false` when a bundler inlines `NODE_ENV`, so every
- *     `if (TRACING)` block and this module's body are dropped as dead code;
- *   - payloads are built inside a thunk, so nothing is computed — no object literals, no
- *     string building — when no sink is listening;
+ *   - payloads are built inside a thunk, so with no sink nothing is computed — no object
+ *     literals, no string building;
+ *   - `TRACING` is `false` once a bundler inlines `NODE_ENV`, so `setTraceSink` refuses
+ *     to install anything and every guarded block is skipped;
  *   - with a sink installed the cost is one call and one object per traced event.
+ *
+ * What it does *not* do is vanish from the bundle. Measured rather than assumed: neither
+ * esbuild nor terser propagates this module-level constant into the `if (TRACING)` blocks
+ * in other modules, so the guards and the topic strings survive minification — a few
+ * hundred bytes that never execute. The alternative is repeating
+ * `process.env.NODE_ENV !== 'production'` at every call site, which is what the
+ * development warnings in `sizeCache` and `resizer` do precisely because those *are*
+ * eliminated. That trade is not worth making for a dozen call sites in the hot path.
  *
  * @example
  * ```ts
@@ -22,12 +30,16 @@
  * ```
  */
 
-declare const process: { env?: { NODE_ENV?: string } } | undefined
-
-const nodeEnv = typeof process === 'undefined' ? undefined : process.env?.NODE_ENV
-
-/** Whether tracing exists in this build at all. */
-export const TRACING: boolean = nodeEnv !== 'production'
+/**
+ * Whether tracing exists in this build at all.
+ *
+ * Written as this exact expression, not behind a `typeof process` guard: bundlers
+ * pattern-match `process.env.NODE_ENV` literally, and `process.env?.NODE_ENV` does not
+ * match — which left every topic string and call site in a minified production bundle
+ * while claiming they had been dropped. The rest of this package already relies on the
+ * same substitution for its development warnings.
+ */
+export const TRACING: boolean = process.env.NODE_ENV !== 'production'
 
 export interface TraceEvent {
   /** `performance.now()` at the moment of the call. */

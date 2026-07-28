@@ -25,59 +25,15 @@ import {
   type Comment,
   type Window as ThreadWindow,
 } from './thread.js'
+import { CONFIG, SNAPSHOT_KEY } from './config.js'
 import './styles.css'
-
-const DEFAULT_HEADER_HEIGHT = 64
-const SNAPSHOT_KEY = 'virtual-anchor-demo-sizes'
-
-/**
- * The demo is parameterised from the URL so the accuracy suite can drive the whole
- * promised matrix against one build.
- *
- * Without this the suite collapsed to a single axis: `scrollPaddingStart` was always 64,
- * `scrollMargin` always 0, the scroller was always the inner element, and the sub-pixel
- * assertion only ever ran for `align: 'start'`.
- */
-interface DemoConfig {
-  target: number
-  paddingStart: number
-  scrollMargin: number
-  windowScroller: boolean
-  /** Load the entire thread, so targets sit deep in a large window. */
-  loadAll: boolean
-  /** Report each comment at most once, rather than on every re-entry. */
-  once: boolean
-  /** Persist measured sizes to sessionStorage and restore them on the next load. */
-  snapshot: boolean
-}
-
-const readConfig = (): DemoConfig => {
-  const params = new URLSearchParams(window.location.search)
-  const number = (name: string, fallback: number): number => {
-    const raw = params.get(name)
-    const parsed = raw === null ? Number.NaN : Number.parseInt(raw, 10)
-    return Number.isFinite(parsed) ? parsed : fallback
-  }
-
-  return {
-    target: Math.min(Math.max(number('comment', 0), 0), THREAD_SIZE - 1),
-    paddingStart: number('paddingStart', DEFAULT_HEADER_HEIGHT),
-    scrollMargin: number('scrollMargin', 0),
-    windowScroller: params.get('windowScroller') === '1',
-    loadAll: params.get('loadAll') === '1',
-    once: params.get('once') === '1',
-    snapshot: params.get('snapshot') === '1',
-  }
-}
 
 export function App(): ReactNode {
   const thread = useMemo(() => buildThread(), [])
-  const config = useMemo(() => readConfig(), [])
-
-  const target = config.target
+  const target = CONFIG.target
 
   const [window_, setWindow] = useState<ThreadWindow>(() =>
-    config.loadAll ? { from: 0, to: THREAD_SIZE } : initialWindow(target),
+    CONFIG.loadAll ? { from: 0, to: THREAD_SIZE } : initialWindow(target),
   )
   const [loading, setLoading] = useState(false)
   const [events, setEvents] = useState<VisibilityEvent[]>([])
@@ -92,7 +48,7 @@ export function App(): ReactNode {
    * mounted, measured.
    */
   const [restoredSnapshot] = useState<SizeSnapshot | undefined>(() => {
-    if (!readConfig().snapshot) return undefined
+    if (!CONFIG.snapshot) return undefined
     const raw = sessionStorage.getItem(SNAPSHOT_KEY)
     if (raw === null) return undefined
     try {
@@ -119,22 +75,25 @@ export function App(): ReactNode {
    */
   const [documentOffset, setDocumentOffset] = useState(0)
   useLayoutEffect(() => {
-    if (!config.windowScroller) return
+    if (!CONFIG.windowScroller) return
     const host = hostRef.current
     if (host) setDocumentOffset(host.getBoundingClientRect().top + window.scrollY)
-  }, [config.windowScroller])
+  }, [])
 
   // Latest values for the test handle. Assigned in an effect rather than during
   // render: the handle's `loadOlder` has to read the window *after* a page has been
   // fetched, so closing over the render-time value reports a delta of zero.
   const windowRef = useRef(window_)
-  const seenRef = useRef(seen)
-  /** How many times each comment has been reported as entering. */
+  /**
+   * How many times each comment has been reported as entering.
+   *
+   * Also answers "how many distinct comments have been seen", which is why there is no
+   * second mirror of the `seen` set here.
+   */
   const entersRef = useRef(new Map<string, number>())
   useEffect(() => {
     windowRef.current = window_
-    seenRef.current = seen
-  }, [window_, seen])
+  }, [window_])
 
   const items = useMemo(
     () => thread.slice(window_.from, window_.to),
@@ -154,7 +113,7 @@ export function App(): ReactNode {
       // below it, so the target would outrun the animation and the scroll would never
       // settle. This is the protocol the library documents rather than a test hook.
       // With the whole thread loaded there is nothing to page.
-      if (config.loadAll) return
+      if (CONFIG.loadAll) return
       if (loadingRef.current) return
       if (!force && listRef.current?.isScrolling() === true) return
       const atEdge = direction === 'up' ? window_.from === 0 : window_.to >= THREAD_SIZE
@@ -167,12 +126,12 @@ export function App(): ReactNode {
       setLoading(false)
       loadingRef.current = false
     },
-    [window_.from, window_.to, config.loadAll],
+    [window_.from, window_.to],
   )
 
   /** Persist on the way out, which is when a real app would. */
   useEffect(() => {
-    if (!config.snapshot) return
+    if (!CONFIG.snapshot) return
     const persist = (): void => {
       const snapshot = listRef.current?.takeSizeSnapshot()
       if (snapshot) sessionStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot))
@@ -182,7 +141,7 @@ export function App(): ReactNode {
       persist()
       window.removeEventListener('pagehide', persist)
     }
-  }, [config.snapshot])
+  }, [])
 
   const onVisibilityChange = useCallback((batch: VisibilityEvent[]) => {
     for (const event of batch) {
@@ -240,16 +199,18 @@ export function App(): ReactNode {
       setWindowAround: (index: number) => {
         setWindow(initialWindow(index))
       },
-      loadOlder: async () => {
+      /**
+       * Prepend a page and report how many comments arrived.
+       *
+       * `force` skips the defer-while-scrolling protocol, for the test that deliberately
+       * breaks it — see `loadMore`.
+       */
+      loadOlder: async (force = false) => {
         const before = window_.from
-        await loadMore('up')
-        await sleep(FETCH_LATENCY * 2)
-        return before - windowRef.current.from
-      },
-      /** Prepend regardless of an in-flight scroll — see `loadMore`'s `force`. */
-      forceLoadOlder: async () => {
-        const before = window_.from
-        await loadMore('up', true)
+        await loadMore('up', force)
+        // A forced load is measured mid-animation, so it must not wait for the settle
+        // that the unforced path uses to let the window state land.
+        if (!force) await sleep(FETCH_LATENCY * 2)
         return before - windowRef.current.from
       },
       loadNewer: async () => {
@@ -258,11 +219,10 @@ export function App(): ReactNode {
         await sleep(FETCH_LATENCY * 2)
         return windowRef.current.to - before
       },
-      seenCount: () => seenRef.current.size,
+      seenCount: () => entersRef.current.size,
       /** The library's own idea of where the view is pinned. */
       getAnchor: () => listRef.current?.getAnchor() ?? null,
       takeSizeSnapshot: () => listRef.current?.takeSizeSnapshot() ?? null,
-      restoredSnapshotSize: () => restoredSnapshot?.sizes.length ?? 0,
       enterCount: (key: string) => entersRef.current.get(key) ?? 0,
       maxEnterCount: () => Math.max(0, ...entersRef.current.values()),
     }
@@ -292,7 +252,7 @@ export function App(): ReactNode {
    * like a library limitation when it was only a missing listener in the demo.
    */
   useEffect(() => {
-    if (!config.windowScroller) return
+    if (!CONFIG.windowScroller) return
     const onWindowScroll = (): void => {
       pageAtEdges(window.scrollY, window.innerHeight, document.documentElement.scrollHeight)
     }
@@ -300,7 +260,7 @@ export function App(): ReactNode {
     return () => {
       window.removeEventListener('scroll', onWindowScroll)
     }
-  }, [config.windowScroller, pageAtEdges])
+  }, [pageAtEdges])
 
   /**
    * In-app search, which is the honest mitigation for find-in-page.
@@ -339,7 +299,7 @@ export function App(): ReactNode {
 
   return (
     <div className="app">
-      <header className="header" style={{ height: config.paddingStart }}>
+      <header className="header" style={{ height: CONFIG.paddingStart }}>
         <strong>react-virtual-anchor</strong>
         <span className="muted">
           {THREAD_SIZE.toLocaleString()} comments · loaded {window_.from}–{window_.to}
@@ -367,22 +327,22 @@ export function App(): ReactNode {
           getItemKey={(comment) => comment.id}
           estimateSize={(comment) => 90 + comment.body.length * 70}
           gap={12}
-          scrollPaddingStart={config.paddingStart}
+          scrollPaddingStart={CONFIG.paddingStart}
           {...(restoredSnapshot === undefined ? {} : { sizeSnapshot: restoredSnapshot })}
-          scrollMargin={config.scrollMargin + documentOffset}
+          scrollMargin={CONFIG.scrollMargin + documentOffset}
           // Real content above the list inside the same scroller, which is the layout
           // `scrollMargin` exists for. Its height has to match the option exactly.
           before={
-            config.scrollMargin > 0 ? (
+            CONFIG.scrollMargin > 0 ? (
               <div
                 data-testid="above-list"
-                style={{ height: config.scrollMargin, padding: 16, boxSizing: 'border-box' }}
+                style={{ height: CONFIG.scrollMargin, padding: 16, boxSizing: 'border-box' }}
               >
                 Thread description, rendered above the list inside the same scroller.
               </div>
             ) : undefined
           }
-          windowScroller={config.windowScroller}
+          windowScroller={CONFIG.windowScroller}
           totalCount={THREAD_SIZE}
           firstItemPosition={window_.from + 1}
           loading={loading}
@@ -394,7 +354,7 @@ export function App(): ReactNode {
             rule: { mode: 'fraction', of: 'item', fraction: 0.5 },
             dwellMs: 600,
             dwell: 'continuous',
-            once: config.once,
+            once: CONFIG.once,
           }}
           onVisibilityChange={onVisibilityChange}
           onScroll={onScroll}

@@ -84,16 +84,6 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
 }
 
 /**
- * The scrollport.
- *
- * Deliberately minimal: sizing is the consumer's business, and anything opinion-
- * ated here fights their layout. `contain: size` and `flex: none` in particular
- * must NOT go on this element — they belong on the inner container, which has an
- * explicit height. Putting them here collapses the scroller to zero height inside
- * a flex parent, and since inline styles beat a stylesheet the consumer cannot
- * override it.
- */
-/**
  * When the *page* scrolls, this element must not scroll as well.
  *
  * The component used to apply the scrollport styles unconditionally while passing
@@ -105,13 +95,19 @@ const WINDOW_HOST_STYLE: CSSProperties = {
   position: 'relative',
 }
 
+/**
+ * The scrollport.
+ *
+ * Deliberately minimal: sizing is the consumer's business, and anything opinion-
+ * ated here fights their layout. `contain: size` and `flex: none` in particular
+ * must NOT go on this element — they belong on the inner container, which has an
+ * explicit height. Putting them here collapses the scroller to zero height inside
+ * a flex parent, and since inline styles beat a stylesheet the consumer cannot
+ * override it.
+ */
 const SCROLLER_STYLE: CSSProperties = {
   position: 'relative',
   overflowY: 'auto',
-  // The browser's own scroll anchoring would correct at the same time we do, and
-  // the two fight. Blazor's Virtualize disables it for the same reason, noting it
-  // can otherwise reach an infinite rendering loop.
-  overflowAnchor: 'none',
   // A stray `scroll-behavior: smooth` inherited from the page would animate every
   // corrective write and fight the convergence loop.
   scrollBehavior: 'auto',
@@ -129,6 +125,14 @@ const CONTAINER_STYLE: CSSProperties = {
   position: 'relative',
   width: '100%',
   contain: 'size style',
+  // The browser's own scroll anchoring would correct at the same time we do, and the two
+  // fight. Blazor's Virtualize disables it for the same reason, noting it can otherwise
+  // reach an infinite rendering loop.
+  //
+  // Here rather than on the scrollport, because a window-scrolled list has no scrollport
+  // of ours to put it on — leaving native anchoring live in exactly the mode where the
+  // document is the thing being anchored. This element holds the content either way.
+  overflowAnchor: 'none',
 }
 
 const ITEM_STYLE: CSSProperties = {
@@ -195,33 +199,38 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
   // every element ever mounted, because its cleanup branch was unreachable under
   // React 19's ref semantics — and recovered the key from a `data-` attribute that
   // React knew at render time.
-  const focusKey = useCallback(
-    (key: ItemKey) => list.engine?.focusItem(key) ?? false,
-    [list.engine],
+  const focusKey = list.focusItem
+
+  /**
+   * Scroll to an item and give it focus once the motion has genuinely stopped.
+   *
+   * Waiting for the settle promise is what keeps focus from landing mid-flight, and
+   * moving it at all is what makes a permalink usable with a screen reader. Shared by
+   * the imperative handle and the keyboard contract so the two cannot drift — they had,
+   * with only one of them honouring `focusOnScrollEnd`.
+   */
+  const scrollAndFocus = useCallback(
+    async (key: ItemKey, options: ScrollToOptions, moveFocus: boolean) => {
+      const result = await list.scrollToKey(key, options)
+      if (moveFocus) focusKey(key)
+      return result
+    },
+    [list, focusKey],
   )
 
   useImperativeHandle(
     ref,
     () => ({
-      scrollToKey: async (key, options) => {
-        const result = await list.scrollToKey(key, options)
-        // Deep-linking is a navigation, so the target takes focus once motion has
-        // genuinely stopped — which is what makes a permalink usable with a
-        // screen reader at all. Waiting for the settle promise means focus never
-        // lands mid-flight.
-        if (focusOnScrollEnd) focusKey(key)
-        return result
-      },
+      scrollToKey: (key, options) => scrollAndFocus(key, options ?? {}, focusOnScrollEnd),
       isScrolling: () => list.scrolling,
       scrollToIndex: list.scrollToIndex,
       getAnchor: list.getAnchor,
       setAnchor: list.setAnchor,
       takeSizeSnapshot: list.takeSizeSnapshot,
     }),
-    [list, focusOnScrollEnd, focusKey],
+    [list, focusOnScrollEnd, scrollAndFocus],
   )
 
-  /** The feed pattern's keyboard contract: page keys move between articles. */
   /**
    * Move focus to an item by its position in the collection.
    *
@@ -236,41 +245,44 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
    */
   const moveFocusTo = useCallback(
     (index: number, align: 'start' | 'end') => {
-      const key = list.engine?.keyAt(index)
+      const key = list.keyAt(index)
       if (key === undefined) return false
-      void list.scrollToKey(key, { align }).then(() => {
-        focusKey(key)
-      })
+      // Always moves focus, whatever `focusOnScrollEnd` says: that option is about
+      // whether *navigating* claims focus, and a keyboard user pressing PageDown has
+      // already claimed it. Moving the view without it is what left them behind.
+      void scrollAndFocus(key, { align }, true)
       return true
     },
-    [list, focusKey],
+    [list, scrollAndFocus],
   )
 
+  /**
+   * The feed pattern's keyboard contract: page keys move between articles.
+   *
+   * All four keys are the same action — move focus to a collection index — so they differ
+   * only in which index and which alignment. `moveFocusTo` returning false when the index
+   * is outside the collection is what handles both ends, so no branch needs its own bound
+   * check.
+   */
   const onKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
-      if (list.count === 0) return
-
       const focused =
         focusedKey === null ? undefined : list.items.find((item) => item.key === focusedKey)
       // With nothing focused, paging starts from what the reader is looking at.
       const from = focused?.index ?? list.visibleRange[0]
 
-      if (event.key === 'PageDown' && !event.ctrlKey) {
-        if (moveFocusTo(from + 1, 'start')) event.preventDefault()
-        return
-      }
-
-      if (event.key === 'PageUp' && !event.ctrlKey) {
-        if (from > 0 && moveFocusTo(from - 1, 'start')) event.preventDefault()
-        return
-      }
-
-      if (event.ctrlKey && (event.key === 'Home' || event.key === 'End')) {
-        const home = event.key === 'Home'
-        if (moveFocusTo(home ? 0 : list.count - 1, home ? 'start' : 'end')) {
-          event.preventDefault()
+      const target = ((): readonly [number, 'start' | 'end'] | undefined => {
+        if (event.ctrlKey) {
+          if (event.key === 'Home') return [0, 'start']
+          if (event.key === 'End') return [list.count - 1, 'end']
+          return undefined
         }
-      }
+        if (event.key === 'PageDown') return [from + 1, 'start']
+        if (event.key === 'PageUp') return [from - 1, 'start']
+        return undefined
+      })()
+
+      if (target && moveFocusTo(target[0], target[1])) event.preventDefault()
     },
     [list, focusedKey, moveFocusTo],
   )
@@ -285,7 +297,6 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
       className={className}
       style={{ ...(windowScroller ? WINDOW_HOST_STYLE : SCROLLER_STYLE), ...style }}
       onScroll={onScroll}
-      onKeyDown={onKeyDown}
       onFocus={(event) => {
         // `closest`, not the target's own dataset: only the row carries the key, so
         // focus landing on a link or button inside a row would otherwise fail to pin
@@ -311,6 +322,11 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
         role="feed"
         aria-busy={loading}
         aria-label={label}
+        // On the feed rather than the scrollport: with a `before` slot the scrollport also
+        // contains whatever the consumer put there, and a filter input or a nested
+        // scrollable region inside it would have its page keys swallowed. Events from the
+        // articles still bubble to here.
+        onKeyDown={onKeyDown}
       >
         {list.items.map((rendered) => (
           <div

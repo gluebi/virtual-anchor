@@ -157,8 +157,8 @@ export function createEngine(initial: EngineOptions): Engine {
   let pinnedRange: [number, number] | null = null
   let gate: ScrollerGate | null = null
   let disposed = false
-  /** The snapshot already applied, so re-rendering does not re-apply it every frame. */
-  let appliedSnapshot = options.sizeSnapshot
+  /** Whether a size snapshot has been taken up; see `setOptions`. */
+  let snapshotRestored = options.sizeSnapshot !== undefined
 
   const viewport = options.viewport
   /**
@@ -216,9 +216,9 @@ export function createEngine(initial: EngineOptions): Engine {
 
   const itemsFor = (range: readonly [number, number]): VirtualItem[] => {
     const items: VirtualItem[] = []
-    for (let index = range[0]; index <= range[1]; index++) {
+    const push = (index: number): void => {
       const key = cache.keyAt(index)
-      if (key === undefined) continue
+      if (key === undefined) return
       items.push({
         key,
         index,
@@ -227,6 +227,14 @@ export function createEngine(initial: EngineOptions): Engine {
         measured: cache.isMeasured(index),
       })
     }
+
+    for (let index = range[0]; index <= range[1]; index++) push(index)
+
+    // The overwhelmingly common frame has nothing pinned, and it should allocate nothing
+    // extra and sort nothing: the loop above already produced ascending order.
+    const keepMounted = options.keepMounted
+    const nothingPinned = (keepMounted === undefined || keepMounted.length === 0) && pinnedRange === null
+    if (nothingPinned) return items
 
     // Everything pinned outside the range is mounted as its own segment rather than by
     // stretching the range to reach it:
@@ -236,27 +244,15 @@ export function createEngine(initial: EngineOptions): Engine {
     //  - the destination of a programmatic scroll, which has to exist to be measured
     //    and aimed at while the viewport is still far away from it.
     const pinned = new Set<number>()
-    for (const key of options.keepMounted ?? []) {
-      const index = cache.indexOf(key)
-      if (index >= 0) pinned.add(index)
+    const pinIfOutside = (index: number): void => {
+      if (index < range[0] || index > range[1]) pinned.add(index)
     }
+    for (const key of keepMounted ?? []) pinIfOutside(cache.indexOf(key))
     if (pinnedRange) {
-      for (let index = pinnedRange[0]; index <= pinnedRange[1]; index++) pinned.add(index)
+      for (let index = pinnedRange[0]; index <= pinnedRange[1]; index++) pinIfOutside(index)
     }
 
-    for (const index of pinned) {
-      if (index >= range[0] && index <= range[1]) continue
-      const key = cache.keyAt(index)
-      if (key === undefined) continue
-      items.push({
-        key,
-        index,
-        start: cache.offsetOf(index),
-        size: cache.sizeOf(index),
-        measured: cache.isMeasured(index),
-      })
-    }
-
+    for (const index of pinned) push(index)
     return items.sort((a, b) => a.index - b.index)
   }
 
@@ -348,6 +344,8 @@ export function createEngine(initial: EngineOptions): Engine {
   }
 
   let visibilityTimer: ReturnType<typeof setTimeout> | null = null
+  /** The deadline the live timer was armed for, so an unchanged one is left alone. */
+  let armedFor: number | null = null
 
   /**
    * Schedule the one sample that time alone would otherwise never produce.
@@ -358,28 +356,50 @@ export function createEngine(initial: EngineOptions): Engine {
    * `dwellMs: 600`, scrolling to a comment and stopping reported nothing at all. The
    * tracker knows when its next state change is due; this puts a timer on it and
    * re-samples, which is enough because a sample that changes nothing arms nothing.
+   *
+   * Called after every sample, so once per frame while scrolling. A dwell deadline is
+   * `passingSince + dwellMs`, which holds still while the item keeps passing — so it is
+   * usually the deadline already armed, and removing and reinserting the same timer sixty
+   * times a second is pure waste.
    */
   const armVisibilityTimer = (): void => {
+    const stamp = now()
+    const due = disposed ? null : tracker.nextDeadline(stamp)
+    if (due !== null && due === armedFor && visibilityTimer !== null) return
+
     if (visibilityTimer !== null) {
       clearTimeout(visibilityTimer)
       visibilityTimer = null
+      armedFor = null
     }
+    if (due === null) return
 
-    const due = tracker.nextDeadline(now())
-    if (TRACING) trace('visibility.deadline', () => ({ due, in: due === null ? null : due - now() }))
-    if (due === null || disposed) return
-
+    if (TRACING) trace('visibility.deadline', () => ({ due, in: due - stamp }))
+    armedFor = due
     visibilityTimer = setTimeout(
       () => {
         visibilityTimer = null
+        armedFor = null
         const scrollOffset = viewport.getScrollOffset()
         sampleVisibility(computeRanges(scrollOffset).visible, scrollOffset)
       },
-      Math.max(0, due - now()),
+      Math.max(0, due - stamp),
     )
   }
 
-  const sampleVisibility = (
+  /**
+   * Sample, then re-arm — always, whichever way the sampling exited.
+   *
+   * The arming used to sit at each of the three early returns below, which made "every
+   * sample re-arms" an invariant maintained by hand: a fourth early return would silently
+   * stop the clock and bring back the dwell that never completes.
+   */
+  const sampleVisibility = (visible: readonly [number, number], scrollOffset: number): void => {
+    sampleVisibilityOnce(visible, scrollOffset)
+    armVisibilityTimer()
+  }
+
+  const sampleVisibilityOnce = (
     visible: readonly [number, number],
     scrollOffset: number,
   ): void => {
@@ -389,7 +409,6 @@ export function createEngine(initial: EngineOptions): Engine {
     // tab, a scroller scrolled off the page.
     if (gate && !gate.isOpen()) {
       notifyVisibility(tracker.flushLeaves(now()))
-      armVisibilityTimer()
       return
     }
 
@@ -409,7 +428,6 @@ export function createEngine(initial: EngineOptions): Engine {
 
     if (band === null) {
       notifyVisibility(tracker.flushLeaves(now()))
-      armVisibilityTimer()
       return
     }
     const { start, end } = band
@@ -441,7 +459,6 @@ export function createEngine(initial: EngineOptions): Engine {
         suppressed: scroller.isScrolling(),
       }),
     )
-    armVisibilityTimer()
   }
 
   const resizer: Resizer = createResizer({
@@ -452,15 +469,14 @@ export function createEngine(initial: EngineOptions): Engine {
         if (index < 0) continue
         if (cache.setSize(index, size)) changed = true
       }
+      if (!changed) return
       if (TRACING) {
         trace('measure.batch', () => ({
           count: batch.length,
-          changed,
           totalSize: cache.totalSize(),
           scrollOffset: viewport.getScrollOffset(),
         }))
       }
-      if (!changed) return
 
       cache.refreshEstimate(viewport.getViewportSize())
       // Re-derive the scroll offset from the anchor: the item that was under the
@@ -470,12 +486,6 @@ export function createEngine(initial: EngineOptions): Engine {
     },
   })
 
-  /**
-   * A scrollport resize.
-   *
-   * Reached from `viewport.observeSize`, which is the only thing that knows what to
-   * watch for the scroller kind in play.
-   */
   /**
    * A scrollport resize.
    *
@@ -498,10 +508,16 @@ export function createEngine(initial: EngineOptions): Engine {
     // The first observation merely learns the signature; there is no previous layout for
     // it to differ from, and clearing would throw away measurements taken moments
     // earlier during mount.
-    if (changed && signatureKnown) cache.clearAll()
+    const invalidated = changed && signatureKnown
+    if (invalidated) cache.clearAll()
     signatureKnown = true
 
     publish(true)
+    // Discarding every measurement moves every offset below the first item, so an
+    // in-flight scroll has to re-aim and drop any `scrollend` it had banked — the same
+    // reason a prepend notifies. Only the two paths that *change* the model notify;
+    // a height-only resize deliberately changes nothing.
+    if (invalidated) scroller.notifyModelChanged()
   }
 
   const scroller: Scroller = createScroller({
@@ -535,26 +551,32 @@ export function createEngine(initial: EngineOptions): Engine {
     cache,
 
     setOptions(next) {
+      // A snapshot passed after construction used to be accepted and then ignored, so
+      // `sizeSnapshot` did nothing whatsoever through the React adapter — which only ever
+      // forwards options this way.
+      //
+      // Applied at most once, and compared *before* the merge below so the object the
+      // constructor already consumed is not re-applied on the first render. Once is
+      // enough by definition: a snapshot restores what was measured before this list
+      // existed, and by the second one the list has its own measurements, which always
+      // win. Guarding on reference identity alone would re-walk an inline literal — a
+      // 12,000-entry snapshot, on every render.
+      const snapshot = next.sizeSnapshot
+      const isNewSnapshot = snapshot !== undefined && snapshot !== options.sizeSnapshot
+
       options = { ...options, ...next }
       if (next.visibility) tracker.setOptions(next.visibility)
-      // A snapshot passed after construction used to be accepted and then ignored, so
-      // `sizeSnapshot` did nothing whatsoever through the React adapter — which only
-      // ever forwards options this way. Applied once per distinct snapshot, and only to
-      // items with no measurement of their own.
-      if (next.sizeSnapshot !== undefined && next.sizeSnapshot !== appliedSnapshot) {
-        appliedSnapshot = next.sizeSnapshot
-        if (cache.restoreMissing(next.sizeSnapshot) > 0) publish(true)
+
+      if (isNewSnapshot && !snapshotRestored) {
+        snapshotRestored = true
+        if (cache.restore(snapshot) > 0) publish(true)
       }
       if (next.gap !== undefined) cache.setGap(next.gap)
       if (next.layoutSignature !== undefined) cache.setLayoutSignature(next.layoutSignature)
 
       const keysChanged = next.keys !== undefined && cache.setKeys(next.keys)
-      if (TRACING && next.keys !== undefined) {
-        trace('model.keys', () => ({
-          count: cache.length,
-          changed: keysChanged,
-          firstKey: cache.keyAt(0),
-        }))
+      if (TRACING && keysChanged) {
+        trace('model.keys', () => ({ count: cache.length, firstKey: cache.keyAt(0) }))
       }
       if (keysChanged) {
         // A prepend moves the target of an in-flight scroll as surely as a measurement
@@ -779,6 +801,7 @@ export function createEngine(initial: EngineOptions): Engine {
         clearTimeout(visibilityTimer)
         visibilityTimer = null
       }
+      armedFor = null
       itemRefCallbacks.clear()
       surface.dispose()
       scroller.dispose()

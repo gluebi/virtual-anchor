@@ -1,4 +1,6 @@
 import { expect, test, type Page } from '@playwright/test'
+import { open, topOfKey } from './helpers.js'
+import type { Anchor } from '../packages/core/src/index.js'
 
 /**
  * The cases the plan promised and the suite did not cover.
@@ -8,92 +10,6 @@ import { expect, test, type Page } from '@playwright/test'
  * the top fold does not jump it, that a prepend arriving mid-animation does not break a
  * smooth scroll's landing, and that `once: true` reports an item exactly once.
  */
-
-interface Anchor {
-  key: string
-  offsetWithinItem: number
-}
-
-interface Snapshot {
-  version: number
-  layoutSignature: string
-  sizes: [string, number][]
-}
-
-interface ScrollApi {
-  getAnchor: () => Anchor | null
-  takeSizeSnapshot: () => Snapshot | null
-  restoredSnapshotSize: () => number
-  scrollToKey: (
-    key: string,
-    options?: unknown,
-  ) => Promise<{ settled: boolean; deviation: number; reason: string }>
-  loadOlder: () => Promise<number>
-  forceLoadOlder: () => Promise<number>
-  maxEnterCount: () => number
-  enterCount: (key: string) => number
-}
-
-/**
- * Declared rather than wrapped in a helper: `page.evaluate` runs its callback in the
- * page, so anything it calls has to exist there. A helper defined in this file is a Node
- * binding and is simply not in scope inside the browser.
- */
-interface TraceEvent {
-  at: number
-  topic: string
-  /**
-   * Declared for the fields this suite reads, so they are properties rather than index
-   * lookups — the payload is topic-specific, and naming what is asserted on documents
-   * which topic is being read.
-   */
-  data: { accepted?: boolean; count?: number } & Record<string, unknown>
-}
-
-declare global {
-  interface Window {
-    __list: ScrollApi
-    __trace: (topic?: string) => TraceEvent[]
-  }
-}
-
-const open = async (page: Page, query = ''): Promise<void> => {
-  await page.goto(`/?${query}`)
-  await page.waitForFunction(() => '__list' in window)
-  await page.locator('[role="article"]').first().waitFor()
-  await expect(page.locator('.panel .small').first()).toContainText('settled=', {
-    timeout: 15_000,
-  })
-}
-
-/** Where a given comment sits relative to the scrollport, in CSS pixels. */
-const topOf = (page: Page, index: number): Promise<number> =>
-  page.evaluate((i) => {
-    const item = document
-      .querySelector(`[data-comment-index="${String(i)}"]`)
-      ?.closest('[role="article"]')
-    if (!item) return Number.NaN
-    const scroller = document.querySelector('.scroller')
-    if (!scroller) return Number.NaN
-    return item.getBoundingClientRect().top - scroller.getBoundingClientRect().top
-  }, index)
-
-/**
- * Where a row sits relative to the scrollport, addressed by key.
- *
- * By key rather than by index, because the invariant these tests check is about the
- * *anchored* item, and which item that is has to come from the library rather than be
- * guessed from geometry. Guessing it read the row whose top sat exactly on the fold,
- * while the anchor was the row the fold cut *through* — so the assertion held on
- * Chromium and failed on WebKit for reasons that had nothing to do with either.
- */
-const topOfKey = (page: Page, key: string): Promise<number> =>
-  page.evaluate((k) => {
-    const row = document.querySelector(`[data-virtual-key="${k}"]`)
-    const scroller = document.querySelector('.scroller')
-    if (!row || !scroller) return Number.NaN
-    return row.getBoundingClientRect().top - scroller.getBoundingClientRect().top
-  }, key)
 
 /** The item the library has pinned the view to. */
 const anchorOf = (page: Page): Promise<Anchor | null> =>
@@ -142,7 +58,7 @@ test.describe('late measurement changes do not drift the view', () => {
     // exactly the reported case: part of it is above the viewport top.
     const index = indexOfKey(key)
     const before = await topOfKey(page, key)
-    const nextBefore = await topOf(page, index + 1)
+    const nextBefore = await topOfKey(page, `comment-${String(index + 1)}`)
 
     await page.addStyleTag({
       content: `[data-comment-index="${String(index)}"] { padding-bottom: 220px; }`,
@@ -150,7 +66,7 @@ test.describe('late measurement changes do not drift the view', () => {
     await page.waitForTimeout(400)
 
     const after = await topOfKey(page, key)
-    const nextAfter = await topOf(page, index + 1)
+    const nextAfter = await topOfKey(page, `comment-${String(index + 1)}`)
 
     expect(
       Math.abs(after - before),
@@ -180,14 +96,14 @@ test.describe('a prepend during an in-flight smooth scroll', () => {
       // demo defers loads during a programmatic scroll by design, so this deliberately
       // goes around that — the landing has to be right either way.
       await new Promise((resolve) => setTimeout(resolve, 100))
-      await list.forceLoadOlder()
-      await list.forceLoadOlder()
+      await list.loadOlder(true)
+      await list.loadOlder(true)
       return scroll
     })
 
     expect(result.settled, `reason=${result.reason}`).toBe(true)
 
-    const top = await topOf(page, 5988)
+    const top = await topOfKey(page, 'comment-5988')
     // 64px is the sticky header, which `scrollPaddingStart` accounts for.
     expect(Math.abs(top - 64), `landed at ${String(top)}`).toBeLessThan(0.5)
   })
@@ -239,16 +155,17 @@ test.describe('once: true', () => {
 })
 
 test.describe('a restored size snapshot', () => {
-  test('survives the scrollport\'s first ResizeObserver delivery', async ({ page }) => {
+  test("survives the scrollport's first ResizeObserver delivery", async ({ page }) => {
     // Two defects met here. The scrollport's ResizeObserver fires a synthetic first
     // observation one frame after mount, which used to clear the whole cache — so every
-    // restored size for an item not currently mounted was destroyed, and `lastSizes`
-    // meant it could never be re-reported. And the React adapter forwarded
-    // `sizeSnapshot` only through `setOptions`, which had no handler for it, so the
-    // feature did nothing at all through the component.
-    await page.goto('/?comment=4000&snapshot=1&trace=1')
-    await page.waitForFunction(() => '__list' in window)
-    await page.locator('[role="article"]').first().waitFor()
+    // restored size for an item not currently mounted was destroyed, and `lastSizes` meant
+    // it could never be re-reported. And the React adapter forwarded `sizeSnapshot` only
+    // through `setOptions`, which had no handler for it, so the feature did nothing at all
+    // through the component.
+    //
+    // Asserted on what the list *has*, not on a trace event: tracing is compiled out of a
+    // production build, and the demo under test is one.
+    await open(page, 'comment=4000&snapshot=1')
 
     // Measure a decent number of comments, then persist as the demo does on unload.
     const persisted = await page.evaluate(async () => {
@@ -269,19 +186,16 @@ test.describe('a restored size snapshot', () => {
     expect(persisted).toBeGreaterThan(20)
 
     // Same tab, so sessionStorage carries over — as a reload would.
-    await page.goto('/?comment=4000&snapshot=1&trace=1')
-    await page.waitForFunction(() => '__list' in window)
-    await page.locator('[role="article"]').first().waitFor()
+    await open(page, 'comment=4000&snapshot=1')
 
-    const accepted = await page.evaluate(() =>
-      window.__trace('snapshot.restore').map((event) => ({
-        accepted: event.data.accepted === true,
-        count: event.data.count ?? -1,
-      })),
+    // Immediately: every persisted size is present without having been re-measured, which
+    // it cannot have been, since most of those comments are nowhere near the viewport.
+    const immediately = await page.evaluate(
+      () => window.__list.takeSizeSnapshot()?.sizes.length ?? 0,
     )
-    expect(accepted, 'the snapshot never reached the cache').toHaveLength(1)
-    expect(accepted[0]?.accepted).toBe(true)
-    expect(accepted[0]?.count).toBe(persisted)
+    expect(immediately, 'the snapshot never reached the cache').toBeGreaterThanOrEqual(
+      persisted,
+    )
 
     // A full second, well past the first ResizeObserver delivery.
     await page.waitForTimeout(1000)
@@ -291,4 +205,29 @@ test.describe('a restored size snapshot', () => {
     expect(stillHeld).toBeGreaterThanOrEqual(persisted)
   })
 
+  test('ignores one measured under a different layout', async ({ page }) => {
+    // A height measured at a different width is wrong rather than stale, so the whole
+    // snapshot is refused — restoring it would put the list confidently in the wrong place.
+    await open(page, 'comment=4000&snapshot=1')
+
+    await page.evaluate(() => {
+      const snapshot = window.__list.takeSizeSnapshot()
+      if (!snapshot) return
+      sessionStorage.setItem(
+        'virtual-anchor-demo-sizes',
+        JSON.stringify({
+          ...snapshot,
+          layoutSignature: 'measured-at-some-other-width',
+          sizes: Array.from({ length: 40 }, (_, i) => [`comment-${String(3980 + i)}`, 999]),
+        }),
+      )
+    })
+
+    await open(page, 'comment=4000&snapshot=1')
+    const measured = await page.evaluate(
+      () => window.__list.takeSizeSnapshot()?.sizes.length ?? 0,
+    )
+    // Only what this page measured for itself, nowhere near the 40 offered.
+    expect(measured).toBeLessThan(40)
+  })
 })

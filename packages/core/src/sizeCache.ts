@@ -389,49 +389,34 @@ export class SizeCache {
    * different container width or font size is wrong rather than merely stale,
    * and restoring it would put the list confidently in the wrong place.
    *
-   * @returns whether the snapshot was accepted.
-   */
-  restore(snapshot: StoredSizeSnapshot): boolean {
-    const accepted =
-      snapshot.version === 1 && snapshot.layoutSignature === this.#layoutSignature
-    if (TRACING) {
-      trace('snapshot.restore', () => ({
-        accepted,
-        count: snapshot.sizes.length,
-        version: snapshot.version,
-        snapshotSignature: snapshot.layoutSignature,
-        cacheSignature: this.#layoutSignature,
-      }))
-    }
-    if (!accepted) return false
-
-    this.#measured = new Map(snapshot.sizes)
-    this.#measuredTotal = 0
-    for (const size of this.#measured.values()) this.#measuredTotal += size
-    this.#estimate = snapshot.estimate
-    this.#lastEstimateAt = this.#measured.size
-    this.#rebuild()
-    return true
-  }
-
-  /**
-   * Fill in sizes for items that have not been measured yet, leaving the rest alone.
+   * Fills in only items that have no measurement of their own. At construction that is
+   * all of them, which is why one method serves both the constructor and a snapshot that
+   * arrives later — fetched, or read from storage in an effect. Never overwriting a live
+   * measurement is the whole difference: a measured size is ground truth, a stored one a
+   * recollection.
    *
-   * For a snapshot that arrives after construction — fetched, or read from storage in an
-   * effect. `restore` replaces the whole map, which is right when there is nothing to
-   * lose but wrong here: a measured size is ground truth and a stored one is a
-   * recollection, so the live value has to win.
+   * The stored estimate is adopted only when nothing has been measured yet, for the same
+   * reason — once real sizes exist, `refreshEstimate` knows better than the snapshot.
    *
    * @returns how many sizes were applied; 0 if the snapshot was refused.
    */
-  restoreMissing(snapshot: StoredSizeSnapshot): number {
+  restore(snapshot: StoredSizeSnapshot): number {
     if (snapshot.version !== 1 || snapshot.layoutSignature !== this.#layoutSignature) {
+      // Both signatures, because "refused" without them is the one case where you need to
+      // know why — and it is what the e2e suite reads to prove a restore happened at all.
       if (TRACING) {
-        trace('snapshot.restoreMissing', () => ({ accepted: false, applied: 0 }))
+        trace('snapshot.restore', () => ({
+          accepted: false,
+          count: snapshot.sizes.length,
+          version: snapshot.version,
+          snapshotSignature: snapshot.layoutSignature,
+          cacheSignature: this.#layoutSignature,
+        }))
       }
       return 0
     }
 
+    const wasEmpty = this.#measured.size === 0
     let applied = 0
     for (const [key, size] of snapshot.sizes) {
       if (this.#measured.has(key)) continue
@@ -439,8 +424,21 @@ export class SizeCache {
       this.#measuredTotal += size
       applied++
     }
+
     if (TRACING) {
-      trace('snapshot.restoreMissing', () => ({ accepted: true, applied }))
+      trace('snapshot.restore', () => ({
+        accepted: true,
+        count: snapshot.sizes.length,
+        applied,
+        version: snapshot.version,
+        snapshotSignature: snapshot.layoutSignature,
+        cacheSignature: this.#layoutSignature,
+      }))
+    }
+
+    if (wasEmpty && applied > 0) {
+      this.#estimate = snapshot.estimate
+      this.#lastEstimateAt = this.#measured.size
     }
     if (applied > 0) this.#rebuild()
     return applied
