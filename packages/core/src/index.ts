@@ -34,3 +34,16 @@ export {
   prefersReducedMotion,
   supportsScrollEnd,
 } from './env.js'
+
+export { VisibilityTracker } from './visibility.js'
+export type {
+  ItemVisibility,
+  VisibilityCandidate,
+  VisibilityEvent,
+  VisibilityOptions,
+  VisibilityRule,
+  VisibilitySample,
+} from './visibility.js'
+
+export { createScrollerGate } from './gate.js'
+export type { ScrollerGate, ScrollerGateOptions } from './gate.js'
