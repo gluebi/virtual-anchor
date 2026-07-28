@@ -13,6 +13,17 @@ import {
 import { useVirtualList, type RenderedItem, type UseVirtualListOptions } from './useVirtualList.js'
 
 export interface VirtualListHandle {
+  /**
+   * Whether a programmatic scroll is in flight.
+   *
+   * Check this in `onScroll` before fetching a page. A `scrollToKey` crossing an edge
+   * would otherwise trigger a load, the load would move every offset below it, and the
+   * target would keep moving faster than the animation could converge on it — so a
+   * smooth scroll during active pagination never settles. The library cannot decide this
+   * for you, because when to fetch is a product question; what it can do is tell you
+   * when not to.
+   */
+  isScrolling: () => boolean
   scrollToKey: (key: ItemKey, options?: ScrollToOptions) => Promise<ScrollResult>
   scrollToIndex: (index: number, options?: ScrollToOptions) => Promise<ScrollResult>
   getAnchor: () => Anchor | null
@@ -176,6 +187,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
         if (focusOnScrollEnd) focusKey(key)
         return result
       },
+      isScrolling: () => list.scrolling,
       scrollToIndex: list.scrollToIndex,
       getAnchor: list.getAnchor,
       setAnchor: list.setAnchor,

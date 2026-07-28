@@ -47,8 +47,6 @@ export function App(): ReactNode {
 
   const listRef = useRef<VirtualListHandle>(null)
   const loadingRef = useRef(false)
-  /** Lets the accuracy suite hold the data set still. */
-  const paginationEnabled = useRef(true)
 
   // Latest values for the test handle. Assigned in an effect rather than during
   // render: the handle's `loadOlder` has to read the window *after* a page has been
@@ -68,7 +66,10 @@ export function App(): ReactNode {
   /** Simulated page fetch at either end, with latency. */
   const loadMore = useCallback(
     async (direction: 'up' | 'down') => {
-      if (loadingRef.current || !paginationEnabled.current) return
+      // Never fetch while a programmatic scroll is in flight: a load moves every offset
+      // below it, so the target would outrun the animation and the scroll would never
+      // settle. This is the protocol the library documents rather than a test hook.
+      if (loadingRef.current || listRef.current?.isScrolling() === true) return
       const atEdge = direction === 'up' ? window_.from === 0 : window_.to >= THREAD_SIZE
       if (atEdge) return
 
@@ -146,9 +147,6 @@ export function App(): ReactNode {
         return windowRef.current.to - before
       },
       seenCount: () => seenRef.current.size,
-      setPaginationEnabled: (enabled: boolean) => {
-        paginationEnabled.current = enabled
-      },
     }
     Object.assign(window, { __list: handle })
   }, [loadMore, window_.from, window_.to])

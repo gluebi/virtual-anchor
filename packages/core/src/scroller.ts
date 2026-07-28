@@ -192,9 +192,25 @@ export function createScroller(options: ScrollerOptions): Scroller {
    * `engine.mount()`.
    */
   let attached = false
+  /** Set when the platform reports that scrolling has stopped. */
+  let settledExternally = false
   const attach = (): void => {
     if (attached || disposed) return
     attached = true
+
+    // `scrollend` is corroboration, not the primary mechanism: the rAF loop is what
+    // establishes that the *target* has stopped moving, which no scroll event can tell
+    // you. What this adds is latency — once the platform says scrolling has ended and we
+    // are already at an unmoving target, there is nothing left to wait for, so the
+    // measurement-quiet window can be short-circuited.
+    //
+    // Where the event is unavailable, `onScrollSettled` debounces `scroll` instead; the
+    // loop's own deadline means neither path can hang.
+    cleanups.push(
+      onScrollSettled(viewport, () => {
+        if (pending) settledExternally = true
+      }),
+    )
 
     const element = viewport.getElement()
     if (!element) return
@@ -349,7 +365,11 @@ export function createScroller(options: ScrollerOptions): Scroller {
     const actual = viewport.getScrollOffset()
     const uncarried = target - actual - carryFor(target, actual)
     const arrived = Math.abs(uncarried) <= tolerance
-    const quiet = now() - current.lastMeasurementAt > MEASUREMENT_QUIET_MS
+    // Either the model has been still for long enough, or the platform has told us the
+    // scrolling itself is over. The second is strictly better information when it
+    // arrives, and it usually arrives sooner.
+    const quiet =
+      settledExternally || now() - current.lastMeasurementAt > MEASUREMENT_QUIET_MS
 
     if (!targetMoved && arrived && quiet) {
       current.stableFrames++
@@ -425,6 +445,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
         resolve = r
       })
 
+      settledExternally = false
       pending = {
         index: clamped,
         align,
@@ -472,6 +493,9 @@ export function createScroller(options: ScrollerOptions): Scroller {
     notifyMeasured() {
       if (pending) {
         pending.lastMeasurementAt = now()
+        // The scrolling may have stopped, but the model just moved — so the earlier
+        // `scrollend` no longer tells us anything about the target being stable.
+        settledExternally = false
         schedule()
       }
     },
@@ -537,7 +561,6 @@ export function onScrollSettled(viewport: Viewport, callback: () => void): () =>
     return viewport.addEventListener('scrollend', callback)
   }
 
-  const view = viewport.getWindow()
   let timer: ReturnType<typeof setTimeout> | null = null
 
   const off = viewport.addEventListener('scroll', () => {
@@ -548,6 +571,5 @@ export function onScrollSettled(viewport: Viewport, callback: () => void): () =>
   return () => {
     if (timer !== null) clearTimeout(timer)
     off()
-    void view
   }
 }

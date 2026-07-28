@@ -202,16 +202,9 @@ test.describe('scrollToKey accuracy', () => {
     await page.goto('/')
     await ready(page)
 
-    // Pagination off for this one. The demo loads a page whenever the scroll nears
-    // an edge, and a smooth scroll passing the top edge triggers a prepend every
-    // ~120ms — which moves the target faster than any animation can converge on
-    // it. That interaction is real and documented; it is not what this test is for.
-    await page.evaluate(() => {
-      ;(window as unknown as { __list: { setPaginationEnabled: (v: boolean) => void } }).__list.setPaginationEnabled(
-        false,
-      )
-    })
-
+    // Pagination stays ON. The demo now defers a fetch while a programmatic scroll is in
+    // flight — the protocol the library documents — so the interaction that used to make
+    // this unconvergeable is handled rather than switched off for the test.
     const result = await scrollToComment(page, 4211, { align: 'start', behavior: 'smooth' })
     expect(result.settled, `smooth result: ${JSON.stringify(result)}`).toBe(true)
 

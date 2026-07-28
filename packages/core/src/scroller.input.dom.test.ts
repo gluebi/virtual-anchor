@@ -158,3 +158,127 @@ describe('scroller cancellation on user input', () => {
     expect(add).not.toHaveBeenCalled()
   })
 })
+
+describe('settle detection', () => {
+  const scrollerWith = (
+    onEvents: 'scrollend' | 'scroll-only',
+  ): { scroller: Scroller; fire: (type: string) => void; frames: (n: number) => void } => {
+    const element = document.createElement('div')
+    document.body.appendChild(element)
+
+    if (onEvents === 'scrollend') {
+      Object.defineProperty(window, 'onscrollend', { configurable: true, value: null })
+    } else {
+      Reflect.deleteProperty(window, 'onscrollend')
+    }
+
+    const listeners = new Map<string, (() => void)[]>()
+    const cache = new SizeCache({ keys: keysFor(1000), defaultEstimate: 100 })
+    let offset = 0
+    let clock = 0
+    let queue: (() => void)[] = []
+
+    const scroller = createScroller({
+      viewport: {
+        getScrollOffset: () => offset,
+        getViewportSize: () => 600,
+        getMaxScrollOffset: () => 99_400,
+        setScrollOffset: (next) => {
+          offset = next
+        },
+        addEventListener: (type, listener) => {
+          const existing = listeners.get(type) ?? []
+          existing.push(listener)
+          listeners.set(type, existing)
+          return () => {
+            listeners.set(
+              type,
+              (listeners.get(type) ?? []).filter((l) => l !== listener),
+            )
+          }
+        },
+        observeSize: () => () => {},
+        getGateTarget: () => element,
+        getElement: () => element,
+        getWindow: () => window,
+        getDevicePixelRatio: () => 1,
+      },
+      getCache: () => cache,
+      getGeometry: () => ({}),
+      applyCarry: () => {},
+      now: () => clock,
+      requestFrame: (callback) => {
+        queue.push(callback)
+        return queue.length
+      },
+      cancelFrame: () => {
+        queue = []
+      },
+    })
+    scroller.attach()
+
+    return {
+      scroller,
+      fire: (type) => {
+        for (const listener of [...(listeners.get(type) ?? [])]) listener()
+      },
+      frames: (n) => {
+        for (let i = 0; i < n; i++) {
+          const pendingFrames = queue
+          queue = []
+          clock += 16
+          for (const frame of pendingFrames) frame()
+        }
+      },
+    }
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'onscrollend')
+  })
+
+  it('settles as soon as the platform reports scrolling has ended', async () => {
+    // The rAF loop is what establishes that the *target* has stopped moving; `scrollend`
+    // adds only latency, by removing the need to wait out the measurement-quiet window
+    // once the platform says the scrolling itself is over.
+    const h = scrollerWith('scrollend')
+    const promise = h.scroller.scrollToIndex(42)
+
+    h.fire('scrollend')
+    h.frames(3)
+    await expect(promise).resolves.toMatchObject({ settled: true, reason: 'converged' })
+  })
+
+  it('falls back to a debounced scroll where scrollend is unavailable', async () => {
+    // Older Safari. The loop's own deadline means neither path can hang; this asserts
+    // the fallback produces the same outcome.
+    vi.useFakeTimers()
+    try {
+      const h = scrollerWith('scroll-only')
+      const promise = h.scroller.scrollToIndex(42)
+
+      h.fire('scroll')
+      vi.advanceTimersByTime(200)
+      h.frames(3)
+      await expect(promise).resolves.toMatchObject({ settled: true, reason: 'converged' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not treat scrolling as settled once a measurement moves the target', async () => {
+    const h = scrollerWith('scrollend')
+    const promise = h.scroller.scrollToIndex(500)
+
+    h.fire('scrollend')
+    // A measurement means the model just moved, so the earlier report says nothing about
+    // the target being stable any more.
+    h.scroller.notifyMeasured()
+    h.frames(2)
+
+    expect(h.scroller.isScrolling()).toBe(true)
+    h.fire('scrollend')
+    h.frames(3)
+    await expect(promise).resolves.toMatchObject({ settled: true })
+  })
+})
