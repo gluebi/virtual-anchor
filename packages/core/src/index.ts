@@ -47,3 +47,6 @@ export type {
 
 export { createScrollerGate } from './gate.js'
 export type { ScrollerGate, ScrollerGateOptions } from './gate.js'
+
+export { createScroller, onScrollSettled } from './scroller.js'
+export type { Scroller, ScrollerOptions } from './scroller.js'
