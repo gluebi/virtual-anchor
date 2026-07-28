@@ -8,3 +8,16 @@ export type {
 
 export { SizeCache } from './sizeCache.js'
 export type { ResolvedItem, SizeCacheOptions, SizeSnapshot } from './sizeCache.js'
+
+export {
+  carryFor,
+  convergenceTolerance,
+  deriveAnchor,
+  isSelfWrite,
+  MAX_CARRY,
+  offsetForIndex,
+  resolveAnchorOffset,
+  SELF_WRITE_TOLERANCE,
+  snapToDevicePixels,
+} from './anchor.js'
+export type { AnchorGeometry } from './anchor.js'
