@@ -160,7 +160,9 @@ cannot express "comment 4211 of 12000" while sixty items are mounted.
   four move *focus*, not just the view, so a keyboard user is never left behind by the
   scroll they just asked for
 - **Focus retention**: a focused item that scrolls out of the rendered range stays
-  mounted, instead of dropping focus to `<body>` and losing a keyboard user's place
+  mounted, instead of dropping focus to `<body>` and losing a keyboard user's place.
+  This holds for focus on something *inside* a row too — a permalink, a reply button —
+  which is the case that matters for any row with interactive content
 - `scrollToKey` moves focus to the target once the scroll settles, which is what
   makes a permalink work with a screen reader at all
 - `prefers-reduced-motion: reduce` turns a smooth scroll into an instant jump

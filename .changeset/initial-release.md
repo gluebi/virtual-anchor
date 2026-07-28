@@ -22,5 +22,5 @@ offset tree are real.
 
 Includes dev-only tracing (`setTraceSink`) for the decisions that are otherwise
 invisible from outside: scroll convergence frame by frame, anchor restores,
-measurement batches, visibility deadlines. It costs nothing unused and is absent
-from production builds.
+measurement batches, visibility deadlines. Nothing runs unless a sink is installed,
+and a production build refuses to install one at all.
