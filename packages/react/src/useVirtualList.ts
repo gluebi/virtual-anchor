@@ -10,13 +10,12 @@ import {
   type ScrollToOptions,
   type SizeSnapshot,
   type VirtualItem,
-  type VirtualState,
   type VisibilityEvent,
   type VisibilityOptions,
   type Viewport,
+  EMPTY_STATE,
   layoutSignatureFor,
   needsRerender,
-  snapToDevicePixels,
 } from 'virtual-anchor'
 import {
   useCallback,
@@ -67,7 +66,7 @@ export interface UseVirtualListResult<T> {
   containerRef: (element: HTMLElement | null) => void
   /** Attach to each item. Handles measurement and positioning. */
   itemRef: (key: ItemKey) => (element: HTMLElement | null) => void
-  items: ReadonlyArray<RenderedItem<T>>
+  items: readonly RenderedItem<T>[]
   totalSize: number
   renderedRange: readonly [number, number]
   visibleRange: readonly [number, number]
@@ -201,6 +200,22 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     if (container) container.style.height = `${String(size)}px`
   }, [])
 
+  /**
+   * Apply the sub-pixel residual as a paint offset, synchronously.
+   *
+   * Written the moment the engine produces it rather than published into state and
+   * applied on the next render — a carry-only change does not (and should not)
+   * trigger a render, so as a state field it was simply never applied.
+   */
+  const setCarry = useCallback((px: number) => {
+    const container = containerElement.current
+    // `top` on the relatively-positioned container, not a transform. A fractional
+    // translate disables subpixel text antialiasing in Blink for the whole subtree
+    // (crbug 573146) — the same reason items are positioned with `top` — and a
+    // sub-pixel carry is fractional by definition.
+    if (container) container.style.top = px === 0 ? '' : `${String(-px)}px`
+  }, [])
+
   const containerRef = useCallback(
     (element: HTMLElement | null) => {
       containerElement.current = element
@@ -232,6 +247,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
       ...(sizeSnapshot === undefined ? {} : { sizeSnapshot }),
       onVisibilityChange: (events) => callbacks.current.onVisibilityChange?.(events),
       setContentSize,
+      setCarry,
     })
   }
 
@@ -257,8 +273,8 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
       },
       [engine],
     ),
-    useCallback(() => engine?.store.getState() ?? EMPTY, [engine]),
-    useCallback(() => engine?.store.getState() ?? EMPTY, [engine]),
+    useCallback(() => engine?.store.getState() ?? EMPTY_STATE, [engine]),
+    useCallback(() => engine?.store.getState() ?? EMPTY_STATE, [engine]),
   )
 
   /**
@@ -274,21 +290,20 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     if (!container || !engine) return
 
     const current = engine.store.getState()
-    const dpr = window.devicePixelRatio || 1
 
     // The height is written by the engine, before it writes any scroll offset —
     // see `setContentSize`. Re-asserting it here covers the first commit, where
     // the container mounts after the engine has already published.
     container.style.height = `${String(current.totalSize)}px`
-    // The sub-pixel remainder the platform refused to take, applied once to the
-    // whole container rather than chased with another scroll write.
-    container.style.transform =
-      current.carry === 0 ? '' : `translateY(${String(-current.carry)}px)`
-
     for (const item of current.items) {
       const element = itemElements.current.get(item.key)
       if (!element) continue
-      const top = snapToDevicePixels(item.start, dpr)
+      // The exact float, deliberately unsnapped. Painted position is
+      // `itemTop - scrollTop - carry`, which reduces to `itemTop - target` — exact,
+      // whatever the platform did to the scroll offset. Rounding `top` as well was a
+      // second compensation for the same problem: the two roundings cancelled, the
+      // carry then broke the cancellation, and every landing sat 0.5px off.
+      const top = item.start
       if (writtenTops.current.get(element) === top) continue
       writtenTops.current.set(element, top)
       element.style.position = 'absolute'
@@ -313,8 +328,8 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     [engine],
   )
 
-  const rendered = useMemo<ReadonlyArray<RenderedItem<T>>>(() => {
-    const result: Array<RenderedItem<T>> = []
+  const rendered = useMemo<readonly RenderedItem<T>[]>(() => {
+    const result: RenderedItem<T>[] = []
     for (const item of state.items) {
       const data = itemByKey.get(item.key)
       if (data === undefined) continue
@@ -368,14 +383,3 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
   }
 }
 
-const EMPTY: VirtualState = {
-  version: 0,
-  items: [],
-  renderedRange: [0, -1],
-  visibleRange: [0, -1],
-  totalSize: 0,
-  carry: 0,
-  scrollOffset: 0,
-  viewportSize: 0,
-  scrolling: false,
-}

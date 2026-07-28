@@ -32,7 +32,7 @@ class FakeResizeObserver implements ResizeObserver {
   }
 
   /** Deliver a batch of block-axis sizes as one callback, as the real API does. */
-  deliver(sizes: ReadonlyArray<readonly [Element, number]>): void {
+  deliver(sizes: readonly (readonly [Element, number])[]): void {
     const entries = sizes.map(([target, blockSize]) => ({
       target,
       borderBoxSize: [{ blockSize, inlineSize: 0 }],
@@ -54,7 +54,7 @@ const originalRO = globalThis.ResizeObserver
 
 beforeEach(() => {
   FakeResizeObserver.instances = []
-  globalThis.ResizeObserver = FakeResizeObserver as unknown as typeof ResizeObserver
+  globalThis.ResizeObserver = FakeResizeObserver
   // The resizer constructs from the element's own window, not the global.
   Object.defineProperty(window, 'ResizeObserver', {
     configurable: true,
@@ -105,6 +105,43 @@ describe('createResizer', () => {
 
     expect(FakeResizeObserver.instances).toHaveLength(1)
     expect(FakeResizeObserver.latest().observed.size).toBe(3)
+  })
+
+  it('does not report the synthetic first scrollport entry as a resize', () => {
+    // `observe()` always delivers an entry for a newly observed element. Reported as
+    // a resize, it looks like the scrollport changing size one frame after mount —
+    // and a consumer that treats that as a reflow discards every measurement it has,
+    // including any restored from a snapshot.
+    const onViewportResize = vi.fn()
+    const resizer = createResizer({ onItemResize: vi.fn(), onViewportResize })
+    const viewport = addItem()
+    resizer.observeViewport(viewport)
+
+    FakeResizeObserver.latest().deliver([[viewport, 800]])
+    expect(onViewportResize).toHaveBeenCalledExactlyOnceWith(800)
+
+    // The same size again is not a change.
+    FakeResizeObserver.latest().deliver([[viewport, 800]])
+    expect(onViewportResize).toHaveBeenCalledOnce()
+
+    // A genuine change still reports.
+    FakeResizeObserver.latest().deliver([[viewport, 600]])
+    expect(onViewportResize).toHaveBeenLastCalledWith(600)
+  })
+
+  it('forgets the scrollport size when it stops observing', () => {
+    const onViewportResize = vi.fn()
+    const resizer = createResizer({ onItemResize: vi.fn(), onViewportResize })
+    const viewport = addItem()
+
+    const cleanup = resizer.observeViewport(viewport)
+    FakeResizeObserver.latest().deliver([[viewport, 800]])
+    cleanup()
+
+    // Re-observing is a fresh start, so the same size reports again.
+    resizer.observeViewport(viewport)
+    FakeResizeObserver.latest().deliver([[viewport, 800]])
+    expect(onViewportResize).toHaveBeenCalledTimes(2)
   })
 
   it('reports viewport resizes separately from item resizes', () => {

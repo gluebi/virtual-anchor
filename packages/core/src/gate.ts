@@ -54,7 +54,7 @@ export function createScrollerGate(options: ScrollerGateOptions): ScrollerGate {
     if (!disposed) onChange?.()
   }
 
-  const cleanups: Array<() => void> = []
+  const cleanups: (() => void)[] = []
 
   if (view) {
     // `root: null` deliberately — the question is "is this on screen", and only

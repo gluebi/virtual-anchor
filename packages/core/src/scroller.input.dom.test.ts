@@ -28,7 +28,7 @@ const harness = (): Harness => {
   const cache = new SizeCache({ keys: keysFor(1000), defaultEstimate: 100 })
   let offset = 0
   let clock = 0
-  let queue: Array<() => void> = []
+  let queue: (() => void)[] = []
 
   const viewport: Viewport = {
     getScrollOffset: () => offset,

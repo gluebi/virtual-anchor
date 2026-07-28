@@ -91,7 +91,7 @@ export function createWindowViewport(view: Window): Viewport {
         view.removeEventListener(type, listener)
       }
     },
-    getElement: () => doc as HTMLElement,
+    getElement: () => doc,
     getWindow: () => view,
     getDevicePixelRatio: () => devicePixelRatioOf(view),
   }

@@ -270,7 +270,7 @@ export class VisibilityTracker {
     }
 
     const {
-      rule = { mode: 'any' } as VisibilityRule,
+      rule = { mode: 'any' },
       dwellMs = 0,
       dwell = 'continuous',
       once = false,

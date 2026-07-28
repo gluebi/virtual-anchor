@@ -85,7 +85,7 @@ const harness = (
   const scrollingChanges: boolean[] = []
 
   let clock = 0
-  let queue: Array<() => void> = []
+  let queue: (() => void)[] = []
 
   const scroller = createScroller({
     viewport,

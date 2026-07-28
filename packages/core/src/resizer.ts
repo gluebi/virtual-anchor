@@ -1,7 +1,7 @@
 import type { ItemKey } from './types.js'
 
 /** A batch of measurements delivered together, already deduplicated. */
-export type ResizeBatch = ReadonlyArray<readonly [ItemKey, number]>
+export type ResizeBatch = readonly (readonly [ItemKey, number])[]
 
 export interface ResizerOptions {
   /** Called with every changed item size from one observer callback. */
@@ -70,7 +70,7 @@ function warnAboutMargins(element: Element, key: ItemKey): void {
   for (const property of MARGIN_PROPERTIES) {
     const value = Number.parseFloat(style[property])
     if (Number.isFinite(value) && value !== 0) {
-      // eslint-disable-next-line no-console
+       
       console.warn(
         `[virtual-anchor] item "${String(key)}" has ${property}: ${style[property]}. ` +
           'Item margins are not measurable by ResizeObserver and will make offsets drift. ' +
@@ -95,6 +95,16 @@ export function createResizer(options: ResizerOptions): Resizer {
   const keys = new WeakMap<Element, ItemKey>()
   const lastSizes = new Map<ItemKey, number>()
   let viewportElement: Element | null = null
+  /**
+   * Last reported scrollport size, so the synthetic first entry is not reported.
+   *
+   * `observe()` always delivers an entry for a newly observed element — the item
+   * path already deduplicates by value for exactly that reason, and the scrollport
+   * needs the same treatment. Without it, one frame after mount the viewport
+   * "resizes" from nothing to its actual size, and any consumer that treats a
+   * scrollport resize as a reflow will act on a change that never happened.
+   */
+  let lastViewportSize: number | null = null
   let observer: ResizeObserver | null = null
   let disposed = false
   let marginsChecked = 0
@@ -102,14 +112,18 @@ export function createResizer(options: ResizerOptions): Resizer {
   const handle = (entries: readonly ResizeObserverEntry[]): void => {
     if (disposed) return
 
-    const batch: Array<readonly [ItemKey, number]> = []
+    const batch: (readonly [ItemKey, number])[] = []
     let viewportSize: number | null = null
 
     for (const entry of entries) {
       const target = entry.target
 
       if (target === viewportElement) {
-        viewportSize = sizeFromEntry(entry)
+        const size = sizeFromEntry(entry)
+        if (size !== lastViewportSize) {
+          lastViewportSize = size
+          viewportSize = size
+        }
         continue
       }
 
@@ -202,7 +216,10 @@ export function createResizer(options: ResizerOptions): Resizer {
       ensureObserver(element)?.observe(element, { box: 'border-box' })
 
       return () => {
-        if (viewportElement === element) viewportElement = null
+        if (viewportElement === element) {
+          viewportElement = null
+          lastViewportSize = null
+        }
         observer?.unobserve(element)
       }
     },
@@ -219,6 +236,7 @@ export function createResizer(options: ResizerOptions): Resizer {
       observer?.disconnect()
       observer = null
       viewportElement = null
+      lastViewportSize = null
       lastSizes.clear()
     },
   }

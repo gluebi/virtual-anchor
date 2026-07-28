@@ -163,7 +163,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
   let iosGraceUntil = 0
   let deferredCorrection = 0
 
-  const cleanups: Array<() => void> = []
+  const cleanups: (() => void)[] = []
 
   /**
    * Cancel an in-flight programmatic scroll on genuine user input.

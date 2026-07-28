@@ -208,7 +208,7 @@ export function App(): ReactNode {
             aria-label="Search the thread"
             placeholder="Search thread…"
             value={search}
-            onChange={(event) => setSearch(event.target.value)}
+            onChange={(event) => { setSearch(event.target.value); }}
             onKeyDown={(event) => {
               if (event.key === 'Enter') jumpToMatch()
             }}

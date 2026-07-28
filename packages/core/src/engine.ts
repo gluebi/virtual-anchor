@@ -1,4 +1,10 @@
-import { deriveAnchor, offsetForIndex, resolveAnchorOffset } from './anchor.js'
+import {
+  carryFor,
+  deriveAnchor,
+  isSelfWrite,
+  offsetForIndex,
+  resolveAnchorOffset,
+} from './anchor.js'
 import { type Band, ListGeometry, type ListInsets } from './listGeometry.js'
 import { createScrollerGate, type ScrollerGate } from './gate.js'
 import { createResizer, type Resizer } from './resizer.js'
@@ -42,6 +48,17 @@ export interface EngineOptions {
    * rather than leaving it to a layout effect is what makes it correct.
    */
   setContentSize?: (size: number) => void
+  /**
+   * Apply the sub-pixel residual as a paint offset on the item container.
+   *
+   * Written straight to the DOM, deliberately *not* routed through the store. The
+   * carry is a paint offset: it never affects which items are mounted, so
+   * `needsRerender` rightly ignores it — which meant that as a store field it had a
+   * producer and a consumer the change-detector did not connect, and a carry-only
+   * change was published and then never applied. Landing was consequently 0.5px
+   * short on exactly the paths where correction matters most.
+   */
+  setCarry?: (px: number) => void
   now?: () => number
 }
 
@@ -93,16 +110,24 @@ export function createEngine(initial: EngineOptions): Engine {
   /** The position of record. Everything else is derived from it. */
   let anchor: Anchor | null = null
   /**
-   * Set while this module is writing `scrollTop` from the anchor.
+   * Offsets this module has written from the anchor, awaiting their scroll events.
    *
-   * The resulting scroll event must not re-derive the anchor: we would be reading
-   * back a value the platform may have snapped, so the in-item offset would drift
-   * by a fraction of a pixel on every correction. Every *other* scroll — the
-   * user's, and the scroller's own — should update the anchor, because those move
-   * the view intentionally and the anchor's job is to record where the view is.
+   * A queue rather than a boolean for the same reason the scroller keeps one: scroll
+   * events are delivered *asynchronously*, so a flag set and cleared around a
+   * synchronous write is always back to `false` by the time the event arrives. The
+   * guard it replaced therefore never once fired.
+   *
+   * What it guards matters. The anchor must follow the *scroller's* writes — those
+   * move the view intentionally, and not following them leaves the anchor describing
+   * the pre-scroll position so the next prepend teleports the view back there. But it
+   * must *not* follow an anchor-restore, because that read-back may have been snapped
+   * to a whole pixel: absorbing that into `offsetWithinItem` re-introduces the very
+   * residual the carry just removed, which shows up as a landing exactly 0.5px off.
    */
-  let restoringScroll = false
-  let carry = 0
+  const restoreIntents: number[] = []
+  const MAX_RESTORE_INTENTS = 5
+  /** Whether a scrollport observation has established a layout signature yet. */
+  let signatureKnown = options.layoutSignature !== undefined
   let gate: ScrollerGate | null = null
   let disposed = false
 
@@ -120,6 +145,14 @@ export function createEngine(initial: EngineOptions): Engine {
   const syncGeometry = (): ListGeometry => {
     listGeometry.update(geometry(), viewport.getViewportSize())
     return listGeometry
+  }
+
+  /** Last applied carry, so an unchanged value is not re-written to the DOM. */
+  let carry = 0
+  const applyCarry = (next: number): void => {
+    if (next === carry) return
+    carry = next
+    options.setCarry?.(next)
   }
 
   const notifyVisibility = (events: VisibilityEvent[]): void => {
@@ -209,9 +242,17 @@ export function createEngine(initial: EngineOptions): Engine {
         // for the user grabbing the scrollbar, which would cancel any in-flight
         // programmatic scroll and flip the tracked scroll direction.
         scroller.markSelfWrite(restored)
-        restoringScroll = true
+        restoreIntents.push(restored)
+        if (restoreIntents.length > MAX_RESTORE_INTENTS) restoreIntents.shift()
         viewport.setScrollOffset(restored)
-        restoringScroll = false
+
+        // Recover the fraction the platform refused to take — the same treatment
+        // every scroller write gets. This path had been writing raw, which meant the
+        // *most frequent* correction (a measurement landing, a prepend) was the one
+        // place the carry did not apply. It went unnoticed only because a first-frame
+        // `clearAll()` used to force a fresh scroller write straight afterwards; with
+        // that gone, a cold-start deep link lands exactly 0.5px short without this.
+        applyCarry(carryFor(restored, viewport.getScrollOffset()))
       }
     }
 
@@ -226,7 +267,6 @@ export function createEngine(initial: EngineOptions): Engine {
       renderedRange: ranges.rendered,
       visibleRange: ranges.visible,
       totalSize,
-      carry,
       scrollOffset,
       viewportSize: viewport.getViewportSize(),
       scrolling: scroller.isScrolling(),
@@ -299,9 +339,25 @@ export function createEngine(initial: EngineOptions): Engine {
       scroller.notifyMeasured()
     },
     onViewportResize() {
-      // A viewport width change reflows every comment, so all measurements are
-      // stale. Heights are static per layout, not across layouts.
-      cache.clearAll()
+      // Only a change that reflows text invalidates measurements — and the *height*
+      // of the scrollport reflows nothing. A mobile URL bar hiding, devtools
+      // opening, a soft keyboard appearing or a vertical window drag all resize the
+      // scrollport without changing a single line box, so discarding the cache for
+      // them is pure waste; combined with a restored snapshot it is destructive.
+      //
+      // `layoutSignatureFor` already hashes exactly the things that *do* reflow —
+      // content width, root font size, device pixel ratio — and is already the key
+      // a size snapshot is trusted against. Reusing it here means one definition of
+      // "the layout changed" rather than two that can disagree.
+      const signature = layoutSignatureFor(viewport.getElement())
+      const changed = cache.setLayoutSignature(signature)
+
+      // The first observation merely learns the signature; there is no previous
+      // layout for it to differ from, and clearing here would throw away the
+      // measurements taken moments earlier during mount.
+      if (changed && signatureKnown) cache.clearAll()
+      signatureKnown = true
+
       publish(true)
     },
   })
@@ -310,11 +366,7 @@ export function createEngine(initial: EngineOptions): Engine {
     viewport,
     getCache: () => cache,
     getGeometry: geometry,
-    applyCarry(next) {
-      if (next === carry) return
-      carry = next
-      store.setState({ ...store.getState(), version: store.getState().version + 1, carry })
-    },
+    applyCarry,
     requestRange(startIndex, endIndex) {
       // Mount the destination so it is measured before a smooth scroll starts.
       const items = itemsFor([
@@ -375,12 +427,16 @@ export function createEngine(initial: EngineOptions): Engine {
           scroller.notifyScroll(offset)
 
           // The anchor records where the view *is*, so it follows every intentional
-          // move — the user's and the scroller's alike. Skipping the scroller's
-          // would leave the anchor pointing at the pre-scroll position, and the
-          // next prepend or measurement would then dutifully teleport the view back
-          // there. The one exception is our own anchor-restore write, whose
-          // read-back may be snapped.
-          if (!restoringScroll) anchor = deriveAnchor(offset, cache, geometry())
+          // move — the user's and the scroller's alike. The one exception is our own
+          // anchor-restore write, whose read-back may have been snapped to a whole
+          // pixel; re-deriving from that would fold the platform's rounding into the
+          // anchor and undo the carry.
+          const restoreIndex = restoreIntents.findIndex((value) => isSelfWrite(offset, value))
+          if (restoreIndex === -1) {
+            anchor = deriveAnchor(offset, cache, geometry())
+          } else {
+            restoreIntents.splice(0, restoreIndex + 1)
+          }
           publish(false)
         }),
       )

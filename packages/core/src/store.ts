@@ -32,8 +32,6 @@ export interface VirtualState {
   /** Index range genuinely on screen, buffer excluded. */
   readonly visibleRange: readonly [number, number]
   readonly totalSize: number
-  /** Sub-pixel remainder to apply to the item container. */
-  readonly carry: number
   readonly scrollOffset: number
   readonly viewportSize: number
   /** Whether a programmatic scroll is in flight. */
@@ -46,7 +44,6 @@ export const EMPTY_STATE: VirtualState = {
   renderedRange: [0, -1],
   visibleRange: [0, -1],
   totalSize: 0,
-  carry: 0,
   scrollOffset: 0,
   viewportSize: 0,
   scrolling: false,

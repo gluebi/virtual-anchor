@@ -231,7 +231,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
       onBlur={(event) => {
         // Release the pin only when focus leaves the feed entirely, not when it
         // moves between rows.
-        if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+        if (!event.currentTarget.contains(event.relatedTarget)) {
           setFocusedKey(null)
         }
       }}
@@ -243,7 +243,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
             ref={(element) => {
               if (element) itemNodes.current.set(rendered.key, element)
               else itemNodes.current.delete(rendered.key)
-              return list.itemRef(rendered.key)(element)
+              list.itemRef(rendered.key)(element);
             }}
             data-virtual-key={rendered.key}
             className={itemClassName}

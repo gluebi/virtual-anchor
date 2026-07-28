@@ -201,7 +201,7 @@ describe('VisibilityTracker measurement gating', () => {
       gated: true,
     })
     expect(keysOf(events, 'enter')).toEqual(['c0', 'c1', 'c2'])
-    expect(events.every((e) => e.measured === false)).toBe(true)
+    expect(events.every((e) => !e.measured)).toBe(true)
   })
 })
 

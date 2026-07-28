@@ -14,7 +14,7 @@ export interface SizeSnapshot {
   readonly version: 1
   readonly layoutSignature: string
   readonly estimate: number
-  readonly sizes: ReadonlyArray<readonly [ItemKey, number]>
+  readonly sizes: readonly (readonly [ItemKey, number])[]
 }
 
 /** An item resolved from an offset, with everything a caller needs about it. */
@@ -401,7 +401,7 @@ export class SizeCache {
     if (value > 0) return value
 
     if (process.env.NODE_ENV !== 'production') {
-      // eslint-disable-next-line no-console
+       
       console.warn(
         `[virtual-anchor] estimated size for item ${String(key)} was ${String(value)}; ` +
           `using ${String(MIN_ESTIMATE)}px instead. Estimates must be positive.`,

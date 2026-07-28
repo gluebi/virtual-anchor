@@ -71,7 +71,7 @@ const harness = (options: { max?: number } = {}): Harness => {
   const writes: number[] = []
   let offset = 0
   let clock = 0
-  let queue: Array<() => void> = []
+  let queue: (() => void)[] = []
 
   const viewport: Viewport = {
     getScrollOffset: () => offset,
