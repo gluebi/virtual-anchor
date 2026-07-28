@@ -108,6 +108,10 @@ const WINDOW_HOST_STYLE: CSSProperties = {
 const SCROLLER_STYLE: CSSProperties = {
   position: 'relative',
   overflowY: 'auto',
+  // Also on the container, which is what covers the window-scrolled mode. Both, because
+  // this is the element the browser selects an anchor *within* when there is one, and the
+  // `before` slot's subtree is inside it.
+  overflowAnchor: 'none',
   // A stray `scroll-behavior: smooth` inherited from the page would animate every
   // corrective write and fight the convergence loop.
   scrollBehavior: 'auto',
@@ -129,9 +133,9 @@ const CONTAINER_STYLE: CSSProperties = {
   // fight. Blazor's Virtualize disables it for the same reason, noting it can otherwise
   // reach an infinite rendering loop.
   //
-  // Here rather than on the scrollport, because a window-scrolled list has no scrollport
-  // of ours to put it on — leaving native anchoring live in exactly the mode where the
-  // document is the thing being anchored. This element holds the content either way.
+  // Here as well as on the scrollport, because a window-scrolled list has no scrollport of
+  // ours — which left native anchoring live in exactly the mode where the document is the
+  // thing being anchored. This element holds the list rows in both modes.
   overflowAnchor: 'none',
 }
 
@@ -194,12 +198,6 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
     ...(keepMounted === undefined ? {} : { keepMounted }),
   })
 
-  // Focus goes through the engine, which already owns the element registry. The
-  // component previously kept a second `Map<ItemKey, HTMLElement>` — which leaked
-  // every element ever mounted, because its cleanup branch was unreachable under
-  // React 19's ref semantics — and recovered the key from a `data-` attribute that
-  // React knew at render time.
-  const focusKey = list.focusItem
 
   /**
    * Scroll to an item and give it focus once the motion has genuinely stopped.
@@ -212,10 +210,10 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
   const scrollAndFocus = useCallback(
     async (key: ItemKey, options: ScrollToOptions, moveFocus: boolean) => {
       const result = await list.scrollToKey(key, options)
-      if (moveFocus) focusKey(key)
+      if (moveFocus) list.focusItem(key)
       return result
     },
-    [list, focusKey],
+    [list],
   )
 
   useImperativeHandle(
@@ -282,7 +280,9 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
         return undefined
       })()
 
-      if (target && moveFocusTo(target[0], target[1])) event.preventDefault()
+      if (!target) return
+      const [index, align] = target
+      if (moveFocusTo(index, align)) event.preventDefault()
     },
     [list, focusedKey, moveFocusTo],
   )

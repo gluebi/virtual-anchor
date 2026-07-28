@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { type AnchorGeometry } from './anchor.js'
 import { createScroller, type Scroller } from './scroller.js'
+import { setTraceSink, type TraceEvent } from './trace.js'
 import { SizeCache } from './sizeCache.js'
 import type { ItemKey, ScrollResult } from './types.js'
 import type { Viewport } from './viewport.js'
@@ -610,5 +611,49 @@ describe('a target that moves while the scroll is in flight', () => {
     h.scroller.notifyModelChanged()
     const result = await settle(h, promise)
     expect(result.settled).toBe(true)
+  })
+})
+
+describe('the convergence trace', () => {
+  afterEach(() => {
+    setTraceSink(null)
+  })
+
+  it('reports each frame as named fields', async () => {
+    // The names matter as much as the values: this is the record a person reads to work
+    // out why a landing was wrong, and four of its fields are booleans that would compile
+    // fine in the wrong order.
+    const steps: TraceEvent[] = []
+    setTraceSink((event) => {
+      if (event.topic === 'scroll.step') steps.push(event)
+    })
+
+    const h = harness({ count: 200, itemSize: 100 })
+    await settle(h, h.scroller.scrollToIndex(80, { align: 'start' }))
+
+    expect(steps.length).toBeGreaterThan(0)
+    expect(steps[0]?.data).toMatchObject({
+      key: 'c80',
+      index: 80,
+      target: 8000,
+      arrived: expect.any(Boolean),
+      targetMoved: expect.any(Boolean),
+      quiet: expect.any(Boolean),
+      settledExternally: expect.any(Boolean),
+      stableFrames: expect.any(Number),
+      elapsed: expect.any(Number),
+    })
+  })
+
+  it('builds nothing when no sink is listening', async () => {
+    // The call site asks `isTracing()` rather than `TRACING`, so a development build with
+    // no sink attached does not assemble a record per frame.
+    const h = harness({ count: 200, itemSize: 100 })
+    const sink = vi.fn()
+    setTraceSink(sink)
+    setTraceSink(null)
+
+    await settle(h, h.scroller.scrollToIndex(80, { align: 'start' }))
+    expect(sink).not.toHaveBeenCalled()
   })
 })

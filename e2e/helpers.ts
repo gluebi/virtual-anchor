@@ -37,23 +37,19 @@ export interface DemoHandle {
   takeSizeSnapshot: () => SizeSnapshot | null
 }
 
-export interface TraceEntry {
-  at: number
-  topic: string
-  /**
-   * Narrowed to the fields the suite reads, so they are properties rather than index
-   * lookups — naming what is asserted on also documents which topic is being read.
-   */
-  data: { accepted?: boolean; count?: number; applied?: number } & Record<string, unknown>
-}
-
 declare global {
   interface Window {
     __list: DemoHandle
-    __trace: (topic?: string) => TraceEntry[]
-    __traceClear: () => void
   }
 }
+
+/**
+ * Where the demo persists a size snapshot.
+ *
+ * Duplicated from the demo's `config.ts` rather than imported, because that module reads
+ * `window.location` at module scope and would throw in Playwright's Node context.
+ */
+export const SNAPSHOT_KEY = 'virtual-anchor-demo-sizes'
 
 /**
  * Open the demo and wait until it is genuinely usable.

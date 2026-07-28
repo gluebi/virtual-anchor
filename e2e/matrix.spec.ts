@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test'
 import {
+  DEFAULT_PADDING_START,
   measure,
   open,
   scrollTo,
@@ -36,12 +37,16 @@ interface Scenario extends View {
 }
 
 const SCENARIOS: Scenario[] = [
-  { name: 'inner scroller, 64px header', query: 'paddingStart=64', paddingStart: 64 },
+  {
+    name: 'inner scroller, a sticky header',
+    query: `paddingStart=${String(DEFAULT_PADDING_START)}`,
+    paddingStart: DEFAULT_PADDING_START,
+  },
   { name: 'inner scroller, no header', query: 'paddingStart=0', paddingStart: 0 },
   {
     name: 'inner scroller, content above the list',
-    query: 'paddingStart=64&scrollMargin=300',
-    paddingStart: 64,
+    query: `paddingStart=${String(DEFAULT_PADDING_START)}&scrollMargin=300`,
+    paddingStart: DEFAULT_PADDING_START,
   },
   {
     name: 'window scroller',
@@ -51,8 +56,8 @@ const SCENARIOS: Scenario[] = [
   },
   {
     name: 'a 40-comment paged window',
-    query: 'paddingStart=64',
-    paddingStart: 64,
+    query: `paddingStart=${String(DEFAULT_PADDING_START)}`,
+    paddingStart: DEFAULT_PADDING_START,
     paged: true,
   },
 ]

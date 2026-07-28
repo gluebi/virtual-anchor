@@ -216,25 +216,14 @@ export function createEngine(initial: EngineOptions): Engine {
 
   const itemsFor = (range: readonly [number, number]): VirtualItem[] => {
     const items: VirtualItem[] = []
-    const push = (index: number): void => {
-      const key = cache.keyAt(index)
-      if (key === undefined) return
-      items.push({
-        key,
-        index,
-        start: cache.offsetOf(index),
-        size: cache.sizeOf(index),
-        measured: cache.isMeasured(index),
-      })
-    }
-
-    for (let index = range[0]; index <= range[1]; index++) push(index)
+    for (let index = range[0]; index <= range[1]; index++) pushItem(items, cache, index)
 
     // The overwhelmingly common frame has nothing pinned, and it should allocate nothing
     // extra and sort nothing: the loop above already produced ascending order.
     const keepMounted = options.keepMounted
-    const nothingPinned = (keepMounted === undefined || keepMounted.length === 0) && pinnedRange === null
-    if (nothingPinned) return items
+    if ((keepMounted === undefined || keepMounted.length === 0) && pinnedRange === null) {
+      return items
+    }
 
     // Everything pinned outside the range is mounted as its own segment rather than by
     // stretching the range to reach it:
@@ -245,6 +234,9 @@ export function createEngine(initial: EngineOptions): Engine {
     //    and aimed at while the viewport is still far away from it.
     const pinned = new Set<number>()
     const pinIfOutside = (index: number): void => {
+      // `indexOf` reports -1 for a key that is not loaded, which is "outside the range" in
+      // the arithmetic sense and nothing at all in the useful sense.
+      if (index < 0) return
       if (index < range[0] || index > range[1]) pinned.add(index)
     }
     for (const key of keepMounted ?? []) pinIfOutside(cache.indexOf(key))
@@ -252,7 +244,12 @@ export function createEngine(initial: EngineOptions): Engine {
       for (let index = pinnedRange[0]; index <= pinnedRange[1]; index++) pinIfOutside(index)
     }
 
-    for (const index of pinned) push(index)
+    // A pin *inside* the range is already mounted. `keepMounted` holds the focused row,
+    // which is normally on screen, so this is the usual case whenever a keyboard user is
+    // reading — and it should cost neither the extra items nor the sort.
+    if (pinned.size === 0) return items
+
+    for (const index of pinned) pushItem(items, cache, index)
     return items.sort((a, b) => a.index - b.index)
   }
 
@@ -555,19 +552,17 @@ export function createEngine(initial: EngineOptions): Engine {
       // `sizeSnapshot` did nothing whatsoever through the React adapter — which only ever
       // forwards options this way.
       //
-      // Applied at most once, and compared *before* the merge below so the object the
-      // constructor already consumed is not re-applied on the first render. Once is
-      // enough by definition: a snapshot restores what was measured before this list
-      // existed, and by the second one the list has its own measurements, which always
-      // win. Guarding on reference identity alone would re-walk an inline literal — a
-      // 12,000-entry snapshot, on every render.
+      // Applied at most once, which is enough by definition: a snapshot restores what was
+      // measured before this list existed, and by the time a second one could arrive the
+      // list has its own measurements, which always win. The flag — rather than reference
+      // identity — is what stops an inline literal from being re-walked every render, a
+      // 12,000-entry snapshot at a time.
       const snapshot = next.sizeSnapshot
-      const isNewSnapshot = snapshot !== undefined && snapshot !== options.sizeSnapshot
 
       options = { ...options, ...next }
       if (next.visibility) tracker.setOptions(next.visibility)
 
-      if (isNewSnapshot && !snapshotRestored) {
+      if (snapshot !== undefined && !snapshotRestored) {
         snapshotRestored = true
         if (cache.restore(snapshot) > 0) publish(true)
       }
@@ -812,6 +807,26 @@ export function createEngine(initial: EngineOptions): Engine {
       visibilityListeners.clear()
     },
   }
+}
+
+/**
+ * Append one item's snapshot, if the index is loaded.
+ *
+ * At module scope rather than a closure inside `itemsFor`: that runs once per publish, so
+ * once per frame during a scroll, and a closure there allocates a function object plus a
+ * context for the enclosing scope every time — in the one function whose comment promises
+ * the common frame allocates nothing.
+ */
+function pushItem(items: VirtualItem[], cache: SizeCache, index: number): void {
+  const key = cache.keyAt(index)
+  if (key === undefined) return
+  items.push({
+    key,
+    index,
+    start: cache.offsetOf(index),
+    size: cache.sizeOf(index),
+    measured: cache.isMeasured(index),
+  })
 }
 
 /** Re-exported for the React adapter's convenience. */

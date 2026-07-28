@@ -403,7 +403,8 @@ export class SizeCache {
   restore(snapshot: StoredSizeSnapshot): number {
     if (snapshot.version !== 1 || snapshot.layoutSignature !== this.#layoutSignature) {
       // Both signatures, because "refused" without them is the one case where you need to
-      // know why — and it is what the e2e suite reads to prove a restore happened at all.
+      // know why: a width that differs by a pixel from the one measured under is
+      // indistinguishable from a stale format otherwise.
       if (TRACING) {
         trace('snapshot.restore', () => ({
           accepted: false,

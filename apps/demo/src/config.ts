@@ -1,3 +1,5 @@
+import { THREAD_SIZE } from './thread.js'
+
 /**
  * The demo's configuration, read once from the URL.
  *
@@ -26,10 +28,10 @@ export interface DemoConfig {
   snapshot: boolean
 }
 
-export const DEFAULT_HEADER_HEIGHT = 64
 export const SNAPSHOT_KEY = 'virtual-anchor-demo-sizes'
 
-import { THREAD_SIZE } from './thread.js'
+/** The demo's sticky header, and so its default `scrollPaddingStart`. */
+const DEFAULT_HEADER_HEIGHT = 64
 
 const params = new URLSearchParams(window.location.search)
 

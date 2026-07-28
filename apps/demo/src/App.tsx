@@ -227,7 +227,7 @@ export function App(): ReactNode {
       maxEnterCount: () => Math.max(0, ...entersRef.current.values()),
     }
     Object.assign(window, { __list: handle })
-  }, [loadMore, window_.from, window_.to, restoredSnapshot])
+  }, [loadMore, window_.from, window_.to])
 
   /** Fetch when either edge comes within a screenful. */
   const pageAtEdges = useCallback(

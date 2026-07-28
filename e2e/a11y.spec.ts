@@ -1,4 +1,5 @@
 import AxeBuilder from '@axe-core/playwright'
+import { scrollTo, setWindowAround } from './helpers.js'
 import { expect, test } from '@playwright/test'
 
 test.describe('accessibility', () => {
@@ -47,22 +48,8 @@ test.describe('accessibility', () => {
     await page.locator('[role="article"]').first().waitFor()
 
     // A smooth request becomes an instant jump: one write, no animation frames.
-    const result = await page.evaluate(async () => {
-      const api = (
-        window as unknown as {
-          __list: {
-            setWindowAround: (i: number) => void
-            scrollToKey: (k: string, o?: unknown) => Promise<{ iterations: number }>
-          }
-        }
-      ).__list
-      api.setWindowAround(300)
-      for (let attempt = 0; attempt < 60; attempt++) {
-        await new Promise(requestAnimationFrame)
-        if (document.querySelector('[data-comment-index="300"]')) break
-      }
-      return api.scrollToKey('comment-300', { align: 'start', behavior: 'smooth' })
-    })
+    await setWindowAround(page, 300)
+    const result = await scrollTo(page, 300, { align: 'start', behavior: 'smooth' })
 
     // An eased approach takes dozens of frames; a jump takes almost none.
     expect(result.iterations).toBeLessThan(5)

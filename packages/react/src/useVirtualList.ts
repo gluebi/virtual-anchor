@@ -26,6 +26,13 @@ import {
   useSyncExternalStore,
 } from 'react'
 
+/**
+ * Store-driven renders per second that mean something is looping.
+ *
+ * Ten times what a continuously scrolling list needs, which is one per frame.
+ */
+const RENDER_STORM_PER_SECOND = 600
+
 export interface UseVirtualListOptions<T> {
   /** The loaded window, in display order. */
   items: readonly T[]
@@ -87,7 +94,14 @@ export interface UseVirtualListResult<T> {
    * be expressible on it.
    */
   keyAt: (index: number) => ItemKey | undefined
-  /** Move focus to an item, if it is mounted. Returns whether it could. */
+  /**
+   * Move focus to an item, if it is mounted. Returns whether it could.
+   *
+   * Goes through the engine, which already owns the element registry. The component used to
+   * keep a second `Map<ItemKey, HTMLElement>` — which leaked every element ever mounted,
+   * because its cleanup branch is unreachable under React 19's ref semantics — and
+   * recovered the key from a `data-` attribute React knew at render time.
+   */
   focusItem: (key: ItemKey) => boolean
   engine: Engine | null
 }
@@ -247,6 +261,34 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
   // has to render. Reading the DOM inside a selector would be the canonical
   // tearing bug here: React may call it several times per render, so two rows
   // could observe different scroll positions in one pass.
+  /**
+   * A development-only detector for the failure the microtask hop below would otherwise
+   * hide: a publish that provokes a render that publishes again.
+   *
+   * React's own "Maximum update depth exceeded" only fires for updates nested inside a
+   * render or effect. Once the notification hops a microtask each cycle is a separate
+   * task, so React sees unrelated root updates and says nothing — the loop just pins a
+   * core in silence. A rate is the only honest signal: a busy scroll drives at most one
+   * store-driven render per frame.
+   */
+  const storeRenders = useRef(0)
+  useEffect(() => {
+    if (process.env.NODE_ENV === 'production') return
+    const interval = setInterval(() => {
+      if (storeRenders.current > RENDER_STORM_PER_SECOND) {
+        console.error(
+          `[virtual-anchor] ${String(storeRenders.current)} store-driven renders in a second. ` +
+            'A publish is provoking a render that publishes again — this is a loop, and ' +
+            'without this message it would spin silently.',
+        )
+      }
+      storeRenders.current = 0
+    }, 1000)
+    return () => {
+      clearInterval(interval)
+    }
+  }, [])
+
   const state = useSyncExternalStore(
     useCallback(
       (onChange: () => void) => {
@@ -267,6 +309,11 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
           // Nothing is delayed that anyone can observe. React re-reads the snapshot for
           // the render already in progress, item positions are written straight to the
           // DOM rather than through React, and a microtask still runs before paint.
+          //
+          // The one thing it costs is React's own "Maximum update depth exceeded", which
+          // catches a render→publish→render cycle loudly. A cycle here would instead spin
+          // on microtasks in silence, so development keeps a detector of its own.
+          storeRenders.current++
           queueMicrotask(onChange)
         })
       },

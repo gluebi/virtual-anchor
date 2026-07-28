@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { open, topOfKey } from './helpers.js'
+import { DEFAULT_PADDING_START, open, SNAPSHOT_KEY, topOfKey } from './helpers.js'
 import type { Anchor } from '../packages/core/src/index.js'
 
 /**
@@ -104,8 +104,8 @@ test.describe('a prepend during an in-flight smooth scroll', () => {
     expect(result.settled, `reason=${result.reason}`).toBe(true)
 
     const top = await topOfKey(page, 'comment-5988')
-    // 64px is the sticky header, which `scrollPaddingStart` accounts for.
-    expect(Math.abs(top - 64), `landed at ${String(top)}`).toBeLessThan(0.5)
+    // Below the sticky header, which is what `scrollPaddingStart` accounts for.
+    expect(Math.abs(top - DEFAULT_PADDING_START), `landed at ${String(top)}`).toBeLessThan(0.5)
   })
 })
 
@@ -168,7 +168,7 @@ test.describe('a restored size snapshot', () => {
     await open(page, 'comment=4000&snapshot=1')
 
     // Measure a decent number of comments, then persist as the demo does on unload.
-    const persisted = await page.evaluate(async () => {
+    const persisted = await page.evaluate(async (key) => {
       sessionStorage.clear()
       const scroller = document.querySelector('.scroller')
       if (!scroller) return 0
@@ -180,9 +180,9 @@ test.describe('a restored size snapshot', () => {
       await new Promise((resolve) => setTimeout(resolve, 400))
       const snapshot = window.__list.takeSizeSnapshot()
       if (!snapshot) return 0
-      sessionStorage.setItem('virtual-anchor-demo-sizes', JSON.stringify(snapshot))
+      sessionStorage.setItem(key, JSON.stringify(snapshot))
       return snapshot.sizes.length
-    })
+    }, SNAPSHOT_KEY)
     expect(persisted).toBeGreaterThan(20)
 
     // Same tab, so sessionStorage carries over — as a reload would.
@@ -210,18 +210,18 @@ test.describe('a restored size snapshot', () => {
     // snapshot is refused — restoring it would put the list confidently in the wrong place.
     await open(page, 'comment=4000&snapshot=1')
 
-    await page.evaluate(() => {
+    await page.evaluate((key) => {
       const snapshot = window.__list.takeSizeSnapshot()
       if (!snapshot) return
       sessionStorage.setItem(
-        'virtual-anchor-demo-sizes',
+        key,
         JSON.stringify({
           ...snapshot,
           layoutSignature: 'measured-at-some-other-width',
           sizes: Array.from({ length: 40 }, (_, i) => [`comment-${String(3980 + i)}`, 999]),
         }),
       )
-    })
+    }, SNAPSHOT_KEY)
 
     await open(page, 'comment=4000&snapshot=1')
     const measured = await page.evaluate(

@@ -6,7 +6,7 @@ import {
 } from './anchor.js'
 import { type ListInsets } from './listGeometry.js'
 import { isIOSWebKit, prefersReducedMotion, supportsScrollEnd } from './env.js'
-import { TRACING, trace } from './trace.js'
+import { isTracing, TRACING, trace } from './trace.js'
 import type { SizeCache } from './sizeCache.js'
 import type {
   ItemKey,
@@ -112,39 +112,36 @@ export interface Scroller {
   dispose(): void
 }
 
+/** One frame's worth of convergence decision, as the trace reports it. */
+type StepTrace = Record<string, unknown> & {
+  key: ItemKey
+  index: number
+  target: number
+  actual: number
+  uncarried: number
+  arrived: boolean
+  targetMoved: boolean
+  quiet: boolean
+  settledExternally: boolean
+  stableFrames: number
+  elapsed: number
+}
+
 /**
- * One frame's worth of convergence decision.
+ * Record one frame of the convergence loop.
  *
- * Deliberately not an inline thunk inside `step`: a closure there forces a context
- * object for the whole scope on every call, whether or not tracing is on, which is a new
- * allocation in the tightest loop in this library. Here the closure belongs to this
- * function instead, and `step` allocates nothing.
+ * Two deliberate choices. It is at module scope rather than an inline thunk inside `step`,
+ * because a closure there forces a context object for the whole scope on every call —
+ * whether or not tracing is on — and that loop is the hottest code in this library.
+ *
+ * And it takes a named record rather than a positional list: four of these fields are
+ * consecutive booleans, so transposing two of them would compile clean and then lie in
+ * every trace, in the module whose entire purpose is being trustworthy about what
+ * happened. The record is built only when a sink is attached, which is why the call site
+ * asks `isTracing()` rather than `TRACING`.
  */
-function traceStep(
-  current: PendingScroll,
-  index: number,
-  target: number,
-  actual: number,
-  uncarried: number,
-  arrived: boolean,
-  targetMoved: boolean,
-  quiet: boolean,
-  settledExternally: boolean,
-  elapsed: number,
-): void {
-  trace('scroll.step', () => ({
-    key: current.key,
-    index,
-    target,
-    actual,
-    uncarried,
-    arrived,
-    targetMoved,
-    quiet,
-    settledExternally,
-    stableFrames: current.stableFrames,
-    elapsed,
-  }))
+function traceStep(step: StepTrace): void {
+  trace('scroll.step', () => step)
 }
 
 interface PendingScroll {
@@ -474,7 +471,21 @@ export function createScroller(options: ScrollerOptions): Scroller {
     const quiet =
       settledExternally || now() - current.lastModelChangeAt > MODEL_QUIET_MS
 
-    if (TRACING) traceStep(current, index, target, actual, uncarried, arrived, targetMoved, quiet, settledExternally, elapsed)
+    if (isTracing()) {
+      traceStep({
+        key: current.key,
+        index,
+        target,
+        actual,
+        uncarried,
+        arrived,
+        targetMoved,
+        quiet,
+        settledExternally,
+        stableFrames: current.stableFrames,
+        elapsed,
+      })
+    }
 
     if (!targetMoved && arrived && quiet) {
       current.stableFrames++
@@ -537,13 +548,12 @@ export function createScroller(options: ScrollerOptions): Scroller {
       deferredCorrection = 0
 
       const clamped = Math.min(Math.max(index, 0), cache.length - 1)
-      const key = cache.keyAt(clamped)
-      // Unreachable given the length check above; narrowing it here is what lets the
-      // pending scroll hold a plain `ItemKey` instead of branching on `undefined` every
-      // frame for a case that cannot happen.
-      if (key === undefined) {
-        return Promise.resolve({ settled: false, deviation: 0, iterations: 0, reason: 'empty' })
-      }
+      // Non-null because `clamped` is within `[0, length - 1]` of a cache the check above
+      // proved non-empty. Asserted rather than branched: a runtime guard here would be
+      // unreachable code that the coverage floors then have to be loosened for, and it is
+      // what lets the pending scroll hold a plain `ItemKey` instead of testing for
+      // `undefined` every frame.
+      const key = cache.keyAt(clamped)!
       const align = scrollOptions.align ?? 'start'
       const extra = scrollOptions.offset ?? 0
       const smooth = scrollOptions.behavior === 'smooth' && !prefersReducedMotion()
