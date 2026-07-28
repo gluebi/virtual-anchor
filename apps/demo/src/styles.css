@@ -1,0 +1,202 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font:
+    15px/1.55 system-ui,
+    -apple-system,
+    sans-serif;
+  color: #1c1d20;
+  background: #f6f7f9;
+}
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+/* Deliberately overlaps the top of the scroller, so scrollPaddingStart has
+   something real to clear. */
+.header {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 16px;
+  background: #fff;
+  border-bottom: 1px solid #e2e4e8;
+  flex: none;
+}
+
+.search {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.search input {
+  padding: 6px 10px;
+  border: 1px solid #ccd0d6;
+  border-radius: 6px;
+  font: inherit;
+  width: 200px;
+}
+
+.search button {
+  padding: 6px 12px;
+  border: 1px solid #ccd0d6;
+  border-radius: 6px;
+  background: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+
+.body {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+}
+
+.scroller {
+  flex: 1;
+  min-width: 0;
+  padding: 0 16px;
+  background: #f6f7f9;
+}
+
+.comment-slot:focus-visible {
+  outline: 2px solid #3b6ef5;
+  outline-offset: 2px;
+}
+
+.comment {
+  background: #fff;
+  border: 1px solid #e2e4e8;
+  border-radius: 8px;
+  padding: 14px 16px;
+  transition: background-color 300ms ease;
+}
+
+.comment.is-seen {
+  border-left: 3px solid #9aa4b2;
+}
+
+.comment.is-highlighted {
+  background: #fff6d6;
+  border-color: #e3c766;
+}
+
+.comment p {
+  margin: 0 0 10px;
+}
+
+.comment p:last-child {
+  margin-bottom: 0;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.author {
+  font-weight: 600;
+}
+
+.badge {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: #eef1f5;
+  color: #5a6473;
+}
+
+.muted {
+  color: #6b7280;
+}
+
+.small {
+  font-size: 12px;
+}
+
+.panel {
+  width: 330px;
+  flex: none;
+  border-left: 1px solid #e2e4e8;
+  background: #fff;
+  padding: 12px 14px;
+  overflow-y: auto;
+}
+
+.panel h2 {
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6b7280;
+  margin: 0 0 8px;
+}
+
+.panel ol {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  font-size: 12px;
+}
+
+.panel li {
+  padding: 3px 0;
+  border-bottom: 1px solid #f1f2f4;
+}
+
+code.enter {
+  color: #157347;
+  font-weight: 600;
+}
+
+code.leave {
+  color: #a1442f;
+}
+
+@media (prefers-color-scheme: dark) {
+  body {
+    color: #e6e8eb;
+    background: #16181c;
+  }
+
+  .header,
+  .panel,
+  .comment {
+    background: #1e2126;
+    border-color: #2c3138;
+  }
+
+  .scroller {
+    background: #16181c;
+  }
+
+  .comment.is-highlighted {
+    background: #3b3421;
+    border-color: #7a6a30;
+  }
+
+  .search input,
+  .search button {
+    background: #22262c;
+    border-color: #333940;
+    color: inherit;
+  }
+
+  .badge {
+    background: #2a2f36;
+    color: #9aa4b2;
+  }
+}
