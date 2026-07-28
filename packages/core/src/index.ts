@@ -21,3 +21,16 @@ export {
   snapToDevicePixels,
 } from './anchor.js'
 export type { AnchorGeometry } from './anchor.js'
+
+export { createElementViewport, createWindowViewport } from './viewport.js'
+export type { Viewport } from './viewport.js'
+
+export { createResizer } from './resizer.js'
+export type { Resizer, ResizeBatch, ResizerOptions } from './resizer.js'
+
+export {
+  devicePixelRatioOf,
+  isIOSWebKit,
+  prefersReducedMotion,
+  supportsScrollEnd,
+} from './env.js'
