@@ -320,7 +320,7 @@ describe('useItemVisibility', () => {
 })
 
 describe('VirtualList focus pinning', () => {
-  it('keeps a consumer-supplied pin when an item takes focus', async () => {
+  it('keeps a consumer-supplied pin when an item takes focus', () => {
     // Replacing rather than merging meant a single click into the feed silently
     // unmounted every key the consumer had pinned.
     render(

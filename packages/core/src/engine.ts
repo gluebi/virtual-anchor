@@ -9,6 +9,7 @@ import { createScrollerGate, type ScrollerGate } from './gate.js'
 import { createResizer, type Resizer } from './resizer.js'
 import { createScroller, type Scroller } from './scroller.js'
 import { createNullSurface, type Surface } from './surface.js'
+import { TRACING, trace } from './trace.js'
 import { SizeCache, type SizeSnapshot } from './sizeCache.js'
 import { createVirtualStore, type VirtualItem, type VirtualState, type VirtualStore } from './store.js'
 import type { Anchor, ItemKey, ScrollResult, ScrollToOptions } from './types.js'
@@ -198,15 +199,13 @@ export function createEngine(initial: EngineOptions): Engine {
     const visible = g.visibleBand(scrollOffset)
     const buffered = g.bufferedBand(scrollOffset, options.buffer ?? DEFAULT_BUFFER)
 
-    let renderedStart = cache.indexAt(buffered.start)
-    let renderedEnd = cache.indexAt(buffered.end)
-    if (pinnedRange) {
-      renderedStart = Math.min(renderedStart, pinnedRange[0])
-      renderedEnd = Math.max(renderedEnd, pinnedRange[1])
-    }
-
+    // The pinned scroll target is deliberately *not* unioned in here. Widening the
+    // contiguous span to reach a distant target mounts every item in between: a smooth
+    // scroll from comment 0 to comment 7,777 mounted 7,798 rows in a single frame,
+    // which took 103 seconds and never scrolled at all. It is mounted as an extra
+    // segment by `itemsFor` instead.
     return {
-      rendered: [renderedStart, renderedEnd],
+      rendered: [cache.indexAt(buffered.start), cache.indexAt(buffered.end)],
       visible: [cache.indexAt(visible.start), cache.indexAt(Math.max(visible.start, visible.end))],
     }
   }
@@ -225,12 +224,26 @@ export function createEngine(initial: EngineOptions): Engine {
       })
     }
 
-    // Anything explicitly pinned — normally whatever holds focus — is mounted
-    // even when far outside the range, so tabbing out of a recycled row does not
-    // drop focus to the body.
+    // Everything pinned outside the range is mounted as its own segment rather than by
+    // stretching the range to reach it:
+    //
+    //  - `keepMounted`, normally whatever holds focus, so tabbing out of a recycled row
+    //    does not drop focus to the body;
+    //  - the destination of a programmatic scroll, which has to exist to be measured
+    //    and aimed at while the viewport is still far away from it.
+    const pinned = new Set<number>()
     for (const key of options.keepMounted ?? []) {
       const index = cache.indexOf(key)
-      if (index < 0 || (index >= range[0] && index <= range[1])) continue
+      if (index >= 0) pinned.add(index)
+    }
+    if (pinnedRange) {
+      for (let index = pinnedRange[0]; index <= pinnedRange[1]; index++) pinned.add(index)
+    }
+
+    for (const index of pinned) {
+      if (index >= range[0] && index <= range[1]) continue
+      const key = cache.keyAt(index)
+      if (key === undefined) continue
       items.push({
         key,
         index,
@@ -264,6 +277,15 @@ export function createEngine(initial: EngineOptions): Engine {
     // The anchor keeps the *user's* position stable. While a programmatic scroll
     // is in flight the scroller is authoritative instead — restoring an anchor
     // captured before it started would drag the view back and stall convergence.
+    if (TRACING && restoreScroll) {
+      trace('anchor.restore', () => ({
+        anchor,
+        skipped: anchor === null ? 'no-anchor' : scroller.isScrolling() ? 'scrolling' : null,
+        scrollOffset: viewport.getScrollOffset(),
+        totalSize,
+      }))
+    }
+
     if (restoreScroll && anchor && !scroller.isScrolling()) {
       const restored = resolveAnchorOffset(anchor, cache, geometry())
       // A null restore means the anchored key left the window. For a grows-only
@@ -321,6 +343,38 @@ export function createEngine(initial: EngineOptions): Engine {
     sampleVisibility(ranges.visible, scrollOffset)
   }
 
+  let visibilityTimer: ReturnType<typeof setTimeout> | null = null
+
+  /**
+   * Schedule the one sample that time alone would otherwise never produce.
+   *
+   * Every other sample is driven by an event — a scroll, a measurement, a resize — and
+   * all of those stop when the user stops. `dwellMs` and `leaveDelayMs` are deadlines
+   * measured from the last such event, so at rest they were simply never reached: with
+   * `dwellMs: 600`, scrolling to a comment and stopping reported nothing at all. The
+   * tracker knows when its next state change is due; this puts a timer on it and
+   * re-samples, which is enough because a sample that changes nothing arms nothing.
+   */
+  const armVisibilityTimer = (): void => {
+    if (visibilityTimer !== null) {
+      clearTimeout(visibilityTimer)
+      visibilityTimer = null
+    }
+
+    const due = tracker.nextDeadline(now())
+    if (TRACING) trace('visibility.deadline', () => ({ due, in: due === null ? null : due - now() }))
+    if (due === null || disposed) return
+
+    visibilityTimer = setTimeout(
+      () => {
+        visibilityTimer = null
+        const scrollOffset = viewport.getScrollOffset()
+        sampleVisibility(computeRanges(scrollOffset).visible, scrollOffset)
+      },
+      Math.max(0, due - now()),
+    )
+  }
+
   const sampleVisibility = (
     visible: readonly [number, number],
     scrollOffset: number,
@@ -331,6 +385,7 @@ export function createEngine(initial: EngineOptions): Engine {
     // tab, a scroller scrolled off the page.
     if (gate && !gate.isOpen()) {
       notifyVisibility(tracker.flushLeaves(now()))
+      armVisibilityTimer()
       return
     }
 
@@ -350,6 +405,7 @@ export function createEngine(initial: EngineOptions): Engine {
 
     if (band === null) {
       notifyVisibility(tracker.flushLeaves(now()))
+      armVisibilityTimer()
       return
     }
     const { start, end } = band
@@ -381,6 +437,7 @@ export function createEngine(initial: EngineOptions): Engine {
         suppressed: scroller.isScrolling(),
       }),
     )
+    armVisibilityTimer()
   }
 
   const resizer: Resizer = createResizer({
@@ -391,13 +448,21 @@ export function createEngine(initial: EngineOptions): Engine {
         if (index < 0) continue
         if (cache.setSize(index, size)) changed = true
       }
+      if (TRACING) {
+        trace('measure.batch', () => ({
+          count: batch.length,
+          changed,
+          totalSize: cache.totalSize(),
+          scrollOffset: viewport.getScrollOffset(),
+        }))
+      }
       if (!changed) return
 
       cache.refreshEstimate(viewport.getViewportSize())
       // Re-derive the scroll offset from the anchor: the item that was under the
       // viewport top stays under the viewport top, whatever moved above it.
       publish(true)
-      scroller.notifyMeasured()
+      scroller.notifyModelChanged()
     },
   })
 
@@ -472,6 +537,22 @@ export function createEngine(initial: EngineOptions): Engine {
       if (next.layoutSignature !== undefined) cache.setLayoutSignature(next.layoutSignature)
 
       const keysChanged = next.keys !== undefined && cache.setKeys(next.keys)
+      if (TRACING && next.keys !== undefined) {
+        trace('model.keys', () => ({
+          count: cache.length,
+          changed: keysChanged,
+          firstKey: cache.keyAt(0),
+        }))
+      }
+      if (keysChanged) {
+        // A prepend moves the target of an in-flight scroll as surely as a measurement
+        // does, and the newly inserted items are unmeasured, so more movement follows as
+        // they measure. Without this the convergence loop could declare the model stable
+        // in the gap between the insertion and its measurements, and resolve `converged`
+        // with a deviation of zero while the destination was still 331px from where it
+        // had been asked to go.
+        scroller.notifyModelChanged()
+      }
       // A key-set change moves every offset below the insertion point. Deriving
       // the offset from the anchor is the entirety of the prepend handling.
       publish(keysChanged)
@@ -529,6 +610,13 @@ export function createEngine(initial: EngineOptions): Engine {
           } else {
             restoreIntents.splice(0, restoreIndex + 1)
           }
+          if (TRACING) {
+            trace('anchor.derive', () => ({
+              offset,
+              anchor,
+              skipped: restoreIndex === -1 ? null : 'self-write',
+            }))
+          }
           publish(false)
         }),
       )
@@ -576,7 +664,7 @@ export function createEngine(initial: EngineOptions): Engine {
         // after the next rendering update, so waiting for it would paint one
         // frame at the wrong offset.
         publish(true)
-        scroller.notifyMeasured()
+        scroller.notifyModelChanged()
       }
 
       const stopObserving = resizer.observeItem(element, key)
@@ -659,6 +747,10 @@ export function createEngine(initial: EngineOptions): Engine {
       // per disposed list for anyone using the core directly. The React adapter only
       // avoided it by accident of effect-cleanup ordering.
       unmount?.()
+      if (visibilityTimer !== null) {
+        clearTimeout(visibilityTimer)
+        visibilityTimer = null
+      }
       itemRefCallbacks.clear()
       surface.dispose()
       scroller.dispose()

@@ -152,6 +152,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
 
   const engine = useMemo(() => {
     if (windowScroller) {
+      // The window is available immediately, so this needs no element and no ref.
       return createEngine({
         viewport: createWindowViewport(window),
         keys: [],

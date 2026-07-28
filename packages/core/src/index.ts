@@ -63,3 +63,6 @@ export type { DomSurfaceOptions, Surface } from './surface.js'
 
 export { createEngine, layoutSignatureFor } from './engine.js'
 export type { Engine, EngineOptions } from './engine.js'
+
+export { isTracing, setTraceSink, TRACING } from './trace.js'
+export type { TraceEvent, TraceSink } from './trace.js'

@@ -467,6 +467,25 @@ describe('engine scrolling', () => {
     h.engine.cancelScroll()
     await expect(promise).resolves.toMatchObject({ settled: false, reason: 'cancelled' })
   })
+
+  it('mounts a distant scroll target without mounting everything in between', async () => {
+    // The destination has to be mounted to be measured and aimed at. Reaching it by
+    // widening the *contiguous* mounted range instead mounts the whole span: a smooth
+    // scroll from item 0 to item 7,777 mounted 7,798 rows in one frame, which took 103
+    // seconds of a single frame and never scrolled at all.
+    const h = setup({ count: 10_000 })
+    const promise = h.engine.scrollToIndex(9000, { behavior: 'smooth' })
+
+    const { items, renderedRange } = h.engine.store.getState()
+    // Two clusters — the viewport's and the target's — not one span joining them.
+    expect(items.length).toBeLessThan(100)
+    expect(renderedRange[1]).toBeLessThan(1000)
+    expect(items.some((item) => item.index >= 8990 && item.index <= 9010)).toBe(true)
+    expect(items.some((item) => item.index === 4500)).toBe(false)
+
+    h.engine.cancelScroll()
+    await promise
+  })
 })
 
 describe('engine visibility', () => {
@@ -484,6 +503,56 @@ describe('engine visibility', () => {
     h.scroll(5000)
     expect(events).toContain('leave:c0')
     expect(events).toContain('enter:c50')
+  })
+
+  it('reports a dwell that completes while nothing else is happening', async () => {
+    // Every other sample is driven by an event, and events stop when the user stops. A
+    // dwell measured from the last of them was therefore never reached at rest: with
+    // `dwellMs: 40`, scrolling to a comment and stopping reported nothing, forever.
+    const events: string[] = []
+    const h = setup({
+      count: 1000,
+      visibility: { dwellMs: 40 },
+      onVisibilityChange: (batch) => {
+        for (const event of batch) events.push(`${event.phase}:${String(event.key)}`)
+      },
+    })
+
+    h.scroll(5000)
+    // Nothing yet — the dwell has only just started.
+    expect(events).toEqual([])
+
+    // No further scroll, no measurement, no resize: only time passing.
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    expect(events.some((entry) => entry.startsWith('enter:'))).toBe(true)
+  })
+
+  it('holds no timer open once everything visible has been reported', () => {
+    // A settled list must not keep re-sampling: the follow-up exists for a pending
+    // deadline, and an armed timer with nothing left to wait for would spin forever.
+    vi.useFakeTimers()
+    try {
+      const h = setup({ count: 1000, visibility: { dwellMs: 0 } })
+      h.scroll(5000)
+      expect(vi.getTimerCount()).toBe(0)
+      h.engine.dispose()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('drops a pending visibility timer on dispose', () => {
+    vi.useFakeTimers()
+    try {
+      const h = setup({ count: 1000, visibility: { dwellMs: 500 } })
+      h.scroll(5000)
+      expect(vi.getTimerCount()).toBe(1)
+
+      h.engine.dispose()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('exposes per-item visibility and notifies subscribers', () => {

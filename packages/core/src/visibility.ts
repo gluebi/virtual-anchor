@@ -247,8 +247,7 @@ export class VisibilityTracker {
 
     const cached = this.#snapshots.get(key)
     if (
-      cached &&
-      cached.visible === state.reported &&
+      cached?.visible === state.reported &&
       cached.itemFraction === state.itemFraction &&
       cached.viewportFraction === state.viewportFraction &&
       cached.hasBeenSeen === state.hasBeenSeen
@@ -264,6 +263,47 @@ export class VisibilityTracker {
     }
     this.#snapshots.set(key, next)
     return next
+  }
+
+  /**
+   * When the next purely time-driven change is due, or `null` if none is.
+   *
+   * Sampling is driven by scrolls and measurements, and both stop when the user does.
+   * That leaves every deadline in this module unreachable at rest: scroll to a comment
+   * with `dwellMs: 1000`, stop, and the dwell never completes because nothing samples
+   * again — which is exactly the case impression tracking exists for. The same applies
+   * to a pending `leaveDelayMs`.
+   *
+   * The caller schedules a sample for this time. Only states that can still change are
+   * considered, so a settled list reports `null` and schedules nothing.
+   */
+  nextDeadline(now: number): number | null {
+    const {
+      dwellMs = 0,
+      dwell = 'continuous',
+      once = false,
+      leaveDelayMs = 0,
+    } = this.#options
+
+    const deadlines: number[] = []
+    for (const state of this.#active) {
+      if (state.leavePendingSince !== null && leaveDelayMs > 0) {
+        deadlines.push(state.leavePendingSince + leaveDelayMs)
+        continue
+      }
+
+      // A reported item has nothing left to wait for, and under `once` a seen item will
+      // never report again however long it dwells.
+      if (state.reported || state.passingSince === null) continue
+      if (once && state.hasBeenSeen) continue
+
+      const banked = dwell === 'cumulative' ? state.accumulated : 0
+      deadlines.push(state.passingSince + Math.max(0, dwellMs - banked))
+    }
+
+    // Never in the past: the caller turns this into a delay, and a negative one would
+    // spin. `#active` holds only what is on screen, so this stays a handful of entries.
+    return deadlines.length === 0 ? null : Math.max(now, Math.min(...deadlines))
   }
 
   /** Keys currently reported as visible. */

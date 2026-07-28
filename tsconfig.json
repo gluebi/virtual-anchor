@@ -8,6 +8,7 @@
   },
   "include": [
     "*.config.ts",
+    "vitest.setup.ts",
     "eslint.config.js",
     "e2e/**/*.ts",
     "spike/**/*.ts",

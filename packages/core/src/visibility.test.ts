@@ -587,3 +587,73 @@ describe('VisibilityTracker state accessors', () => {
     expect(events).toEqual([])
   })
 })
+
+describe('nextDeadline', () => {
+  const candidate = (index: number) => ({
+    key: `c${String(index)}`,
+    index,
+    start: index * 100,
+    size: 100,
+    measured: true,
+  })
+
+  const input = (now: number, items = [candidate(0)]) => ({
+    viewportStart: 0,
+    viewportEnd: 500,
+    items,
+    now,
+    gated: true,
+  })
+
+  it('reports when a pending dwell will complete', () => {
+    // Sampling is driven by scrolls and measurements, and both stop when the user does.
+    // Nothing else would ever ask again: scroll to a comment with `dwellMs: 600`, stop,
+    // and it was never reported at all — which is the case impression tracking is for.
+    const tracker = new VisibilityTracker({ dwellMs: 600 })
+    expect(tracker.sample(input(1000))).toEqual([])
+    expect(tracker.nextDeadline(1000)).toBe(1600)
+  })
+
+  it('counts banked time under cumulative dwell', () => {
+    const tracker = new VisibilityTracker({ dwellMs: 600, dwell: 'cumulative' })
+    tracker.sample(input(0))
+    // 200ms passing, then away, banking 200ms.
+    tracker.sample(input(200))
+    tracker.sample(input(200, [candidate(9)]))
+    // Back again: only the remaining 400ms is still owed.
+    tracker.sample(input(1000))
+    expect(tracker.nextDeadline(1000)).toBe(1400)
+  })
+
+  it('reports nothing once everything visible has been reported', () => {
+    const tracker = new VisibilityTracker({ dwellMs: 0 })
+    expect(tracker.sample(input(0))).toHaveLength(1)
+    // Reported and stable: there is no future moment at which anything changes, so a
+    // settled list must not hold a timer open.
+    expect(tracker.nextDeadline(0)).toBeNull()
+  })
+
+  it('reports nothing for an item that can never report again under once', () => {
+    const tracker = new VisibilityTracker({ dwellMs: 100, once: true })
+    tracker.sample(input(0))
+    tracker.sample(input(200))
+    // Seen, then left and returned: `once` means no further enter, so no deadline.
+    tracker.sample(input(300, [candidate(9)]))
+    tracker.sample(input(400))
+    expect(tracker.nextDeadline(400)).toBeNull()
+  })
+
+  it('reports when a delayed leave will fire', () => {
+    const tracker = new VisibilityTracker({ leaveDelayMs: 250 })
+    tracker.sample(input(0))
+    // Out of the band, but within the hysteresis window.
+    tracker.sample({ ...input(100), viewportStart: 900, viewportEnd: 1400 })
+    expect(tracker.nextDeadline(100)).toBe(350)
+  })
+
+  it('never reports a time in the past', () => {
+    const tracker = new VisibilityTracker({ dwellMs: 600 })
+    tracker.sample(input(0))
+    expect(tracker.nextDeadline(5000)).toBe(5000)
+  })
+})

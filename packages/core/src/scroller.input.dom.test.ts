@@ -273,7 +273,7 @@ describe('settle detection', () => {
     h.fire('scrollend')
     // A measurement means the model just moved, so the earlier report says nothing about
     // the target being stable any more.
-    h.scroller.notifyMeasured()
+    h.scroller.notifyModelChanged()
     h.frames(2)
 
     expect(h.scroller.isScrolling()).toBe(true)

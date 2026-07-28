@@ -5,8 +5,8 @@ import { SizeCache } from './sizeCache.js'
 import type { ItemKey, ScrollResult } from './types.js'
 import type { Viewport } from './viewport.js'
 
-const keysFor = (n: number): ItemKey[] =>
-  Array.from({ length: n }, (_, i) => `c${String(i)}`)
+const keysFor = (n: number, prefix = 'c'): ItemKey[] =>
+  Array.from({ length: n }, (_, i) => `${prefix}${String(i)}`)
 
 interface FakeViewport extends Viewport {
   /** Simulate an engine that snaps scroll offsets to whole pixels. */
@@ -283,7 +283,7 @@ describe('scrollToIndex convergence', () => {
 
     // The items above turn out to be much taller than estimated.
     for (let i = 0; i < 500; i++) h.cache.setSize(i, 300)
-    h.scroller.notifyMeasured()
+    h.scroller.notifyModelChanged()
 
     const result = await settle(h, promise)
     expect(result.settled).toBe(true)
@@ -299,7 +299,7 @@ describe('scrollToIndex convergence', () => {
     // Measurements trickle in over several rounds.
     for (let round = 0; round < 5; round++) {
       for (let i = round * 100; i < (round + 1) * 100; i++) h.cache.setSize(i, 200)
-      h.scroller.notifyMeasured()
+      h.scroller.notifyModelChanged()
       h.frames(2)
     }
 
@@ -312,7 +312,7 @@ describe('scrollToIndex convergence', () => {
     const h = harness()
     const promise = h.scroller.scrollToIndex(500)
     h.cache.setSize(3, 900)
-    h.scroller.notifyMeasured()
+    h.scroller.notifyModelChanged()
 
     const result = await settle(h, promise)
     expect(result.iterations).toBeGreaterThanOrEqual(1)
@@ -343,7 +343,7 @@ describe('scrollToIndex convergence', () => {
     for (let i = 0; i < 500 && !state.done; i++) {
       size += 1
       h.cache.setSize(3, size)
-      h.scroller.notifyMeasured()
+      h.scroller.notifyModelChanged()
       h.frames(1)
       await Promise.resolve()
     }
@@ -493,7 +493,7 @@ describe('scrollToIndex interruption', () => {
     const h = harness()
     const promise = h.scroller.scrollToIndex(500)
     h.cache.setSize(0, 200)
-    h.scroller.notifyMeasured()
+    h.scroller.notifyModelChanged()
     await settle(h, promise)
 
     expect(h.scrollingChanges[0]).toBe(true)
@@ -542,7 +542,7 @@ describe('scrollToIndex smooth behaviour', () => {
     h.frames(3)
     // Measurements land while the animation is still running.
     for (let i = 0; i < 500; i++) h.cache.setSize(i, 200)
-    h.scroller.notifyMeasured()
+    h.scroller.notifyModelChanged()
 
     const result = await settle(h, promise)
     expect(result.settled).toBe(true)
@@ -560,5 +560,55 @@ describe('scrollToIndex smooth behaviour', () => {
     await settle(h, promise)
 
     vi.unstubAllGlobals()
+  })
+})
+
+describe('a target that moves while the scroll is in flight', () => {
+  it('follows the item, not the index it happened to occupy', async () => {
+    // Prepending shifts every index. Aiming at the remembered one lands on a different
+    // item and reports success: a smooth scroll to comment 6018 with 40 comments
+    // prepended mid-flight converged on the row that had inherited index 38, with a
+    // deviation of zero. A window that grows upward is the case this library is for.
+    const h = harness({ count: 100, itemSize: 100 })
+    const promise = h.scroller.scrollToIndex(80, { align: 'start', behavior: 'smooth' })
+
+    h.frames(2)
+    // 40 items arrive above, so the target's index becomes 120.
+    h.cache.setKeys([...keysFor(40, 'older'), ...keysFor(100)])
+    h.scroller.notifyModelChanged()
+
+    const result = await settle(h, promise)
+
+    expect(result.settled).toBe(true)
+    // The destination is item 120 now: 120 × 100px.
+    expect(h.viewport.getScrollOffset()).toBeCloseTo(12_000, 0)
+  })
+
+  it('keeps its last known position if the target leaves the collection', async () => {
+    const h = harness({ count: 100, itemSize: 100 })
+    const promise = h.scroller.scrollToIndex(50, { align: 'start' })
+
+    h.frames(1)
+    // The target key is gone entirely — nothing to re-resolve against.
+    h.cache.setKeys(keysFor(100, 'replaced'))
+    h.scroller.notifyModelChanged()
+
+    const result = await settle(h, promise)
+    // It still ends, at the position it last knew, rather than hanging or aiming at NaN.
+    expect(Number.isFinite(result.deviation)).toBe(true)
+    expect(Number.isFinite(h.viewport.getScrollOffset())).toBe(true)
+  })
+
+  it('treats a structural change as the model moving, not just a measurement', async () => {
+    // `scrollend` says the *scrolling* stopped; it says nothing about a target that is
+    // still moving because items were inserted. Without invalidating it, the loop can
+    // settle in the gap between an insertion and the measurements that follow it.
+    const h = harness({ count: 100, itemSize: 100 })
+    const promise = h.scroller.scrollToIndex(50, { align: 'start', behavior: 'smooth' })
+    h.frames(2)
+
+    h.scroller.notifyModelChanged()
+    const result = await settle(h, promise)
+    expect(result.settled).toBe(true)
   })
 })

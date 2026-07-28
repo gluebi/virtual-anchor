@@ -50,6 +50,18 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
    * window starts at the beginning of the collection.
    */
   firstItemPosition?: number
+  /**
+   * Content rendered inside the scroller, above the list.
+   *
+   * This is what `scrollMargin` describes — a list sharing a scroller with content
+   * above it. Without a slot for that content the option was reachable only from the
+   * headless hook, so the component could describe a layout it could not produce.
+   *
+   * Its height must equal `scrollMargin`: the library treats it as static, because
+   * measuring it would mean the list's own origin moved and every offset with it.
+   */
+  before?: ReactNode
+
   /** Whether a page is currently loading, for `aria-busy`. */
   loading?: boolean
   /** Accessible name for the feed. */
@@ -81,6 +93,18 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
  * a flex parent, and since inline styles beat a stylesheet the consumer cannot
  * override it.
  */
+/**
+ * When the *page* scrolls, this element must not scroll as well.
+ *
+ * The component used to apply the scrollport styles unconditionally while passing
+ * `windowScroller` through to the hook, so the DOM shape and the viewport choice were
+ * decided independently with nothing reconciling them — a nested scroller inside a
+ * window-scrolled list.
+ */
+const WINDOW_HOST_STYLE: CSSProperties = {
+  position: 'relative',
+}
+
 const SCROLLER_STYLE: CSSProperties = {
   position: 'relative',
   overflowY: 'auto',
@@ -131,6 +155,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
     renderItem,
     totalCount,
     firstItemPosition = 1,
+    before,
     loading = false,
     label,
     className,
@@ -237,15 +262,14 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
   )
 
   const setSize = totalCount ?? list.count
+  const windowScroller = listOptions.windowScroller === true
 
   return (
     <div
-      ref={list.scrollRef}
+      // A window-scrolled list has no scrollport of its own to attach to.
+      ref={windowScroller ? undefined : list.scrollRef}
       className={className}
-      style={{ ...SCROLLER_STYLE, ...style }}
-      role="feed"
-      aria-busy={loading}
-      aria-label={label}
+      style={{ ...(windowScroller ? WINDOW_HOST_STYLE : SCROLLER_STYLE), ...style }}
       onScroll={onScroll}
       onKeyDown={onKeyDown}
       onFocus={(event) => {
@@ -263,7 +287,17 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
         }
       }}
     >
-      <div ref={list.containerRef} style={CONTAINER_STYLE}>
+      {before}
+      {/* `role="feed"` sits here rather than on the scrollport because this is the
+          element whose children are the articles — and with a `before` slot the
+          scrollport now has a non-article child. */}
+      <div
+        ref={list.containerRef}
+        style={CONTAINER_STYLE}
+        role="feed"
+        aria-busy={loading}
+        aria-label={label}
+      >
         {list.items.map((rendered) => (
           <div
             key={rendered.key}
