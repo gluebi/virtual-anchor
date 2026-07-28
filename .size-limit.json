@@ -1,0 +1,13 @@
+[
+  {
+    "name": "virtual-anchor (core, incl. zustand)",
+    "path": "packages/core/dist/index.js",
+    "limit": "9 kB"
+  },
+  {
+    "name": "react-virtual-anchor (adapter only)",
+    "path": "packages/react/dist/index.js",
+    "limit": "3 kB",
+    "ignore": ["react", "react-dom", "virtual-anchor"]
+  }
+]
