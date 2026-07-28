@@ -46,8 +46,9 @@ const fakeViewport = (
       viewport.offset =
         viewport.snap > 0 ? Math.floor(clamped / viewport.snap) * viewport.snap : clamped
     },
-    getContentClientTop: () => 0,
     addEventListener: () => () => {},
+    observeSize: () => () => {},
+    getGateTarget: () => null,
     getElement: () => null,
     getWindow: () => null,
     getDevicePixelRatio: () => 1,

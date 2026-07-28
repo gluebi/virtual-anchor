@@ -6,8 +6,6 @@ export type ResizeBatch = readonly (readonly [ItemKey, number])[]
 export interface ResizerOptions {
   /** Called with every changed item size from one observer callback. */
   onItemResize: (batch: ResizeBatch) => void
-  /** Called when the scrollport itself changes size. */
-  onViewportResize?: (size: number) => void
   /**
    * Defer processing to the next animation frame.
    *
@@ -24,7 +22,6 @@ export interface ResizerOptions {
 export interface Resizer {
   /** Start measuring an item. Returns its own cleanup, for a ref callback. */
   observeItem(element: Element, key: ItemKey): () => void
-  observeViewport(element: Element): () => void
   /** Read an element's size immediately, without waiting for a callback. */
   measure(element: Element): number
   dispose(): void
@@ -94,17 +91,6 @@ function warnAboutMargins(element: Element, key: ItemKey): void {
 export function createResizer(options: ResizerOptions): Resizer {
   const keys = new WeakMap<Element, ItemKey>()
   const lastSizes = new Map<ItemKey, number>()
-  let viewportElement: Element | null = null
-  /**
-   * Last reported scrollport size, so the synthetic first entry is not reported.
-   *
-   * `observe()` always delivers an entry for a newly observed element — the item
-   * path already deduplicates by value for exactly that reason, and the scrollport
-   * needs the same treatment. Without it, one frame after mount the viewport
-   * "resizes" from nothing to its actual size, and any consumer that treats a
-   * scrollport resize as a reflow will act on a change that never happened.
-   */
-  let lastViewportSize: number | null = null
   let observer: ResizeObserver | null = null
   let disposed = false
   let marginsChecked = 0
@@ -113,19 +99,9 @@ export function createResizer(options: ResizerOptions): Resizer {
     if (disposed) return
 
     const batch: (readonly [ItemKey, number])[] = []
-    let viewportSize: number | null = null
 
     for (const entry of entries) {
       const target = entry.target
-
-      if (target === viewportElement) {
-        const size = sizeFromEntry(entry)
-        if (size !== lastViewportSize) {
-          lastViewportSize = size
-          viewportSize = size
-        }
-        continue
-      }
 
       const key = keys.get(target)
       if (key === undefined) continue
@@ -152,9 +128,7 @@ export function createResizer(options: ResizerOptions): Resizer {
       batch.push([key, size])
     }
 
-    // One callback in, at most one viewport notification and one batch out —
-    // never one notification per entry.
-    if (viewportSize !== null) options.onViewportResize?.(viewportSize)
+    // One callback in, one batch out — never one notification per entry.
     if (batch.length > 0) options.onItemResize(batch)
   }
 
@@ -209,21 +183,6 @@ export function createResizer(options: ResizerOptions): Resizer {
       }
     },
 
-    observeViewport(element) {
-      if (disposed) return () => {}
-
-      viewportElement = element
-      ensureObserver(element)?.observe(element, { box: 'border-box' })
-
-      return () => {
-        if (viewportElement === element) {
-          viewportElement = null
-          lastViewportSize = null
-        }
-        observer?.unobserve(element)
-      }
-    },
-
     measure(element) {
       // Synchronous path, for measuring a freshly mounted item before paint.
       // ResizeObserver's first callback arrives *after* the next rendering
@@ -235,8 +194,6 @@ export function createResizer(options: ResizerOptions): Resizer {
       disposed = true
       observer?.disconnect()
       observer = null
-      viewportElement = null
-      lastViewportSize = null
       lastSizes.clear()
     },
   }

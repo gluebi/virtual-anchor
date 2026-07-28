@@ -81,8 +81,9 @@ const harness = (options: { max?: number } = {}): Harness => {
       writes.push(next)
       offset = Math.min(Math.max(next, 0), max)
     },
-    getContentClientTop: () => 0,
     addEventListener: () => () => {},
+    observeSize: () => () => {},
+    getGateTarget: () => element,
     getElement: () => element,
     getWindow: () => window,
     getDevicePixelRatio: () => 2,

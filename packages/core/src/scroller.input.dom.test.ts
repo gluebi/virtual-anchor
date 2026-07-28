@@ -37,8 +37,9 @@ const harness = (): Harness => {
     setScrollOffset: (next) => {
       offset = Math.min(Math.max(next, 0), 99_400)
     },
-    getContentClientTop: () => 0,
     addEventListener: () => () => {},
+    observeSize: () => () => {},
+    getGateTarget: () => element,
     getElement: () => element,
     getWindow: () => window,
     getDevicePixelRatio: () => 1,
@@ -130,8 +131,9 @@ describe('scroller cancellation on user input', () => {
         getViewportSize: () => 600,
         getMaxScrollOffset: () => 1000,
         setScrollOffset: () => {},
-        getContentClientTop: () => 0,
-        addEventListener: () => () => {},
+            addEventListener: () => () => {},
+    observeSize: () => () => {},
+    getGateTarget: () => element,
         getElement: () => element,
         getWindow: () => window,
         getDevicePixelRatio: () => 1,

@@ -66,13 +66,6 @@ describe('createElementViewport', () => {
     expect(createElementViewport(element).getMaxScrollOffset()).toBe(0)
   })
 
-  it('adds the border when reporting the content top', () => {
-    // getBoundingClientRect().top is the border-box top; content starts inside
-    // the border. Missing this read a 1px border as a 1px accuracy failure.
-    const { viewport } = setup()
-    expect(viewport.getContentClientTop()).toBe(51)
-  })
-
   it('subscribes passively and unsubscribes cleanly', () => {
     const { element, viewport } = setup()
     const add = vi.spyOn(element, 'addEventListener')
@@ -150,11 +143,6 @@ describe('createWindowViewport', () => {
     expect(scrollTo).toHaveBeenCalledWith({ top: 940.25, behavior: 'auto' })
   })
 
-  it('treats the content top as the top of the viewport', () => {
-    stubWindow({})
-    expect(createWindowViewport(window).getContentClientTop()).toBe(0)
-  })
-
   it('subscribes on the window and unsubscribes cleanly', () => {
     stubWindow({})
     const viewport = createWindowViewport(window)
@@ -174,5 +162,111 @@ describe('createWindowViewport', () => {
     const viewport = createWindowViewport(window)
     expect(viewport.getElement()).toBe(document.documentElement)
     expect(viewport.getWindow()).toBe(window)
+  })
+})
+
+describe('viewport size observation', () => {
+  /** Controllable ResizeObserver — jsdom has none. */
+  class FakeResizeObserver implements ResizeObserver {
+    static latest: FakeResizeObserver | null = null
+    disconnected = false
+
+    constructor(private readonly callback: ResizeObserverCallback) {
+      FakeResizeObserver.latest = this
+    }
+
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {
+      this.disconnected = true
+    }
+
+    deliver(target: Element, blockSize: number): void {
+      this.callback(
+        [
+          {
+            target,
+            borderBoxSize: [{ blockSize, inlineSize: 0 }],
+            contentRect: new DOMRect(0, 0, 0, blockSize),
+          },
+        ] as unknown as ResizeObserverEntry[],
+        this,
+      )
+    }
+  }
+
+  beforeEach(() => {
+    FakeResizeObserver.latest = null
+    Object.defineProperty(window, 'ResizeObserver', {
+      configurable: true,
+      writable: true,
+      value: FakeResizeObserver,
+    })
+  })
+
+  it('does not report the synthetic first entry as a resize', () => {
+    // `observe()` always delivers an entry for a newly observed element. Reported as a
+    // resize it reads as the scrollport changing size one frame after mount, and a
+    // consumer that treats that as a reflow discards every measurement it holds —
+    // which is exactly how the `sizeSnapshot` feature came to do nothing.
+    const element = document.createElement('div')
+    document.body.appendChild(element)
+    const onResize = vi.fn()
+
+    createElementViewport(element).observeSize(onResize)
+    const observer = FakeResizeObserver.latest!
+
+    observer.deliver(element, 800)
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(800)
+
+    // The same size again is not a change.
+    observer.deliver(element, 800)
+    expect(onResize).toHaveBeenCalledOnce()
+
+    // A genuine change still reports.
+    observer.deliver(element, 600)
+    expect(onResize).toHaveBeenLastCalledWith(600)
+  })
+
+  it('disconnects on cleanup', () => {
+    const element = document.createElement('div')
+    document.body.appendChild(element)
+
+    const stop = createElementViewport(element).observeSize(vi.fn())
+    stop()
+    expect(FakeResizeObserver.latest?.disconnected).toBe(true)
+  })
+
+  it('observes the border box, so padding and borders count', () => {
+    const element = document.createElement('div')
+    document.body.appendChild(element)
+    const observe = vi.spyOn(FakeResizeObserver.prototype, 'observe')
+
+    createElementViewport(element).observeSize(vi.fn())
+    expect(observe).toHaveBeenCalledWith(element, { box: 'border-box' })
+  })
+
+  it('takes the window scroller size from innerHeight, not from the document', () => {
+    // The critical distinction: `documentElement`'s border-box height is the CONTENT
+    // height, so observing it made every content growth look like a viewport resize —
+    // and a window-scrolled list erased its own measurement history as it scrolled.
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 700 })
+    const onResize = vi.fn()
+
+    const stop = createWindowViewport(window).observeSize(onResize)
+    window.dispatchEvent(new Event('resize'))
+    expect(onResize).toHaveBeenCalledWith(700)
+
+    stop()
+    onResize.mockClear()
+    window.dispatchEvent(new Event('resize'))
+    expect(onResize).not.toHaveBeenCalled()
+  })
+
+  it('gives a window scroller no gate target, since it cannot leave the screen', () => {
+    expect(createWindowViewport(window).getGateTarget()).toBeNull()
+
+    const element = document.createElement('div')
+    expect(createElementViewport(element).getGateTarget()).toBe(element)
   })
 })

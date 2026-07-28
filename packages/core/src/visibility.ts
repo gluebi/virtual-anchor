@@ -210,6 +210,14 @@ export class VisibilityTracker {
    * only the reported items misses exactly that case.
    */
   #active = new Set<ItemState>()
+  /**
+   * States carrying dwell timing — a running clock or banked time.
+   *
+   * Tracked separately from `#active` because banked `accumulated` outlives membership
+   * there: a state is removed from `#active` when it stops passing, having just banked
+   * its elapsed time.
+   */
+  #timed = new Set<ItemState>()
   #started = false
   /** Set while suppressed; clears timing on the next live sample. */
   #needsTimingReset = false
@@ -246,6 +254,7 @@ export class VisibilityTracker {
     this.#states.clear()
     this.#reported.clear()
     this.#active.clear()
+    this.#timed.clear()
     this.#started = false
     this.#needsTimingReset = false
   }
@@ -322,6 +331,7 @@ export class VisibilityTracker {
         state.leavePendingSince = null
         state.passingSince ??= input.now
         this.#active.add(state)
+        this.#timed.add(state)
 
         if (!state.reported && !(once && state.hasBeenSeen)) {
           const elapsed = input.now - state.passingSince
@@ -342,6 +352,7 @@ export class VisibilityTracker {
       if (state.passingSince !== null) {
         state.accumulated += input.now - state.passingSince
         state.passingSince = null
+        this.#timed.add(state)
       }
 
       if (!state.reported) {
@@ -390,6 +401,15 @@ export class VisibilityTracker {
       if (wasReported && !adoptSilently) {
         events.push(event(state, 'leave', 0, 0, input.now))
       }
+
+      // Forget states that carry nothing worth keeping. Only `hasBeenSeen` genuinely
+      // has to persist, and only for `once`; anything else is reconstructed by
+      // `newState` if the item comes back. Without this, scrolling a 50,000-comment
+      // thread leaves 50,000 live objects for the engine's lifetime.
+      if (!state.hasBeenSeen && state.accumulated === 0) {
+        this.#states.delete(state.key)
+        this.#timed.delete(state)
+      }
     }
 
     return events
@@ -424,20 +444,32 @@ export class VisibilityTracker {
    * comment was read, so banking it would inflate every impression.
    */
   pauseDwell(now: number): void {
-    for (const state of this.#states.values()) {
+    // `passingSince !== null` implies membership in `#active`, so this needs the active
+    // set rather than every state ever created — roughly ten entries against fifty
+    // thousand.
+    for (const state of this.#active) {
       if (state.passingSince === null) continue
       state.accumulated += now - state.passingSince
       state.passingSince = null
     }
   }
 
-  /** Discard in-flight timing while keeping what has already been reported. */
+  /**
+   * Discard in-flight timing while keeping what has already been reported.
+   *
+   * Walks only the states that *have* timing rather than every key ever sampled. This
+   * runs on the first live sample after any suppression — which means after every
+   * `scrollToKey` — so on a 50,000-comment thread it was a 50,000-entry walk over
+   * scattered heap objects on precisely the frame the user is looking at the result of
+   * their jump.
+   */
   #resetTiming(): void {
-    for (const state of this.#states.values()) {
+    for (const state of this.#timed) {
       state.passingSince = null
       state.accumulated = 0
       state.leavePendingSince = null
     }
+    this.#timed.clear()
   }
 }
 

@@ -71,6 +71,8 @@ export interface Engine {
   getAnchor(): Anchor | null
   setAnchor(anchor: Anchor): void
   takeSizeSnapshot(): SizeSnapshot
+  /** Abandon any in-flight programmatic scroll, resolving it as unsettled. */
+  cancelScroll(): void
   /**
    * Move focus to an item, if it is mounted.
    *
@@ -140,6 +142,8 @@ export function createEngine(initial: EngineOptions): Engine {
   const MAX_RESTORE_INTENTS = 5
   /** Whether a scrollport observation has established a layout signature yet. */
   let signatureKnown = options.layoutSignature !== undefined
+  /** Teardown for whatever `mount()` attached, so `dispose()` can undo all of it. */
+  let unmount: (() => void) | null = null
   let gate: ScrollerGate | null = null
   let disposed = false
 
@@ -365,29 +369,41 @@ export function createEngine(initial: EngineOptions): Engine {
       publish(true)
       scroller.notifyMeasured()
     },
-    onViewportResize() {
-      // Only a change that reflows text invalidates measurements — and the *height*
-      // of the scrollport reflows nothing. A mobile URL bar hiding, devtools
-      // opening, a soft keyboard appearing or a vertical window drag all resize the
-      // scrollport without changing a single line box, so discarding the cache for
-      // them is pure waste; combined with a restored snapshot it is destructive.
-      //
-      // `layoutSignatureFor` already hashes exactly the things that *do* reflow —
-      // content width, root font size, device pixel ratio — and is already the key
-      // a size snapshot is trusted against. Reusing it here means one definition of
-      // "the layout changed" rather than two that can disagree.
-      const signature = layoutSignatureFor(viewport.getElement())
-      const changed = cache.setLayoutSignature(signature)
-
-      // The first observation merely learns the signature; there is no previous
-      // layout for it to differ from, and clearing here would throw away the
-      // measurements taken moments earlier during mount.
-      if (changed && signatureKnown) cache.clearAll()
-      signatureKnown = true
-
-      publish(true)
-    },
   })
+
+  /**
+   * A scrollport resize.
+   *
+   * Reached from `viewport.observeSize`, which is the only thing that knows what to
+   * watch for the scroller kind in play.
+   */
+  /**
+   * A scrollport resize.
+   *
+   * Driven by `viewport.observeSize`, which is the only thing that knows what to watch
+   * for the scroller kind in play.
+   */
+  function onViewportResize(): void {
+    // Only a change that reflows text invalidates measurements — and the *height* of the
+    // scrollport reflows nothing. A mobile URL bar hiding, devtools opening, a soft
+    // keyboard appearing or a vertical window drag all resize the scrollport without
+    // changing a single line box, so discarding the cache for them is pure waste;
+    // combined with a restored snapshot it is destructive.
+    //
+    // `layoutSignatureFor` already hashes exactly the things that *do* reflow — content
+    // width, root font size, device pixel ratio — and is already the key a size snapshot
+    // is trusted against. Reusing it means one definition of "the layout changed".
+    const signature = layoutSignatureFor(viewport.getElement())
+    const changed = cache.setLayoutSignature(signature)
+
+    // The first observation merely learns the signature; there is no previous layout for
+    // it to differ from, and clearing would throw away measurements taken moments
+    // earlier during mount.
+    if (changed && signatureKnown) cache.clearAll()
+    signatureKnown = true
+
+    publish(true)
+  }
 
   const scroller: Scroller = createScroller({
     viewport,
@@ -431,18 +447,31 @@ export function createEngine(initial: EngineOptions): Engine {
     },
 
     mount() {
+      // Idempotent: a second mount would add a second scroll listener and overwrite
+      // `gate`, orphaning the first behind a teardown closure nobody holds.
+      if (unmount) return unmount
+
       // The scroller binds its input listeners here rather than at construction, so
       // that building an engine has no side effects and a speculatively-constructed one
       // cannot leak them.
       scroller.attach()
 
-      const element = viewport.getElement()
       const cleanups: (() => void)[] = []
 
-      if (element) {
-        cleanups.push(resizer.observeViewport(element))
+      // The viewport owns knowing what to watch. The engine used to observe
+      // `getElement()`, and for a document scroller that is `documentElement`, whose
+      // border-box height is the *content* height — so every content growth read as a
+      // viewport resize and discarded the whole measurement cache.
+      cleanups.push(
+        viewport.observeSize(() => {
+          onViewportResize()
+        }),
+      )
+
+      const gateTarget = viewport.getGateTarget()
+      if (gateTarget) {
         gate = createScrollerGate({
-          element,
+          element: gateTarget,
           onChange: () => {
             publish(false)
           },
@@ -478,7 +507,7 @@ export function createEngine(initial: EngineOptions): Engine {
         // counted, so a reader who closes the tab is still credited.
         notifyVisibility(tracker.flushLeaves(now()))
       }
-      const doc = element?.ownerDocument ?? globalThis.document
+      const doc = viewport.getElement()?.ownerDocument ?? globalThis.document
       const onDocumentVisibility = (): void => {
         if (doc.visibilityState === 'hidden') tracker.pauseDwell(now())
       }
@@ -492,9 +521,13 @@ export function createEngine(initial: EngineOptions): Engine {
       anchor = deriveAnchor(viewport.getScrollOffset(), cache, geometry())
       publish(false)
 
-      return () => {
+      const teardown = (): void => {
         for (const cleanup of cleanups) cleanup()
+        cleanups.length = 0
+        if (unmount === teardown) unmount = null
       }
+      unmount = teardown
+      return teardown
     },
 
     observeItem(element, key) {
@@ -525,7 +558,15 @@ export function createEngine(initial: EngineOptions): Engine {
     scrollToKey(key, scrollOptions) {
       const index = cache.indexOf(key)
       if (index < 0) {
-        return Promise.resolve({ settled: false, deviation: 0, iterations: 0, reason: 'empty' as const })
+        // Distinct from 'empty': the list has items, this key is not among them —
+        // almost always a caller that changed the loaded window and scrolled before the
+        // change reached the list, which is a completely different fix.
+        return Promise.resolve({
+          settled: false,
+          deviation: 0,
+          iterations: 0,
+          reason: 'unknown-key' as const,
+        })
       }
       return scroller.scrollToIndex(index, scrollOptions)
     },
@@ -542,6 +583,10 @@ export function createEngine(initial: EngineOptions): Engine {
     },
 
     takeSizeSnapshot: () => cache.snapshot(),
+
+    cancelScroll: () => {
+      scroller.cancel()
+    },
 
     itemRef(key) {
       const existing = itemRefCallbacks.get(key)
@@ -574,6 +619,11 @@ export function createEngine(initial: EngineOptions): Engine {
 
     dispose() {
       disposed = true
+      // Undo `mount()` too. Leaving its scroll, visibilitychange and pagehide listeners
+      // attached kept the cache, store and tracker reachable — a whole engine retained
+      // per disposed list for anyone using the core directly. The React adapter only
+      // avoided it by accident of effect-cleanup ordering.
+      unmount?.()
       itemRefCallbacks.clear()
       surface.dispose()
       scroller.dispose()

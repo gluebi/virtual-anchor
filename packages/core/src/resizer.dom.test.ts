@@ -96,72 +96,6 @@ describe('createResizer', () => {
     ])
   })
 
-  it('uses a single observer for the viewport and every item', () => {
-    const resizer = createResizer({ onItemResize: vi.fn() })
-    const viewport = addItem()
-    resizer.observeViewport(viewport)
-    resizer.observeItem(addItem(), 'a')
-    resizer.observeItem(addItem(), 'b')
-
-    expect(FakeResizeObserver.instances).toHaveLength(1)
-    expect(FakeResizeObserver.latest().observed.size).toBe(3)
-  })
-
-  it('does not report the synthetic first scrollport entry as a resize', () => {
-    // `observe()` always delivers an entry for a newly observed element. Reported as
-    // a resize, it looks like the scrollport changing size one frame after mount —
-    // and a consumer that treats that as a reflow discards every measurement it has,
-    // including any restored from a snapshot.
-    const onViewportResize = vi.fn()
-    const resizer = createResizer({ onItemResize: vi.fn(), onViewportResize })
-    const viewport = addItem()
-    resizer.observeViewport(viewport)
-
-    FakeResizeObserver.latest().deliver([[viewport, 800]])
-    expect(onViewportResize).toHaveBeenCalledExactlyOnceWith(800)
-
-    // The same size again is not a change.
-    FakeResizeObserver.latest().deliver([[viewport, 800]])
-    expect(onViewportResize).toHaveBeenCalledOnce()
-
-    // A genuine change still reports.
-    FakeResizeObserver.latest().deliver([[viewport, 600]])
-    expect(onViewportResize).toHaveBeenLastCalledWith(600)
-  })
-
-  it('forgets the scrollport size when it stops observing', () => {
-    const onViewportResize = vi.fn()
-    const resizer = createResizer({ onItemResize: vi.fn(), onViewportResize })
-    const viewport = addItem()
-
-    const cleanup = resizer.observeViewport(viewport)
-    FakeResizeObserver.latest().deliver([[viewport, 800]])
-    cleanup()
-
-    // Re-observing is a fresh start, so the same size reports again.
-    resizer.observeViewport(viewport)
-    FakeResizeObserver.latest().deliver([[viewport, 800]])
-    expect(onViewportResize).toHaveBeenCalledTimes(2)
-  })
-
-  it('reports viewport resizes separately from item resizes', () => {
-    const onItemResize = vi.fn()
-    const onViewportResize = vi.fn()
-    const resizer = createResizer({ onItemResize, onViewportResize })
-    const viewport = addItem()
-    const item = addItem()
-    resizer.observeViewport(viewport)
-    resizer.observeItem(item, 'a')
-
-    FakeResizeObserver.latest().deliver([
-      [viewport, 800],
-      [item, 120],
-    ])
-
-    expect(onViewportResize).toHaveBeenCalledExactlyOnceWith(800)
-    expect(onItemResize).toHaveBeenCalledExactlyOnceWith([['a', 120]])
-  })
-
   it('rejects zero sizes, which mean invisible rather than empty', () => {
     // A hidden tab, `display: none`, a closed <details> or a suspended subtree
     // all measure 0. A single zero in the prefix sum collapses the geometry and
@@ -253,18 +187,6 @@ describe('createResizer', () => {
     expect(FakeResizeObserver.latest().observed.has(item)).toBe(false)
   })
 
-  it('stops reporting the viewport once its cleanup runs', () => {
-    const onViewportResize = vi.fn()
-    const resizer = createResizer({ onItemResize: vi.fn(), onViewportResize })
-    const viewport = addItem()
-
-    const cleanup = resizer.observeViewport(viewport)
-    cleanup()
-    FakeResizeObserver.latest().deliver([[viewport, 800]])
-
-    expect(onViewportResize).not.toHaveBeenCalled()
-  })
-
   it('observes the border box, so padding and borders are included', () => {
     const resizer = createResizer({ onItemResize: vi.fn() })
     const item = addItem()
@@ -335,10 +257,8 @@ describe('createResizer', () => {
     expect(onItemResize).not.toHaveBeenCalled()
     // Observing after disposal is inert and its detach is safe to call.
     const detachItem = resizer.observeItem(addItem(), 'b')
-    const detachViewport = resizer.observeViewport(addItem())
     expect(() => {
       detachItem()
-      detachViewport()
     }).not.toThrow()
   })
 })
