@@ -1,9 +1,5 @@
-import {
-  type AnchorGeometry,
-  deriveAnchor,
-  offsetForIndex,
-  resolveAnchorOffset,
-} from './anchor.js'
+import { deriveAnchor, offsetForIndex, resolveAnchorOffset } from './anchor.js'
+import { type Band, ListGeometry, type ListInsets } from './listGeometry.js'
 import { createScrollerGate, type ScrollerGate } from './gate.js'
 import { createResizer, type Resizer } from './resizer.js'
 import { createScroller, type Scroller } from './scroller.js'
@@ -27,7 +23,7 @@ export interface EngineOptions {
   gap?: number
   /** Extra px of items mounted beyond the viewport, in each direction. */
   buffer?: number
-  geometry?: AnchorGeometry
+  geometry?: ListInsets
   /** Keys always kept mounted, e.g. whatever currently holds focus. */
   keepMounted?: readonly ItemKey[]
   visibility?: VisibilityOptions
@@ -111,7 +107,20 @@ export function createEngine(initial: EngineOptions): Engine {
   let disposed = false
 
   const viewport = options.viewport
-  const geometry = (): AnchorGeometry => options.geometry ?? {}
+  /**
+   * The single owner of scroller-space ↔ list-space conversion.
+   *
+   * Re-synced from the live options and viewport rather than rebuilt, so every
+   * caller in this file necessarily agrees about where the visible area is. The
+   * band arithmetic it replaces was written out twice here — once for the rendered
+   * range and once for the visibility sample — and had to be kept in step by hand.
+   */
+  const listGeometry = new ListGeometry()
+  const geometry = (): ListInsets => options.geometry ?? {}
+  const syncGeometry = (): ListGeometry => {
+    listGeometry.update(geometry(), viewport.getViewportSize())
+    return listGeometry
+  }
 
   const notifyVisibility = (events: VisibilityEvent[]): void => {
     if (events.length === 0) return
@@ -126,26 +135,15 @@ export function createEngine(initial: EngineOptions): Engine {
   const computeRanges = (
     scrollOffset: number,
   ): { rendered: [number, number]; visible: [number, number] } => {
-    const g = geometry()
-    const count = cache.length
-    if (count === 0) return { rendered: [0, -1], visible: [0, -1] }
+    if (cache.length === 0) return { rendered: [0, -1], visible: [0, -1] }
 
-    const paddingStart = g.scrollPaddingStart ?? 0
-    const paddingEnd = g.scrollPaddingEnd ?? 0
-    const margin = g.scrollMargin ?? 0
-    const listTop = scrollOffset - margin + paddingStart
-    const listBottom = scrollOffset - margin + viewport.getViewportSize() - paddingEnd
-
-    const visibleStart = cache.indexAt(listTop)
-    const visibleEnd = cache.indexAt(Math.max(listTop, listBottom))
-
-    const buffer = options.buffer ?? DEFAULT_BUFFER
-    const renderedStart = cache.indexAt(listTop - buffer)
-    const renderedEnd = cache.indexAt(listBottom + buffer)
+    const g = syncGeometry()
+    const visible = g.visibleBand(scrollOffset)
+    const buffered = g.bufferedBand(scrollOffset, options.buffer ?? DEFAULT_BUFFER)
 
     return {
-      rendered: [renderedStart, renderedEnd],
-      visible: [visibleStart, visibleEnd],
+      rendered: [cache.indexAt(buffered.start), cache.indexAt(buffered.end)],
+      visible: [cache.indexAt(visible.start), cache.indexAt(Math.max(visible.start, visible.end))],
     }
   }
 
@@ -241,18 +239,19 @@ export function createEngine(initial: EngineOptions): Engine {
     visible: readonly [number, number],
     scrollOffset: number,
   ): void => {
-    const g = geometry()
-    const margin = g.scrollMargin ?? 0
-    let start = scrollOffset - margin + (g.scrollPaddingStart ?? 0)
-    let end = scrollOffset - margin + viewport.getViewportSize() - (g.scrollPaddingEnd ?? 0)
+    const g = syncGeometry()
 
     // Narrow to the part of the scrollport genuinely on screen, so a half
-    // off-screen scroller does not report its hidden half as visible.
-    const band = gate?.getVisibleBand()
-    if (band) {
-      start = Math.max(start, scrollOffset - margin + band.start)
-      end = Math.min(end, scrollOffset - margin + band.end)
+    // off-screen scroller does not report its hidden half as visible. The
+    // conversion from the gate's scrollport-relative band into list coordinates is
+    // `ListGeometry`'s job: doing it here by hand, in a second place, is what let
+    // the document scroller apply its offset twice.
+    const band = g.clampToOnScreen(scrollOffset, g.visibleBand(scrollOffset), gate?.getVisibleBand() ?? null)
+    if (band === null) {
+      notifyVisibility(tracker.flushLeaves(now()))
+      return
     }
+    const { start, end } = band
 
     const candidates: VisibilityCandidate[] = []
     // Sample a little beyond the visible range so an item leaving is seen
@@ -354,7 +353,7 @@ export function createEngine(initial: EngineOptions): Engine {
 
     mount() {
       const element = viewport.getElement()
-      const cleanups: Array<() => void> = []
+      const cleanups: (() => void)[] = []
 
       if (element) {
         cleanups.push(resizer.observeViewport(element))
@@ -491,13 +490,4 @@ export function layoutSignatureFor(element: HTMLElement | null): string {
     : ''
   const dpr = view?.devicePixelRatio ?? 1
   return `w=${String(width)}|f=${rootFontSize}|dpr=${String(dpr)}`
-}
-
-/** Offset of an item's top edge in the scroller's coordinate space. */
-export function itemScrollOffset(
-  index: number,
-  cache: SizeCache,
-  anchorGeometry?: AnchorGeometry,
-): number {
-  return offsetForIndex(index, cache, anchorGeometry)
 }

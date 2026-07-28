@@ -1,41 +1,18 @@
+import { ListGeometry, type ListInsets } from './listGeometry.js'
 import type { SizeCache } from './sizeCache.js'
 import type { Anchor } from './types.js'
 
 /**
- * Where the list sits inside its scroller, and what overlaps it.
+ * @deprecated Use {@link ListInsets} from `./listGeometry.js`.
  *
- * Both values are in the scroller's coordinate space; the cache's offsets are in
- * the list's own space, and these two numbers are the whole conversion between
- * them. Every offset comparison in the library has to be explicit about which
- * space it is in — getting this wrong is the entirety of TanStack #1001, where
- * clamping in the wrong space made the error grow with the list's distance from
- * the top of the page.
+ * Kept as an alias so the exported type name does not change. The concept was named
+ * after the anchor even though the anchor was only one of its four consumers, and
+ * that is exactly why the other three re-derived the conversion rather than reusing
+ * it — seven copies of `scrollOffset - margin + paddingStart` in total, one of which
+ * was a real bug.
  */
-export interface AnchorGeometry {
-  /**
-   * Height of sticky or fixed chrome overlapping the top of the scrollport.
-   * The anchor tracks the topmost item visible *below* it, not underneath it.
-   */
-  scrollPaddingStart?: number
-  /** Height of chrome overlapping the *bottom* of the scrollport. */
-  scrollPaddingEnd?: number
-  /**
-   * Distance from the top of the scrollable content to the start of the list.
-   * Non-zero when the page itself scrolls and there is content above the list.
-   */
-  scrollMargin?: number
-}
+export type AnchorGeometry = ListInsets
 
-/**
- * Largest scroll offset discrepancy still attributable to our own write.
- *
- * The platform snaps scroll offsets to physical pixels and WebKit truncates them
- * outright, so a write of 1204.5 can read back as 1204 or 1205. Anything within
- * this window of what we intended is our own echo, not the user scrolling; wider
- * than that and it is real input. 1.5 rather than 1.0 to absorb the ±1 cases,
- * and no wider because by the time a user has moved 1.5px the intended value has
- * already been consumed and cleared.
- */
 export const SELF_WRITE_TOLERANCE = 1.5
 
 /**
@@ -57,8 +34,8 @@ export const MAX_CARRY = 1
  * area — below any sticky header — which is the point the anchor is defined
  * against.
  */
-function probeFor(scrollTop: number, geometry: AnchorGeometry | undefined): number {
-  return scrollTop - (geometry?.scrollMargin ?? 0) + (geometry?.scrollPaddingStart ?? 0)
+function geometryOf(insets: ListInsets | undefined): ListGeometry {
+  return new ListGeometry(insets ?? {})
 }
 
 /**
@@ -77,7 +54,7 @@ export function deriveAnchor(
   cache: SizeCache,
   geometry?: AnchorGeometry,
 ): Anchor | null {
-  const probe = probeFor(scrollTop, geometry)
+  const probe = geometryOf(geometry).toList(scrollTop)
   const item = cache.itemAt(probe)
   if (item === null) return null
 
@@ -105,12 +82,10 @@ export function resolveAnchorOffset(
   const index = cache.indexOf(anchor.key)
   if (index < 0) return null
 
-  return (
-    cache.offsetOf(index) +
-    anchor.offsetWithinItem +
-    (geometry?.scrollMargin ?? 0) -
-    (geometry?.scrollPaddingStart ?? 0)
-  )
+  // The inverse conversion, via the same owner — previously spelled out here and
+  // again in `offsetForIndex` eight lines below, so a change to the insets had two
+  // edit sites.
+  return offsetForIndex(index, cache, geometry) + anchor.offsetWithinItem
 }
 
 /**
@@ -124,9 +99,7 @@ export function offsetForIndex(
   cache: SizeCache,
   geometry?: AnchorGeometry,
 ): number {
-  return (
-    cache.offsetOf(index) + (geometry?.scrollMargin ?? 0) - (geometry?.scrollPaddingStart ?? 0)
-  )
+  return geometryOf(geometry).toScroll(cache.offsetOf(index))
 }
 
 /**
