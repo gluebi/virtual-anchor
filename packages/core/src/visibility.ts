@@ -218,6 +218,8 @@ export class VisibilityTracker {
    * its elapsed time.
    */
   #timed = new Set<ItemState>()
+  /** Cached public snapshots, so `get` is referentially stable — see {@link get}. */
+  #snapshots = new Map<ItemKey, ItemVisibility>()
   #started = false
   /** Set while suppressed; clears timing on the next live sample. */
   #needsTimingReset = false
@@ -230,16 +232,38 @@ export class VisibilityTracker {
     this.#options = options
   }
 
-  /** Current state for one item, for `useItemVisibility`. */
+  /**
+   * Current state for one item, as a **referentially stable** value.
+   *
+   * The stability is not a nicety. This feeds `useSyncExternalStore`, which compares
+   * snapshots by identity: returning a fresh object each call makes React believe the
+   * store changed on every read and it re-renders until it gives up with "Maximum update
+   * depth exceeded". Caching the object and replacing it only when a field actually
+   * differs is what makes the hook usable at all.
+   */
   get(key: ItemKey): ItemVisibility {
     const state = this.#states.get(key)
     if (!state) return NOT_VISIBLE
-    return {
+
+    const cached = this.#snapshots.get(key)
+    if (
+      cached &&
+      cached.visible === state.reported &&
+      cached.itemFraction === state.itemFraction &&
+      cached.viewportFraction === state.viewportFraction &&
+      cached.hasBeenSeen === state.hasBeenSeen
+    ) {
+      return cached
+    }
+
+    const next: ItemVisibility = {
       visible: state.reported,
       itemFraction: state.itemFraction,
       viewportFraction: state.viewportFraction,
       hasBeenSeen: state.hasBeenSeen,
     }
+    this.#snapshots.set(key, next)
+    return next
   }
 
   /** Keys currently reported as visible. */
@@ -255,6 +279,7 @@ export class VisibilityTracker {
     this.#reported.clear()
     this.#active.clear()
     this.#timed.clear()
+    this.#snapshots.clear()
     this.#started = false
     this.#needsTimingReset = false
   }
@@ -409,6 +434,7 @@ export class VisibilityTracker {
       if (!state.hasBeenSeen && state.accumulated === 0) {
         this.#states.delete(state.key)
         this.#timed.delete(state)
+        this.#snapshots.delete(state.key)
       }
     }
 

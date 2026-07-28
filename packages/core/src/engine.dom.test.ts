@@ -114,7 +114,7 @@ const setup = (
     },
     hasItem: (key) => elements.has(key),
     focusItem: (key) => elements.has(key),
-    dispose: () => elements.clear(),
+    dispose: () => { elements.clear(); },
   }
 
   const viewport: Viewport = {

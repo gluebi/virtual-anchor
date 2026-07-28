@@ -502,6 +502,30 @@ describe('VisibilityTracker quiet start', () => {
 })
 
 describe('VisibilityTracker state accessors', () => {
+  it('returns a referentially stable value while nothing changes', () => {
+    // `useSyncExternalStore` compares snapshots by identity, so a fresh object per call
+    // makes React believe the store changed on every read — it re-renders until it gives
+    // up with "Maximum update depth exceeded". This is the invariant that makes
+    // `useItemVisibility` usable at all.
+    const h = harness()
+    h.at({ top: 0, now: 0 })
+
+    const first = h.tracker.get('c0')
+    expect(h.tracker.get('c0')).toBe(first)
+
+    // A real change produces a new object.
+    h.at({ top: 5000, now: 100 })
+    const afterLeaving = h.tracker.get('c0')
+    expect(afterLeaving).not.toBe(first)
+    expect(afterLeaving.visible).toBe(false)
+    expect(h.tracker.get('c0')).toBe(afterLeaving)
+  })
+
+  it('returns the same not-visible value for every untracked key', () => {
+    const tracker = new VisibilityTracker()
+    expect(tracker.get('never-seen')).toBe(tracker.get('also-never-seen'))
+  })
+
   it('reports nothing known about an untracked key', () => {
     const tracker = new VisibilityTracker()
     expect(tracker.get('never-seen')).toEqual({

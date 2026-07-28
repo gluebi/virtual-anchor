@@ -18,13 +18,14 @@ export default defineConfig({
           name: 'dom',
           environment: 'jsdom',
           include: ['packages/*/src/**/*.dom.test.ts', 'packages/*/src/**/*.test.tsx'],
+          setupFiles: ['./vitest.setup.ts'],
         },
       },
     ],
     coverage: {
       provider: 'v8',
       include: ['packages/core/src/**', 'packages/react/src/**'],
-      exclude: ['**/*.test.*', '**/index.ts', '**/types.ts'],
+      exclude: ['**/*.test.*', '**/index.ts', '**/types.ts', '**/*.d.ts'],
       thresholds: {
         // The three modules where a wrong number is a silent visual bug.
         'packages/core/src/sizeCache.ts': { branches: 100, functions: 100, lines: 100 },
