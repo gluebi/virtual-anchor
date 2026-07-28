@@ -2,6 +2,7 @@ export type {
   Anchor,
   ItemKey,
   ScrollAlign,
+  ScrollEndReason,
   ScrollResult,
   ScrollToOptions,
 } from './types.js'

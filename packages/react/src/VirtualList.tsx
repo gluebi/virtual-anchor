@@ -30,6 +30,15 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
    * the loaded count, which is only correct when everything is loaded.
    */
   totalCount?: number
+  /**
+   * 1-based position of the first *loaded* item within the whole collection.
+   *
+   * Without this, `aria-posinset` would report the index within the loaded window
+   * — announcing "comment 1 of 12000" for what is really comment 4192, which is
+   * worse than saying nothing. Defaults to 1, which is correct only when the
+   * window starts at the beginning of the collection.
+   */
+  firstItemPosition?: number
   /** Whether a page is currently loading, for `aria-busy`. */
   loading?: boolean
   /** Accessible name for the feed. */
@@ -110,6 +119,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
   const {
     renderItem,
     totalCount,
+    firstItemPosition = 1,
     loading = false,
     label,
     className,
@@ -239,8 +249,8 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
             className={itemClassName}
             style={ITEM_STYLE}
             role="article"
-            tabIndex={-1}
-            aria-posinset={rendered.index + 1}
+            tabIndex={0}
+            aria-posinset={firstItemPosition + rendered.index}
             aria-setsize={setSize}
           >
             {renderItem(rendered.item, rendered)}

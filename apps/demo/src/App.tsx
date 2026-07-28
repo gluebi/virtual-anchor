@@ -227,6 +227,7 @@ export function App(): ReactNode {
           gap={12}
           scrollPaddingStart={HEADER_HEIGHT}
           totalCount={THREAD_SIZE}
+          firstItemPosition={window_.from + 1}
           loading={loading}
           label="Thread comments"
           ref={listRef}

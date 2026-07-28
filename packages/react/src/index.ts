@@ -4,6 +4,7 @@ export type {
   ItemKey,
   ItemVisibility,
   ScrollAlign,
+  ScrollEndReason,
   ScrollResult,
   ScrollToOptions,
   SizeSnapshot,
