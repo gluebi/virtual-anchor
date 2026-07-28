@@ -120,8 +120,12 @@ body {
   color: #5a6473;
 }
 
+/* Dark enough to clear 4.5:1 against the highlight background too, not just white.
+   The flash background (#fff6d6) drops #6b7280 to ~4.1:1, which axe catches only when
+   it happens to sample during the 1.6s flash — a genuinely flaky-looking failure with
+   a real cause. */
 .muted {
-  color: #6b7280;
+  color: #4b5563;
 }
 
 .small {
@@ -197,6 +201,12 @@ code.leave {
 
   .badge {
     background: #2a2f36;
+    color: #9aa4b2;
+  }
+
+  /* #4b5563 is far too dark on a dark surface; this clears 4.5:1 on both the panel
+     and the highlight background. */
+  .muted {
     color: #9aa4b2;
   }
 }

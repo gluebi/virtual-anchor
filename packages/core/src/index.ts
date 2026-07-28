@@ -58,5 +58,8 @@ export type { Scroller, ScrollerOptions } from './scroller.js'
 export { createVirtualStore, EMPTY_STATE, needsRerender } from './store.js'
 export type { VirtualItem, VirtualState, VirtualStore } from './store.js'
 
+export { createDomSurface, createNullSurface } from './surface.js'
+export type { DomSurfaceOptions, Surface } from './surface.js'
+
 export { createEngine, layoutSignatureFor } from './engine.js'
 export type { Engine, EngineOptions } from './engine.js'

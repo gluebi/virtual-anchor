@@ -9,6 +9,7 @@ import { type Band, ListGeometry, type ListInsets } from './listGeometry.js'
 import { createScrollerGate, type ScrollerGate } from './gate.js'
 import { createResizer, type Resizer } from './resizer.js'
 import { createScroller, type Scroller } from './scroller.js'
+import { createNullSurface, type Surface } from './surface.js'
 import { SizeCache, type SizeSnapshot } from './sizeCache.js'
 import { createVirtualStore, type VirtualItem, type VirtualState, type VirtualStore } from './store.js'
 import type { Anchor, ItemKey, ScrollResult, ScrollToOptions } from './types.js'
@@ -38,27 +39,14 @@ export interface EngineOptions {
   /** Identifies the layout a size snapshot was measured in. */
   layoutSignature?: string
   /**
-   * Write the total content height to the DOM.
+   * Everything the engine draws.
    *
-   * The engine calls this *before* it writes a scroll offset, and the ordering is
-   * not incidental: a prepend grows the content and moves the anchored item down,
-   * so the restored offset is larger than the old maximum. Written while the
-   * container is still its old height, the browser clamps it — and the view ends
-   * up hundreds of pixels adrift with no error anywhere. Owning the order here
-   * rather than leaving it to a layout effect is what makes it correct.
+   * One owner, so that content size, scroll offset and item positions are written in
+   * a single ordered pass. The ordering is not incidental: a prepend makes the
+   * restored offset exceed the old maximum, and a write past it is silently clamped.
+   * Defaults to a surface that draws nothing, which is what a headless test wants.
    */
-  setContentSize?: (size: number) => void
-  /**
-   * Apply the sub-pixel residual as a paint offset on the item container.
-   *
-   * Written straight to the DOM, deliberately *not* routed through the store. The
-   * carry is a paint offset: it never affects which items are mounted, so
-   * `needsRerender` rightly ignores it — which meant that as a store field it had a
-   * producer and a consumer the change-detector did not connect, and a carry-only
-   * change was published and then never applied. Landing was consequently 0.5px
-   * short on exactly the paths where correction matters most.
-   */
-  setCarry?: (px: number) => void
+  surface?: Surface
   now?: () => number
 }
 
@@ -74,6 +62,14 @@ export interface Engine {
   getAnchor(): Anchor | null
   setAnchor(anchor: Anchor): void
   takeSizeSnapshot(): SizeSnapshot
+  /**
+   * Move focus to an item, if it is mounted.
+   *
+   * On the engine because it already owns the element registry; the alternative was a
+   * second key→element map in the component plus a `dataset` round-trip to recover a
+   * key React knew at render time.
+   */
+  focusItem(key: ItemKey): boolean
   getVisibility(key: ItemKey): ReturnType<VisibilityTracker['get']>
   subscribeVisibility(key: ItemKey, listener: () => void): () => void
   dispose(): void
@@ -103,6 +99,7 @@ export function createEngine(initial: EngineOptions): Engine {
     ...(options.sizeSnapshot === undefined ? {} : { snapshot: options.sizeSnapshot }),
   })
 
+  const surface: Surface = options.surface ?? createNullSurface()
   const store = createVirtualStore()
   const tracker = new VisibilityTracker(options.visibility ?? {})
   const visibilityListeners = new Map<ItemKey, Set<() => void>>()
@@ -152,7 +149,7 @@ export function createEngine(initial: EngineOptions): Engine {
   const applyCarry = (next: number): void => {
     if (next === carry) return
     carry = next
-    options.setCarry?.(next)
+    surface.setCarry(next)
   }
 
   const notifyVisibility = (events: VisibilityEvent[]): void => {
@@ -228,7 +225,7 @@ export function createEngine(initial: EngineOptions): Engine {
     // larger than the old maximum, and the browser silently clamps a write that
     // exceeds it.
     const totalSize = cache.totalSize()
-    options.setContentSize?.(totalSize)
+    surface.setContentSize(totalSize)
 
     // The anchor keeps the *user's* position stable. While a programmatic scroll
     // is in flight the scroller is authoritative instead — restoring an anchor
@@ -271,6 +268,12 @@ export function createEngine(initial: EngineOptions): Engine {
       viewportSize: viewport.getViewportSize(),
       scrolling: scroller.isScrolling(),
     })
+
+    // Positions are written here rather than by the consumer after commit, so the
+    // content size, the scroll offset and the item positions all land in one pass.
+    // Items not yet attached are positioned by `observeItem` the moment their element
+    // exists, which is before paint.
+    for (const item of items) surface.setItemOffset(item.key, item.start)
 
     sampleVisibility(ranges.visible, scrollOffset)
   }
@@ -466,8 +469,15 @@ export function createEngine(initial: EngineOptions): Engine {
     },
 
     observeItem(element, key) {
-      const measured = resizer.measure(element)
+      const detachFromSurface = surface.attachItem(key, element as HTMLElement)
       const index = cache.indexOf(key)
+
+      // Position it before anything can paint. A newly mounted item has no offset
+      // written yet, and `publish` cannot have positioned it because its element did
+      // not exist at the time.
+      if (index >= 0) surface.setItemOffset(key, cache.offsetOf(index))
+
+      const measured = resizer.measure(element)
       if (index >= 0 && measured > 0 && cache.setSize(index, measured)) {
         // Measure synchronously on mount. ResizeObserver's first callback lands
         // after the next rendering update, so waiting for it would paint one
@@ -475,7 +485,12 @@ export function createEngine(initial: EngineOptions): Engine {
         publish(true)
         scroller.notifyMeasured()
       }
-      return resizer.observeItem(element, key)
+
+      const stopObserving = resizer.observeItem(element, key)
+      return () => {
+        stopObserving()
+        detachFromSurface()
+      }
     },
 
     scrollToKey(key, scrollOptions) {
@@ -499,6 +514,8 @@ export function createEngine(initial: EngineOptions): Engine {
 
     takeSizeSnapshot: () => cache.snapshot(),
 
+    focusItem: (key) => surface.focusItem(key),
+
     getVisibility: (key) => tracker.get(key),
 
     subscribeVisibility(key, listener) {
@@ -516,6 +533,7 @@ export function createEngine(initial: EngineOptions): Engine {
 
     dispose() {
       disposed = true
+      surface.dispose()
       scroller.dispose()
       resizer.dispose()
       gate?.dispose()

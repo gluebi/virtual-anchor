@@ -7,6 +7,7 @@ import {
   type UIEvent as ReactUIEvent,
   useCallback,
   useImperativeHandle,
+  useMemo,
   useRef,
   useState,
 } from 'react'
@@ -139,18 +140,30 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
    * is the single worst virtualization bug for keyboard navigation.
    */
   const [focusedKey, setFocusedKey] = useState<ItemKey | null>(null)
-  const keepMounted = focusedKey === null ? listOptions.keepMounted : [focusedKey]
+  // Merged, not replaced. Replacing meant a single click into the feed silently
+  // unmounted every key the consumer had pinned.
+  const keepMounted = useMemo(
+    () =>
+      focusedKey === null
+        ? listOptions.keepMounted
+        : [...(listOptions.keepMounted ?? []), focusedKey],
+    [listOptions.keepMounted, focusedKey],
+  )
 
   const list = useVirtualList({
     ...listOptions,
     ...(keepMounted === undefined ? {} : { keepMounted }),
   })
 
-  const itemNodes = useRef(new Map<ItemKey, HTMLElement>())
-
-  const focusKey = useCallback((key: ItemKey) => {
-    itemNodes.current.get(key)?.focus()
-  }, [])
+  // Focus goes through the engine, which already owns the element registry. The
+  // component previously kept a second `Map<ItemKey, HTMLElement>` — which leaked
+  // every element ever mounted, because its cleanup branch was unreachable under
+  // React 19's ref semantics — and recovered the key from a `data-` attribute that
+  // React knew at render time.
+  const focusKey = useCallback(
+    (key: ItemKey) => list.engine?.focusItem(key) ?? false,
+    [list.engine],
+  )
 
   useImperativeHandle(
     ref,
@@ -225,8 +238,11 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
       onScroll={onScroll}
       onKeyDown={onKeyDown}
       onFocus={(event) => {
-        const key = (event.target as HTMLElement).dataset.virtualKey
-        if (key !== undefined) setFocusedKey(key)
+        // `closest`, not the target's own dataset: only the row carries the key, so
+        // focus landing on a link or button inside a row would otherwise fail to pin
+        // it — leaving the worst keyboard bug unfixed for any row with content.
+        const row = (event.target as HTMLElement).closest<HTMLElement>('[data-virtual-key]')
+        if (row?.dataset.virtualKey !== undefined) setFocusedKey(row.dataset.virtualKey)
       }}
       onBlur={(event) => {
         // Release the pin only when focus leaves the feed entirely, not when it
@@ -240,11 +256,10 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
         {list.items.map((rendered) => (
           <div
             key={rendered.key}
-            ref={(element) => {
-              if (element) itemNodes.current.set(rendered.key, element)
-              else itemNodes.current.delete(rendered.key)
-              list.itemRef(rendered.key)(element);
-            }}
+            // The memoised per-key callback, passed straight through. An inline arrow
+            // here would change identity every render and undo the memoisation — and
+            // discarding its return value would discard React 19's ref cleanup.
+            ref={list.itemRef(rendered.key)}
             data-virtual-key={rendered.key}
             className={itemClassName}
             style={ITEM_STYLE}

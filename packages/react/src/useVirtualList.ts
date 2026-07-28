@@ -1,5 +1,6 @@
 import {
   createElementViewport,
+  createDomSurface,
   createEngine,
   createWindowViewport,
   type Anchor,
@@ -163,6 +164,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
         return createEngine({
           viewport: createElementViewport(element),
           keys: [],
+          surface,
           layoutSignature: layoutSignatureFor(element),
         })
       })
@@ -178,6 +180,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     const created = createEngine({
       viewport,
       keys: [],
+      surface,
       layoutSignature: layoutSignatureFor(document.documentElement),
     })
     setEngine(created)
@@ -188,41 +191,21 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
   }, [windowScroller])
 
   /**
-   * Write the content height straight to the DOM, synchronously.
+   * The one thing that writes to the DOM.
    *
-   * Handed to the engine so it can grow the container *before* writing a scroll
-   * offset. Going through React state instead would put the height change in a
-   * later commit, and the scroll write would be clamped against the old height —
-   * which is a several-hundred-pixel jump on prepend, with nothing logged.
+   * Created once and identity-stable, which matters: `containerRef` previously
+   * depended on `engine`, so React detached it before attaching the item refs on the
+   * first commit — and the content-size write then no-oped against a null container
+   * while the scroll write proceeded against a stale height.
    */
-  const setContentSize = useCallback((size: number) => {
-    const container = containerElement.current
-    if (container) container.style.height = `${String(size)}px`
-  }, [])
-
-  /**
-   * Apply the sub-pixel residual as a paint offset, synchronously.
-   *
-   * Written the moment the engine produces it rather than published into state and
-   * applied on the next render — a carry-only change does not (and should not)
-   * trigger a render, so as a state field it was simply never applied.
-   */
-  const setCarry = useCallback((px: number) => {
-    const container = containerElement.current
-    // `top` on the relatively-positioned container, not a transform. A fractional
-    // translate disables subpixel text antialiasing in Blink for the whole subtree
-    // (crbug 573146) — the same reason items are positioned with `top` — and a
-    // sub-pixel carry is fractional by definition.
-    if (container) container.style.top = px === 0 ? '' : `${String(-px)}px`
-  }, [])
-
-  const containerRef = useCallback(
-    (element: HTMLElement | null) => {
-      containerElement.current = element
-      if (element && engine) setContentSize(engine.store.getState().totalSize)
-    },
-    [engine, setContentSize],
+  const surface = useMemo(
+    () => createDomSurface({ getContainer: () => containerElement.current }),
+    [],
   )
+
+  const containerRef = useCallback((element: HTMLElement | null) => {
+    containerElement.current = element
+  }, [])
 
   // Push option changes into the engine during render rather than in an effect,
   // so a prepend is reflected in the very first commit that renders it — one
@@ -246,8 +229,6 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
       ...(visibility === undefined ? {} : { visibility }),
       ...(sizeSnapshot === undefined ? {} : { sizeSnapshot }),
       onVisibilityChange: (events) => callbacks.current.onVisibilityChange?.(events),
-      setContentSize,
-      setCarry,
     })
   }
 
@@ -278,55 +259,46 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
   )
 
   /**
-   * Write positions to the DOM after every commit.
+   * One ref callback per key, memoised.
    *
-   * `position: absolute; top: <px>` rather than `transform: translateY()`: a
-   * fractional translate disables subpixel text antialiasing in Blink
-   * (crbug 573146), which for a text-only forum is disqualifying. `top` does not
-   * layerize and keeps the glyphs sharp.
+   * `itemRef(key)` previously built a fresh closure on every call, and the component
+   * wrapped it in an inline arrow besides — so every mounted item's ref identity
+   * changed on every render and React dutifully ran the cleanup and re-attached. That
+   * cost a forced `getBoundingClientRect` and an unobserve/observe pair per item per
+   * render, and the cleanup's `lastSizes.delete` defeated the resizer's value-dedupe,
+   * so a full synthetic ResizeObserver batch was manufactured the following frame.
+   * During first-pass scrolling that is every frame — precisely when the claim of "no
+   * React work on most scroll frames" is supposed to hold.
    */
-  useLayoutEffect(() => {
-    const container = containerElement.current
-    if (!container || !engine) return
-
-    const current = engine.store.getState()
-
-    // The height is written by the engine, before it writes any scroll offset —
-    // see `setContentSize`. Re-asserting it here covers the first commit, where
-    // the container mounts after the engine has already published.
-    container.style.height = `${String(current.totalSize)}px`
-    for (const item of current.items) {
-      const element = itemElements.current.get(item.key)
-      if (!element) continue
-      // The exact float, deliberately unsnapped. Painted position is
-      // `itemTop - scrollTop - carry`, which reduces to `itemTop - target` — exact,
-      // whatever the platform did to the scroll offset. Rounding `top` as well was a
-      // second compensation for the same problem: the two roundings cancelled, the
-      // carry then broke the cancellation, and every landing sat 0.5px off.
-      const top = item.start
-      if (writtenTops.current.get(element) === top) continue
-      writtenTops.current.set(element, top)
-      element.style.position = 'absolute'
-      element.style.left = '0'
-      element.style.right = '0'
-      element.style.top = `${String(top)}px`
-    }
-  })
+  const itemRefs = useRef(new Map<ItemKey, (element: HTMLElement | null) => void>())
 
   const itemRef = useCallback(
-    (key: ItemKey) => (element: HTMLElement | null) => {
-      if (!element || !engine) return undefined
-      itemElements.current.set(key, element)
-      const stopObserving = engine.observeItem(element, key)
-      // React 19 ref cleanup: pairs observe with unobserve exactly, with no
-      // null-ref dance and no second code path.
-      return () => {
-        itemElements.current.delete(key)
-        stopObserving()
+    (key: ItemKey) => {
+      const existing = itemRefs.current.get(key)
+      if (existing) return existing
+
+      const callback = (element: HTMLElement | null): (() => void) | undefined => {
+        if (!element || !engine) return undefined
+        const detach = engine.observeItem(element, key)
+        // React 19 ref cleanup. Returning it means React never calls this back with
+        // `null`, which is what made the component's own `else …delete()` branch
+        // unreachable and leaked every element ever mounted.
+        return detach
       }
+      itemRefs.current.set(key, callback)
+      return callback
     },
     [engine],
   )
+
+  // Keep the callback cache bounded by the rendered window rather than by everything
+  // ever scrolled past.
+  useEffect(() => {
+    const live = new Set(state.items.map((item) => item.key))
+    for (const key of itemRefs.current.keys()) {
+      if (!live.has(key)) itemRefs.current.delete(key)
+    }
+  }, [state.items])
 
   const rendered = useMemo<readonly RenderedItem<T>[]>(() => {
     const result: RenderedItem<T>[] = []
