@@ -144,6 +144,14 @@ export function createEngine(initial: EngineOptions): Engine {
   let signatureKnown = options.layoutSignature !== undefined
   /** Teardown for whatever `mount()` attached, so `dispose()` can undo all of it. */
   let unmount: (() => void) | null = null
+  /**
+   * An extra range to keep mounted, for a smooth scroll's destination.
+   *
+   * Part of the *inputs* to the rendered range rather than a patch applied over its
+   * output, so that `publish` remains the only writer of the snapshot and `items` and
+   * `renderedRange` cannot disagree.
+   */
+  let pinnedRange: [number, number] | null = null
   let gate: ScrollerGate | null = null
   let disposed = false
 
@@ -190,8 +198,15 @@ export function createEngine(initial: EngineOptions): Engine {
     const visible = g.visibleBand(scrollOffset)
     const buffered = g.bufferedBand(scrollOffset, options.buffer ?? DEFAULT_BUFFER)
 
+    let renderedStart = cache.indexAt(buffered.start)
+    let renderedEnd = cache.indexAt(buffered.end)
+    if (pinnedRange) {
+      renderedStart = Math.min(renderedStart, pinnedRange[0])
+      renderedEnd = Math.max(renderedEnd, pinnedRange[1])
+    }
+
     return {
-      rendered: [cache.indexAt(buffered.start), cache.indexAt(buffered.end)],
+      rendered: [renderedStart, renderedEnd],
       visible: [cache.indexAt(visible.start), cache.indexAt(Math.max(visible.start, visible.end))],
     }
   }
@@ -312,12 +327,27 @@ export function createEngine(initial: EngineOptions): Engine {
   ): void => {
     const g = syncGeometry()
 
-    // Narrow to the part of the scrollport genuinely on screen, so a half
-    // off-screen scroller does not report its hidden half as visible. The
-    // conversion from the gate's scrollport-relative band into list coordinates is
-    // `ListGeometry`'s job: doing it here by hand, in a second place, is what let
-    // the document scroller apply its offset twice.
-    const band = g.clampToOnScreen(scrollOffset, g.visibleBand(scrollOffset), gate?.getVisibleBand() ?? null)
+    // A closed gate means nothing is on screen — a collapsed accordion, a background
+    // tab, a scroller scrolled off the page.
+    if (gate && !gate.isOpen()) {
+      notifyVisibility(tracker.flushLeaves(now()))
+      return
+    }
+
+    // Narrow to the part of the scrollport genuinely on screen, so a half off-screen
+    // scroller does not report its hidden half as visible. An *absent* slice means the
+    // gate has not reported yet, which is not the same as nothing being visible —
+    // conflating the two suppressed every visibility event until the first
+    // IntersectionObserver callback, and forever for a gate target that never reports.
+    //
+    // The conversion from the gate's scrollport-relative band into list coordinates is
+    // `ListGeometry`'s job: doing it by hand in a second place is what let the document
+    // scroller apply its offset twice.
+    const visibleBand = g.visibleBand(scrollOffset)
+    const onScreen = gate?.getVisibleBand() ?? null
+    const band =
+      onScreen === null ? visibleBand : g.clampToOnScreen(scrollOffset, visibleBand, onScreen)
+
     if (band === null) {
       notifyVisibility(tracker.flushLeaves(now()))
       return
@@ -411,20 +441,21 @@ export function createEngine(initial: EngineOptions): Engine {
     getGeometry: geometry,
     applyCarry,
     requestRange(startIndex, endIndex) {
-      // Mount the destination so it is measured before a smooth scroll starts.
-      const items = itemsFor([
-        Math.max(0, startIndex - 1),
-        Math.min(cache.length - 1, endIndex + 1),
-      ])
-      const previous = store.getState()
-      const merged = [...previous.items]
-      for (const item of items) {
-        if (!merged.some((existing) => existing.key === item.key)) merged.push(item)
-      }
-      merged.sort((a, b) => a.index - b.index)
-      store.setState({ ...previous, version: previous.version + 1, items: merged })
+      // Declare an interest, then let `publish` do the work. Writing `items` directly
+      // was worse than useless: it left `renderedRange` describing a different set, so
+      // the very next `publish` — triggered by the scroller's own first write, one tick
+      // later — recomputed from scratch and dropped the injection. The destination was
+      // never mounted, let alone measured, before the animation began.
+      pinnedRange =
+        startIndex > endIndex
+          ? null
+          : [Math.max(0, startIndex - 1), Math.min(cache.length - 1, endIndex + 1)]
+      publish(false)
     },
-    onScrollingChange() {
+    onScrollingChange(scrolling) {
+      // The pin exists for the duration of one programmatic scroll; holding it after
+      // would keep an arbitrary slice of the list mounted forever.
+      if (!scrolling) pinnedRange = null
       publish(false)
     },
     ...(options.now === undefined ? {} : { now: options.now }),
@@ -556,6 +587,10 @@ export function createEngine(initial: EngineOptions): Engine {
     },
 
     scrollToKey(key, scrollOptions) {
+      if (cache.length === 0) {
+        return Promise.resolve({ settled: false, deviation: 0, iterations: 0, reason: 'empty' as const })
+      }
+
       const index = cache.indexOf(key)
       if (index < 0) {
         // Distinct from 'empty': the list has items, this key is not among them —

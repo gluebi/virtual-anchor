@@ -268,6 +268,25 @@ describe('VisibilityTracker dwell time', () => {
     expect(keysOf(h.at({ top: 0, now: 1200 }), 'enter')).toContain('c0')
   })
 
+  it('leaves an item whose clock has already stopped alone when the tab hides', () => {
+    // `#active` holds items with a running clock *and* items still reported while their
+    // leave delay elapses — the latter have `passingSince === null`. `pauseDwell`
+    // iterates the active set rather than every key ever sampled (a ~5000× reduction on
+    // a long thread), so it has to skip those, and this is that branch.
+    const wide = () => items(0, 8)
+    const h = harness({ leaveDelayMs: 5000 }, 300)
+    h.at({ top: 0, now: 0, candidates: wide() })
+
+    // Item 0 leaves the band; its clock stops but it stays reported and active.
+    h.at({ top: 600, now: 100, candidates: wide() })
+    expect(h.tracker.get('c0').visible).toBe(true)
+
+    expect(() => {
+      h.tracker.pauseDwell(200)
+    }).not.toThrow()
+    expect(h.tracker.get('c0').visible).toBe(true)
+  })
+
   it('does not bank time spent in a hidden tab', () => {
     const h = harness({ dwellMs: 1000, dwell: 'cumulative' })
 
