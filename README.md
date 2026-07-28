@@ -155,8 +155,10 @@ cannot express "comment 4211 of 12000" while sixty items are mounted.
 - `role="feed"` with `role="article"` items carrying `aria-posinset` and
   `aria-setsize` against the **whole** collection (hence `totalCount` and
   `firstItemPosition`), plus `aria-busy` while a page loads
-- <kbd>PageUp</kbd>/<kbd>PageDown</kbd> move between articles,
-  <kbd>Ctrl</kbd>+<kbd>Home</kbd>/<kbd>End</kbd> to the boundaries
+- <kbd>PageUp</kbd>/<kbd>PageDown</kbd> move between articles and
+  <kbd>Ctrl</kbd>+<kbd>Home</kbd>/<kbd>End</kbd> to the ends of what is loaded — all
+  four move *focus*, not just the view, so a keyboard user is never left behind by the
+  scroll they just asked for
 - **Focus retention**: a focused item that scrolls out of the rendered range stays
   mounted, instead of dropping focus to `<body>` and losing a keyboard user's place
 - `scrollToKey` moves focus to the target once the scroll settles, which is what

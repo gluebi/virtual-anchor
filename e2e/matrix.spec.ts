@@ -185,11 +185,24 @@ for (const scenario of SCENARIOS) {
         const result = await scrollTo(page, index, { align: 'start', behavior: 'smooth' })
         const landing = await measure(page, index, 'start', scenario)
         if (landing.clamped) continue
-        if (!result.settled || Math.abs(landing.error) > TOLERANCE) {
+
+        // Where it landed is the promise, and it is asserted strictly.
+        if (Math.abs(landing.error) > TOLERANCE) {
           failures.push(
             `#${String(index)}: off by ${landing.error.toFixed(3)}px ` +
               `(settled=${String(result.settled)} reason=${result.reason})`,
           )
+          continue
+        }
+
+        // Whether it converged *within its time budget* is not. The loop is bounded by
+        // wall clock on purpose — 2s soft, 5s hard — so that it cannot hang, which means
+        // a machine slow enough to spend the budget measuring will legitimately report
+        // `deadline`. Asserting `settled` unconditionally asserts the speed of the
+        // machine; this observed run failed once in roughly 400 with the landing still
+        // exact. A deadline is only accepted *because* the landing above was exact.
+        if (!result.settled && result.reason !== 'deadline') {
+          failures.push(`#${String(index)}: reason=${result.reason}`)
         }
       }
 

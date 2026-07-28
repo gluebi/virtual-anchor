@@ -12,8 +12,7 @@ import {
   VirtualList,
   type VirtualListHandle,
   type VisibilityEvent,
-  setTraceSink,
-  type TraceEvent,
+  type SizeSnapshot,
 } from 'react-virtual-anchor'
 import {
   buildThread,
@@ -29,6 +28,7 @@ import {
 import './styles.css'
 
 const DEFAULT_HEADER_HEIGHT = 64
+const SNAPSHOT_KEY = 'virtual-anchor-demo-sizes'
 
 /**
  * The demo is parameterised from the URL so the accuracy suite can drive the whole
@@ -47,8 +47,8 @@ interface DemoConfig {
   loadAll: boolean
   /** Report each comment at most once, rather than on every re-entry. */
   once: boolean
-  /** Collect the library's trace events into a ring buffer readable from the console. */
-  trace: boolean
+  /** Persist measured sizes to sessionStorage and restore them on the next load. */
+  snapshot: boolean
 }
 
 const readConfig = (): DemoConfig => {
@@ -66,7 +66,7 @@ const readConfig = (): DemoConfig => {
     windowScroller: params.get('windowScroller') === '1',
     loadAll: params.get('loadAll') === '1',
     once: params.get('once') === '1',
-    trace: params.get('trace') === '1',
+    snapshot: params.get('snapshot') === '1',
   }
 }
 
@@ -74,33 +74,6 @@ export function App(): ReactNode {
   const thread = useMemo(() => buildThread(), [])
   const config = useMemo(() => readConfig(), [])
 
-  /**
-   * Keep the last few hundred trace events for inspection — `__trace()` in the console,
-   * or from a Playwright `evaluate`. A ring buffer rather than `console.log` because the
-   * interesting topics fire every frame during a scroll.
-   *
-   * Installed in a layout effect at the top of the tree so it is in place before the
-   * list's first frame, and only when asked for: with no sink the library builds no
-   * payloads at all, and in a production build the calls are not compiled in.
-   */
-  useLayoutEffect(() => {
-    if (!config.trace) return
-    const buffer: TraceEvent[] = []
-    setTraceSink((event) => {
-      buffer.push(event)
-      if (buffer.length > 3000) buffer.shift()
-    })
-    Object.assign(window, {
-      __trace: (topic?: string) =>
-        topic === undefined ? buffer : buffer.filter((event) => event.topic.startsWith(topic)),
-      __traceClear: () => {
-        buffer.length = 0
-      },
-    })
-    return () => {
-      setTraceSink(null)
-    }
-  }, [config.trace])
   const target = config.target
 
   const [window_, setWindow] = useState<ThreadWindow>(() =>
@@ -110,6 +83,24 @@ export function App(): ReactNode {
   const [events, setEvents] = useState<VisibilityEvent[]>([])
   const [seen, setSeen] = useState<Set<string>>(new Set())
   const [highlighted, setHighlighted] = useState<string | null>(null)
+
+  /**
+   * Measured sizes carried across a reload.
+   *
+   * Read once, before the first render, because a snapshot arriving later has nothing
+   * to restore: the sizes it describes have already been estimated and, for anything
+   * mounted, measured.
+   */
+  const [restoredSnapshot] = useState<SizeSnapshot | undefined>(() => {
+    if (!readConfig().snapshot) return undefined
+    const raw = sessionStorage.getItem(SNAPSHOT_KEY)
+    if (raw === null) return undefined
+    try {
+      return JSON.parse(raw) as SizeSnapshot
+    } catch {
+      return undefined
+    }
+  })
   const [search, setSearch] = useState('')
   const [settleInfo, setSettleInfo] = useState<string>('')
 
@@ -178,6 +169,20 @@ export function App(): ReactNode {
     },
     [window_.from, window_.to, config.loadAll],
   )
+
+  /** Persist on the way out, which is when a real app would. */
+  useEffect(() => {
+    if (!config.snapshot) return
+    const persist = (): void => {
+      const snapshot = listRef.current?.takeSizeSnapshot()
+      if (snapshot) sessionStorage.setItem(SNAPSHOT_KEY, JSON.stringify(snapshot))
+    }
+    window.addEventListener('pagehide', persist)
+    return () => {
+      persist()
+      window.removeEventListener('pagehide', persist)
+    }
+  }, [config.snapshot])
 
   const onVisibilityChange = useCallback((batch: VisibilityEvent[]) => {
     for (const event of batch) {
@@ -256,22 +261,46 @@ export function App(): ReactNode {
       seenCount: () => seenRef.current.size,
       /** The library's own idea of where the view is pinned. */
       getAnchor: () => listRef.current?.getAnchor() ?? null,
+      takeSizeSnapshot: () => listRef.current?.takeSizeSnapshot() ?? null,
+      restoredSnapshotSize: () => restoredSnapshot?.sizes.length ?? 0,
       enterCount: (key: string) => entersRef.current.get(key) ?? 0,
       maxEnterCount: () => Math.max(0, ...entersRef.current.values()),
     }
     Object.assign(window, { __list: handle })
-  }, [loadMore, window_.from, window_.to])
+  }, [loadMore, window_.from, window_.to, restoredSnapshot])
+
+  /** Fetch when either edge comes within a screenful. */
+  const pageAtEdges = useCallback(
+    (offset: number, viewport: number, content: number) => {
+      if (offset < 600) void loadMore('up')
+      else if (content - offset - viewport < 600) void loadMore('down')
+    },
+    [loadMore],
+  )
 
   const onScroll = useCallback(
     (event: ReactUIEvent<HTMLDivElement>) => {
       const element = event.currentTarget
-      if (element.scrollTop < 600) void loadMore('up')
-      else if (element.scrollHeight - element.scrollTop - element.clientHeight < 600) {
-        void loadMore('down')
-      }
+      pageAtEdges(element.scrollTop, element.clientHeight, element.scrollHeight)
     },
-    [loadMore],
+    [pageAtEdges],
   )
+
+  /**
+   * The same thing for a window-scrolled list, where `onScroll` on the host never fires
+   * because the host does not scroll — the page does. Without this, window mode looked
+   * like a library limitation when it was only a missing listener in the demo.
+   */
+  useEffect(() => {
+    if (!config.windowScroller) return
+    const onWindowScroll = (): void => {
+      pageAtEdges(window.scrollY, window.innerHeight, document.documentElement.scrollHeight)
+    }
+    window.addEventListener('scroll', onWindowScroll, { passive: true })
+    return () => {
+      window.removeEventListener('scroll', onWindowScroll)
+    }
+  }, [config.windowScroller, pageAtEdges])
 
   /**
    * In-app search, which is the honest mitigation for find-in-page.
@@ -339,6 +368,7 @@ export function App(): ReactNode {
           estimateSize={(comment) => 90 + comment.body.length * 70}
           gap={12}
           scrollPaddingStart={config.paddingStart}
+          {...(restoredSnapshot === undefined ? {} : { sizeSnapshot: restoredSnapshot })}
           scrollMargin={config.scrollMargin + documentOffset}
           // Real content above the list inside the same scroller, which is the layout
           // `scrollMargin` exists for. Its height has to match the option exactly.
@@ -381,7 +411,12 @@ export function App(): ReactNode {
             >
               <div className="meta">
                 <span className="author">{comment.author}</span>
-                <span className="muted">#{comment.index}</span>
+                {/* A real permalink, and the only focusable thing *inside* a row: focus
+                    landing here still has to pin the row, which is what `closest` is
+                    for. Without one, that path had no coverage anywhere. */}
+                <a className="muted permalink" href={`?comment=${String(comment.index)}`}>
+                  #{comment.index}
+                </a>
                 {seen.has(comment.id) ? <span className="badge">read</span> : null}
               </div>
               {comment.body.map((paragraph, i) => (

@@ -210,3 +210,13 @@ code.leave {
     color: #9aa4b2;
   }
 }
+
+.permalink {
+  color: inherit;
+  text-decoration: none;
+}
+
+.permalink:hover,
+.permalink:focus-visible {
+  text-decoration: underline;
+}

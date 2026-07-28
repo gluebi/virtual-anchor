@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import fc from 'fast-check'
 import { reconcileIndex, SizeCache, type SizeSnapshot } from './sizeCache.js'
+import { setTraceSink, type TraceEvent } from './trace.js'
 import type { ItemKey } from './types.js'
 
 const keysFor = (n: number): ItemKey[] =>
@@ -567,5 +568,114 @@ describe('SizeCache at thread scale', () => {
     // ~730 iterations of (setSize + offsetOf + indexAt) over 100k items. A
     // linear-rebuild implementation would be orders of magnitude slower here.
     expect(elapsed).toBeLessThan(250)
+  })
+})
+
+describe('restoreMissing', () => {
+  const cache = (signature = 'sig') =>
+    new SizeCache({ keys: ['a', 'b', 'c'], defaultEstimate: 100, layoutSignature: signature })
+
+  const snapshot = (sizes: [string, number][], signature = 'sig') => ({
+    version: 1 as const,
+    layoutSignature: signature,
+    estimate: 100,
+    sizes,
+  })
+
+  it('fills in sizes for items that have not been measured', () => {
+    // For a snapshot that arrives after construction — fetched, or read in an effect.
+    // `restore` replaces the whole map, which is right when there is nothing to lose.
+    const c = cache()
+    expect(c.restoreMissing(snapshot([['a', 250], ['c', 310]]))).toBe(2)
+    expect(c.sizeOf(0)).toBe(250)
+    expect(c.sizeOf(2)).toBe(310)
+    expect(c.isMeasured(1)).toBe(false)
+  })
+
+  it('never overwrites a live measurement', () => {
+    // A measured size is ground truth; a stored one is a recollection.
+    const c = cache()
+    c.setSize(0, 180)
+    expect(c.restoreMissing(snapshot([['a', 9999], ['b', 220]]))).toBe(1)
+    expect(c.sizeOf(0)).toBe(180)
+    expect(c.sizeOf(1)).toBe(220)
+  })
+
+  it('refuses a snapshot from a different layout', () => {
+    const c = cache('narrow')
+    expect(c.restoreMissing(snapshot([['a', 250]], 'wide'))).toBe(0)
+    expect(c.isMeasured(0)).toBe(false)
+  })
+
+  it('refuses a snapshot from a future version', () => {
+    const c = cache()
+    expect(c.restoreMissing({ ...snapshot([['a', 250]]), version: 2 })).toBe(0)
+  })
+
+  it('keeps the total consistent, so offsets stay right', () => {
+    const c = cache()
+    c.restoreMissing(snapshot([['a', 200], ['b', 300]]))
+    expect(c.offsetOf(1)).toBe(200)
+    expect(c.offsetOf(2)).toBe(500)
+    expect(c.totalSize()).toBe(600)
+  })
+})
+
+describe('restore tracing', () => {
+  // The e2e suite asserts on these events to prove a snapshot reached the cache at all,
+  // so the payloads are part of the contract rather than decoration.
+  const events: TraceEvent[] = []
+
+  beforeEach(() => {
+    events.length = 0
+    setTraceSink((event) => events.push(event))
+  })
+
+  afterEach(() => {
+    setTraceSink(null)
+  })
+
+  it('reports an accepted restore with its size', () => {
+    new SizeCache({
+      keys: ['a', 'b'],
+      layoutSignature: 'sig',
+      snapshot: { version: 1, layoutSignature: 'sig', estimate: 100, sizes: [['a', 200]] },
+    })
+
+    expect(events.map((event) => event.topic)).toContain('snapshot.restore')
+    expect(events[0]?.data).toMatchObject({ accepted: true, count: 1, version: 1 })
+  })
+
+  it('reports a refusal with both signatures, which is what explains it', () => {
+    new SizeCache({
+      keys: ['a'],
+      layoutSignature: 'narrow',
+      snapshot: { version: 1, layoutSignature: 'wide', estimate: 100, sizes: [['a', 200]] },
+    })
+
+    expect(events[0]?.data).toMatchObject({
+      accepted: false,
+      snapshotSignature: 'wide',
+      cacheSignature: 'narrow',
+    })
+  })
+
+  it('reports what a late restore applied', () => {
+    const cache = new SizeCache({ keys: ['a', 'b'], layoutSignature: 'sig' })
+    cache.setSize(0, 150)
+    events.length = 0
+
+    cache.restoreMissing({
+      version: 1,
+      layoutSignature: 'sig',
+      estimate: 100,
+      sizes: [
+        ['a', 999],
+        ['b', 220],
+      ],
+    })
+
+    expect(events[0]?.topic).toBe('snapshot.restoreMissing')
+    expect(events[0]?.data).toMatchObject({ accepted: true, applied: 1 })
   })
 })

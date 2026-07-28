@@ -82,6 +82,8 @@ export interface Engine {
    * key React knew at render time.
    */
   focusItem(key: ItemKey): boolean
+  /** The key at a collection index, mounted or not. */
+  keyAt(index: number): ItemKey | undefined
   getVisibility(key: ItemKey): ReturnType<VisibilityTracker['get']>
   subscribeVisibility(key: ItemKey, listener: () => void): () => void
   dispose(): void
@@ -155,6 +157,8 @@ export function createEngine(initial: EngineOptions): Engine {
   let pinnedRange: [number, number] | null = null
   let gate: ScrollerGate | null = null
   let disposed = false
+  /** The snapshot already applied, so re-rendering does not re-apply it every frame. */
+  let appliedSnapshot = options.sizeSnapshot
 
   const viewport = options.viewport
   /**
@@ -533,6 +537,14 @@ export function createEngine(initial: EngineOptions): Engine {
     setOptions(next) {
       options = { ...options, ...next }
       if (next.visibility) tracker.setOptions(next.visibility)
+      // A snapshot passed after construction used to be accepted and then ignored, so
+      // `sizeSnapshot` did nothing whatsoever through the React adapter — which only
+      // ever forwards options this way. Applied once per distinct snapshot, and only to
+      // items with no measurement of their own.
+      if (next.sizeSnapshot !== undefined && next.sizeSnapshot !== appliedSnapshot) {
+        appliedSnapshot = next.sizeSnapshot
+        if (cache.restoreMissing(next.sizeSnapshot) > 0) publish(true)
+      }
       if (next.gap !== undefined) cache.setGap(next.gap)
       if (next.layoutSignature !== undefined) cache.setLayoutSignature(next.layoutSignature)
 
@@ -650,6 +662,10 @@ export function createEngine(initial: EngineOptions): Engine {
     },
 
     observeItem(element, key) {
+      // One attach per row actually mounted. A ref callback recreated on every render
+      // would show up here as a detach/attach pair per row per frame, which is the
+      // churn the per-key memoised callbacks exist to prevent.
+      if (TRACING) trace('item.attach', () => ({ key }))
       const detachFromSurface = surface.attachItem(key, element as HTMLElement)
       const index = cache.indexOf(key)
 
@@ -738,6 +754,18 @@ export function createEngine(initial: EngineOptions): Engine {
         listeners.delete(listener)
         if (listeners.size === 0) visibilityListeners.delete(key)
       }
+    },
+
+    /**
+     * The key at `index`, whether or not it is mounted.
+     *
+     * Keyboard navigation needs this: moving focus to the next article means the next
+     * item in the *collection*, and stepping through the mounted array instead makes the
+     * behaviour depend on what happens to be rendered — a focused row pinned far from
+     * the viewport made PageDown jump to wherever the viewport was.
+     */
+    keyAt(index) {
+      return cache.keyAt(index)
     },
 
     dispose() {

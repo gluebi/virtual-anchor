@@ -44,22 +44,22 @@ export default defineConfig({
         // The integration layer. Not 100%: what is left is mostly iOS momentum and
         // platform fallbacks that need a real device, and pretending otherwise would
         // mean writing tests that assert the mock rather than the behaviour.
-        'packages/core/src/engine.ts': { branches: 77, functions: 91, lines: 90 },
+        'packages/core/src/engine.ts': { branches: 80, functions: 91, lines: 90 },
         'packages/core/src/scroller.ts': { branches: 92, functions: 100, lines: 89 },
         'packages/core/src/viewport.ts': { branches: 85, functions: 91, lines: 100 },
         'packages/core/src/resizer.ts': { branches: 95, functions: 100, lines: 100 },
         'packages/core/src/gate.ts': { branches: 88, functions: 100, lines: 100 },
         // The uncovered branch is the production build, which by definition is not
         // this build.
-        'packages/core/src/trace.ts': { branches: 66, functions: 100, lines: 100 },
+        'packages/core/src/trace.ts': { branches: 70, functions: 100, lines: 100 },
 
         'packages/react/src/useItemVisibility.ts': {
           branches: 100,
           functions: 100,
           lines: 100,
         },
-        'packages/react/src/useVirtualList.ts': { branches: 69, functions: 50, lines: 88 },
-        'packages/react/src/VirtualList.tsx': { branches: 81, functions: 60, lines: 76 },
+        'packages/react/src/useVirtualList.ts': { branches: 73, functions: 50, lines: 88 },
+        'packages/react/src/VirtualList.tsx': { branches: 85, functions: 80, lines: 98 },
       },
     },
   },

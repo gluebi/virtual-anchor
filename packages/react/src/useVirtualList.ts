@@ -150,6 +150,16 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     setScrollElement(element)
   }, [])
 
+  /**
+   * The snapshot as it was on the first render.
+   *
+   * Captured rather than read live, because it is an input to *building* the engine: a
+   * later value would otherwise rebuild it and throw away everything measured since.
+   * Snapshots arriving later still work — they go through `setOptions`, which fills in
+   * only what has not been measured yet.
+   */
+  const [initialSnapshot] = useState(() => sizeSnapshot)
+
   const engine = useMemo(() => {
     if (windowScroller) {
       // The window is available immediately, so this needs no element and no ref.
@@ -158,6 +168,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
         keys: [],
         surface,
         layoutSignature: layoutSignatureFor(document.documentElement),
+        ...(initialSnapshot === undefined ? {} : { sizeSnapshot: initialSnapshot }),
       })
     }
     if (!scrollElement) return null
@@ -166,8 +177,9 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
       keys: [],
       surface,
       layoutSignature: layoutSignatureFor(scrollElement),
+      ...(initialSnapshot === undefined ? {} : { sizeSnapshot: initialSnapshot }),
     })
-  }, [windowScroller, scrollElement, surface])
+  }, [windowScroller, scrollElement, surface, initialSnapshot])
 
   // Dispose whatever a previous derivation produced. Constructing an engine attaches
   // no listeners — `mount()` does that — so building one during render is inert.

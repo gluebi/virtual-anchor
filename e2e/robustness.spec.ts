@@ -14,8 +14,16 @@ interface Anchor {
   offsetWithinItem: number
 }
 
+interface Snapshot {
+  version: number
+  layoutSignature: string
+  sizes: [string, number][]
+}
+
 interface ScrollApi {
   getAnchor: () => Anchor | null
+  takeSizeSnapshot: () => Snapshot | null
+  restoredSnapshotSize: () => number
   scrollToKey: (
     key: string,
     options?: unknown,
@@ -31,9 +39,21 @@ interface ScrollApi {
  * page, so anything it calls has to exist there. A helper defined in this file is a Node
  * binding and is simply not in scope inside the browser.
  */
+interface TraceEvent {
+  at: number
+  topic: string
+  /**
+   * Declared for the fields this suite reads, so they are properties rather than index
+   * lookups — the payload is topic-specific, and naming what is asserted on documents
+   * which topic is being read.
+   */
+  data: { accepted?: boolean; count?: number } & Record<string, unknown>
+}
+
 declare global {
   interface Window {
     __list: ScrollApi
+    __trace: (topic?: string) => TraceEvent[]
   }
 }
 
@@ -216,4 +236,59 @@ test.describe('once: true', () => {
 
     expect(await page.evaluate(() => window.__list.maxEnterCount())).toBeGreaterThan(1)
   })
+})
+
+test.describe('a restored size snapshot', () => {
+  test('survives the scrollport\'s first ResizeObserver delivery', async ({ page }) => {
+    // Two defects met here. The scrollport's ResizeObserver fires a synthetic first
+    // observation one frame after mount, which used to clear the whole cache — so every
+    // restored size for an item not currently mounted was destroyed, and `lastSizes`
+    // meant it could never be re-reported. And the React adapter forwarded
+    // `sizeSnapshot` only through `setOptions`, which had no handler for it, so the
+    // feature did nothing at all through the component.
+    await page.goto('/?comment=4000&snapshot=1&trace=1')
+    await page.waitForFunction(() => '__list' in window)
+    await page.locator('[role="article"]').first().waitFor()
+
+    // Measure a decent number of comments, then persist as the demo does on unload.
+    const persisted = await page.evaluate(async () => {
+      sessionStorage.clear()
+      const scroller = document.querySelector('.scroller')
+      if (!scroller) return 0
+      for (let step = 0; step < 8; step++) {
+        scroller.scrollTop += 1500
+        await new Promise(requestAnimationFrame)
+        await new Promise(requestAnimationFrame)
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400))
+      const snapshot = window.__list.takeSizeSnapshot()
+      if (!snapshot) return 0
+      sessionStorage.setItem('virtual-anchor-demo-sizes', JSON.stringify(snapshot))
+      return snapshot.sizes.length
+    })
+    expect(persisted).toBeGreaterThan(20)
+
+    // Same tab, so sessionStorage carries over — as a reload would.
+    await page.goto('/?comment=4000&snapshot=1&trace=1')
+    await page.waitForFunction(() => '__list' in window)
+    await page.locator('[role="article"]').first().waitFor()
+
+    const accepted = await page.evaluate(() =>
+      window.__trace('snapshot.restore').map((event) => ({
+        accepted: event.data.accepted === true,
+        count: event.data.count ?? -1,
+      })),
+    )
+    expect(accepted, 'the snapshot never reached the cache').toHaveLength(1)
+    expect(accepted[0]?.accepted).toBe(true)
+    expect(accepted[0]?.count).toBe(persisted)
+
+    // A full second, well past the first ResizeObserver delivery.
+    await page.waitForTimeout(1000)
+    const stillHeld = await page.evaluate(
+      () => window.__list.takeSizeSnapshot()?.sizes.length ?? 0,
+    )
+    expect(stillHeld).toBeGreaterThanOrEqual(persisted)
+  })
+
 })

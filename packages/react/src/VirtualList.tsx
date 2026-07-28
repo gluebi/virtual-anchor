@@ -222,43 +222,57 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
   )
 
   /** The feed pattern's keyboard contract: page keys move between articles. */
+  /**
+   * Move focus to an item by its position in the collection.
+   *
+   * Focus follows the scroll rather than being left behind: <kbd>Ctrl</kbd>+<kbd>End</kbd>
+   * used to move the view to the last comment and abandon the keyboard user's focus
+   * where it was, so the next <kbd>PageDown</kbd> continued from the old place and the
+   * abandoned row stayed pinned and mounted.
+   *
+   * Addressed by collection index, so an unmounted neighbour is reachable — stepping
+   * through the mounted array made the behaviour depend on what happened to be
+   * rendered.
+   */
+  const moveFocusTo = useCallback(
+    (index: number, align: 'start' | 'end') => {
+      const key = list.engine?.keyAt(index)
+      if (key === undefined) return false
+      void list.scrollToKey(key, { align }).then(() => {
+        focusKey(key)
+      })
+      return true
+    },
+    [list, focusKey],
+  )
+
   const onKeyDown = useCallback(
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
-      const { items } = list
-      if (items.length === 0) return
+      if (list.count === 0) return
 
-      const currentIndex =
-        focusedKey === null ? -1 : items.findIndex((item) => item.key === focusedKey)
+      const focused =
+        focusedKey === null ? undefined : list.items.find((item) => item.key === focusedKey)
+      // With nothing focused, paging starts from what the reader is looking at.
+      const from = focused?.index ?? list.visibleRange[0]
 
       if (event.key === 'PageDown' && !event.ctrlKey) {
-        const next = items[currentIndex + 1]
-        if (next) {
-          event.preventDefault()
-          void list.scrollToKey(next.key, { align: 'start' }).then(() => {
-            focusKey(next.key)
-          })
-        }
+        if (moveFocusTo(from + 1, 'start')) event.preventDefault()
         return
       }
 
       if (event.key === 'PageUp' && !event.ctrlKey) {
-        const previous = items[currentIndex - 1]
-        if (previous) {
-          event.preventDefault()
-          void list.scrollToKey(previous.key, { align: 'start' }).then(() => {
-            focusKey(previous.key)
-          })
-        }
+        if (from > 0 && moveFocusTo(from - 1, 'start')) event.preventDefault()
         return
       }
 
       if (event.ctrlKey && (event.key === 'Home' || event.key === 'End')) {
-        event.preventDefault()
-        const index = event.key === 'Home' ? 0 : list.count - 1
-        void list.scrollToIndex(index, { align: event.key === 'Home' ? 'start' : 'end' })
+        const home = event.key === 'Home'
+        if (moveFocusTo(home ? 0 : list.count - 1, home ? 'start' : 'end')) {
+          event.preventDefault()
+        }
       }
     },
-    [list, focusedKey, focusKey],
+    [list, focusedKey, moveFocusTo],
   )
 
   const setSize = totalCount ?? list.count

@@ -396,3 +396,190 @@ describe('cleanup', () => {
     expect(remove).toHaveBeenCalledWith('visibilitychange', expect.any(Function))
   })
 })
+
+describe('VirtualList keyboard navigation', () => {
+  const list = () => (
+    <VirtualList
+      items={comments(500)}
+      getItemKey={(c) => c.id}
+      estimateSize={() => 100}
+      label="Thread"
+      renderItem={(c) => (
+        <span>
+          {c.text} <a href="#somewhere">permalink</a>
+        </span>
+      )}
+    />
+  )
+
+  /** The row a focused element belongs to, however deep the focus landed. */
+  const focusedRow = (): string | null =>
+    document.activeElement?.closest<HTMLElement>('[data-virtual-key]')?.dataset.virtualKey ??
+    null
+
+  const press = async (key: string, options: KeyboardEventInit = {}): Promise<void> => {
+    const target = document.activeElement ?? screen.getByRole('feed')
+    await act(async () => {
+      target.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, ...options }))
+      await Promise.resolve()
+    })
+  }
+
+  /**
+   * Focus moves when the scroll *settles*, not when the key is pressed — that is the
+   * point of it, so that a screen reader announces a position that has stopped moving.
+   * So the assertion waits for the convergence loop rather than a microtask.
+   */
+  const expectFocusedRow = (key: string): Promise<void> =>
+    vi.waitFor(
+      () => {
+        expect(focusedRow()).toBe(key)
+      },
+      { timeout: 4000, interval: 20 },
+    )
+
+  it('moves focus to the next and previous article', async () => {
+    render(list())
+    const rows = document.querySelectorAll<HTMLElement>('[data-virtual-key]')
+    act(() => {
+      rows[2]?.focus()
+    })
+    expect(focusedRow()).toBe('c2')
+
+    await press('PageDown')
+    await expectFocusedRow('c3')
+
+    await press('PageUp')
+    await expectFocusedRow('c2')
+  })
+
+  it('moves focus, not just the view, on ctrl+End and ctrl+Home', async () => {
+    // These used to scroll and leave focus behind, so the next PageDown continued from
+    // the abandoned position and that row stayed pinned and mounted for good.
+    render(list())
+    const rows = document.querySelectorAll<HTMLElement>('[data-virtual-key]')
+    act(() => {
+      rows[1]?.focus()
+    })
+
+    await press('End', { ctrlKey: true })
+    await expectFocusedRow('c499')
+
+    await press('Home', { ctrlKey: true })
+    await expectFocusedRow('c0')
+  })
+
+  it('pins the row when focus lands on something inside it', async () => {
+    // `closest`, not the target's own dataset: a permalink or reply button inside a
+    // comment has to pin its row too, or a keyboard user loses their place the moment
+    // they reach for it.
+    render(list())
+    const link = document.querySelectorAll<HTMLElement>('[data-virtual-key] a')[3]
+    act(() => {
+      link?.focus()
+    })
+
+    expect(document.activeElement?.tagName).toBe('A')
+    expect(focusedRow()).toBe('c3')
+
+    // And it survives a move far past any buffer.
+    await press('End', { ctrlKey: true })
+    expect(document.querySelector('[data-virtual-key="c3"]')).not.toBeNull()
+  })
+
+  it('starts paging from what is on screen when nothing holds focus', async () => {
+    // Dispatched at the feed rather than at `document.body`, because a key event outside
+    // the feed never reaches its handler — this is the case where a consumer has focused
+    // the scrollport itself, or forwards keys to it from a parent.
+    render(list())
+    const feed = screen.getByRole('feed')
+    await act(async () => {
+      feed.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', bubbles: true }))
+      await Promise.resolve()
+    })
+    await expectFocusedRow('c1')
+  })
+})
+
+describe('sizeSnapshot through the component', () => {
+  it('restores measured sizes, so the content height reflects them', () => {
+    // The regression test for a feature that did nothing at all: `sizeSnapshot` was
+    // forwarded only through `setOptions`, which had no handler for it, and was never
+    // passed at construction — where the cache actually reads it. So the option was
+    // accepted, documented, unit-tested at the engine level, and inert through React.
+    const handle = { current: null as VirtualListHandle | null }
+    const { unmount } = render(
+      <VirtualList
+        ref={handle}
+        items={comments(100)}
+        getItemKey={(c) => c.id}
+        estimateSize={() => 100}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    // The signature has to match the environment the snapshot is restored into, so it is
+    // taken from the live list rather than guessed.
+    const signature = handle.current?.takeSizeSnapshot().layoutSignature ?? ''
+    expect(signature).not.toBe('')
+    unmount()
+    cleanup()
+
+    const restored = render(
+      <VirtualList
+        items={comments(100)}
+        getItemKey={(c) => c.id}
+        estimateSize={() => 100}
+        sizeSnapshot={{
+          version: 1,
+          layoutSignature: signature,
+          estimate: 100,
+          // Ten comments at 400px instead of the estimated 100.
+          sizes: Array.from({ length: 10 }, (_, i) => [`c${String(i)}`, 400] as const),
+        }}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    // 10 × 400 + 90 × 100 = 13,000, against 10,000 with the snapshot ignored.
+    const feed = restored.container.querySelector<HTMLElement>('[role="feed"]')
+    expect(feed?.style.height).toBe('13000px')
+  })
+
+  it('ignores a snapshot from a different layout', () => {
+    // Compared against the same list with no snapshot at all, rather than a hardcoded
+    // number: what matters is that a refused snapshot changes *nothing*.
+    const plain = render(
+      <VirtualList
+        items={comments(100)}
+        getItemKey={(c) => c.id}
+        estimateSize={() => 100}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+    const baseline = plain.container.querySelector<HTMLElement>('[role="feed"]')?.style.height
+    plain.unmount()
+    cleanup()
+
+    const withStaleSnapshot = render(
+      <VirtualList
+        items={comments(100)}
+        getItemKey={(c) => c.id}
+        estimateSize={() => 100}
+        sizeSnapshot={{
+          version: 1,
+          layoutSignature: 'measured-at-some-other-width',
+          estimate: 100,
+          sizes: Array.from({ length: 10 }, (_, i) => [`c${String(i)}`, 400] as const),
+        }}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    // A height measured at a different width is wrong rather than stale, so it is
+    // refused outright and every item keeps its estimate.
+    expect(
+      withStaleSnapshot.container.querySelector<HTMLElement>('[role="feed"]')?.style.height,
+    ).toBe(baseline)
+  })
+})

@@ -1,4 +1,5 @@
 import type { ItemKey } from './types.js'
+import { TRACING, trace } from './trace.js'
 
 /**
  * A restorable set of measured item sizes.
@@ -391,8 +392,18 @@ export class SizeCache {
    * @returns whether the snapshot was accepted.
    */
   restore(snapshot: StoredSizeSnapshot): boolean {
-    if (snapshot.version !== 1) return false
-    if (snapshot.layoutSignature !== this.#layoutSignature) return false
+    const accepted =
+      snapshot.version === 1 && snapshot.layoutSignature === this.#layoutSignature
+    if (TRACING) {
+      trace('snapshot.restore', () => ({
+        accepted,
+        count: snapshot.sizes.length,
+        version: snapshot.version,
+        snapshotSignature: snapshot.layoutSignature,
+        cacheSignature: this.#layoutSignature,
+      }))
+    }
+    if (!accepted) return false
 
     this.#measured = new Map(snapshot.sizes)
     this.#measuredTotal = 0
@@ -401,6 +412,38 @@ export class SizeCache {
     this.#lastEstimateAt = this.#measured.size
     this.#rebuild()
     return true
+  }
+
+  /**
+   * Fill in sizes for items that have not been measured yet, leaving the rest alone.
+   *
+   * For a snapshot that arrives after construction — fetched, or read from storage in an
+   * effect. `restore` replaces the whole map, which is right when there is nothing to
+   * lose but wrong here: a measured size is ground truth and a stored one is a
+   * recollection, so the live value has to win.
+   *
+   * @returns how many sizes were applied; 0 if the snapshot was refused.
+   */
+  restoreMissing(snapshot: StoredSizeSnapshot): number {
+    if (snapshot.version !== 1 || snapshot.layoutSignature !== this.#layoutSignature) {
+      if (TRACING) {
+        trace('snapshot.restoreMissing', () => ({ accepted: false, applied: 0 }))
+      }
+      return 0
+    }
+
+    let applied = 0
+    for (const [key, size] of snapshot.sizes) {
+      if (this.#measured.has(key)) continue
+      this.#measured.set(key, size)
+      this.#measuredTotal += size
+      applied++
+    }
+    if (TRACING) {
+      trace('snapshot.restoreMissing', () => ({ accepted: true, applied }))
+    }
+    if (applied > 0) this.#rebuild()
+    return applied
   }
 
   /**
