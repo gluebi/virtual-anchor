@@ -39,7 +39,7 @@ test.describe('residual carry', () => {
       body: JSON.stringify(summary, null, 2),
       contentType: 'application/json',
     })
-    // eslint-disable-next-line no-console
+     
     console.log(`\n[${testInfo.project.name}]`, JSON.stringify(summary, null, 2))
 
     expect(summary.probes).toBeGreaterThan(15)
