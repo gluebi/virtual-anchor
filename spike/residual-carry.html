@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <title>Spike: residual carry</title>
+    <style>
+      body { font: 14px/1.4 system-ui, sans-serif; margin: 0; padding: 16px; }
+      #scroller {
+        height: 400px;
+        overflow: auto;
+        border: 1px solid #999;
+        position: relative;
+        overflow-anchor: none;
+        scroll-behavior: auto;
+        contain: size style;
+      }
+      /* The element every item is positioned inside. The residual is applied
+         here, as a single sub-pixel translate, so it shifts all items at once. */
+      #carrier { position: absolute; inset: 0 0 auto 0; }
+      .item { position: absolute; left: 0; width: 100%; box-sizing: border-box;
+              border-bottom: 1px solid #eee; padding: 4px 8px; contain: layout style; }
+      #sizer { width: 1px; }
+      pre { background: #f6f6f6; padding: 12px; overflow-x: auto; }
+    </style>
+  </head>
+  <body>
+    <h1>Residual carry spike</h1>
+    <p>
+      Question: can a fractional scroll target land within 0.5px in a browser
+      that truncates <code>scrollTop</code> to whole integers?
+    </p>
+    <div id="scroller"><div id="sizer"></div><div id="carrier"></div></div>
+    <pre id="out">running…</pre>
+
+    <script type="module">
+      const COUNT = 2000
+      const ITEM = 73.5 // deliberately fractional, like real prose line boxes
+      const scroller = document.getElementById('scroller')
+      const carrier = document.getElementById('carrier')
+      const sizer = document.getElementById('sizer')
+
+      sizer.style.height = `${COUNT * ITEM}px`
+
+      const nodes = []
+      for (let i = 0; i < COUNT; i++) {
+        const el = document.createElement('div')
+        el.className = 'item'
+        el.textContent = `item ${i}`
+        el.style.height = `${ITEM}px`
+        el.dataset.index = String(i)
+        nodes.push(el)
+      }
+
+      /** Model offset of an item's top edge. Exact, float64, never rounded. */
+      const offsetOf = (i) => i * ITEM
+
+      let mountedFrom = -1
+      function render(scrollTop) {
+        // Mount a window around the offset, positioned by `top` (not transform:
+        // a fractional translate disables subpixel text antialiasing in Blink).
+        const first = Math.max(0, Math.floor(scrollTop / ITEM) - 5)
+        const last = Math.min(COUNT - 1, first + 20)
+        if (first === mountedFrom) return
+        mountedFrom = first
+
+        carrier.replaceChildren()
+        for (let i = first; i <= last; i++) {
+          nodes[i].style.top = `${offsetOf(i)}px`
+          carrier.appendChild(nodes[i])
+        }
+      }
+
+      /**
+       * Scroll so that item `index`'s top edge sits exactly at the viewport top.
+       *
+       * `scrollTop` writes are snapped to physical pixels by the platform, and
+       * truncated outright by WebKit. So: write the integer part, read back what
+       * the browser actually took, and carry the leftover as a sub-pixel
+       * translate on the carrier — rather than re-writing scrollTop to chase it.
+       */
+      function scrollToIndexWithCarry(index) {
+        const target = offsetOf(index)
+        carrier.style.transform = ''
+        scroller.scrollTop = target
+        render(target)
+
+        const actual = scroller.scrollTop
+        const residual = target - actual
+        // Positive residual: we wanted to be further down than the browser went,
+        // so shift content up by that much.
+        carrier.style.transform = `translateY(${-residual}px)`
+        return { target, actual, residual }
+      }
+
+      function scrollToIndexNaive(index) {
+        const target = offsetOf(index)
+        carrier.style.transform = ''
+        scroller.scrollTop = target
+        render(target)
+        return { target, actual: scroller.scrollTop, residual: target - scroller.scrollTop }
+      }
+
+      /**
+       * Measured error: where the item's top edge actually is on screen.
+       *
+       * `getBoundingClientRect().top` is the *border-box* top, but content
+       * starts inside the border — so the scroller's own border width has to be
+       * added, or every reading is off by exactly that much. (This bit the first
+       * run of this spike: a 1px border read as a 1px accuracy failure.)
+       */
+      function measureError(index) {
+        const itemTop = nodes[index].getBoundingClientRect().top
+        const contentTop = scroller.getBoundingClientRect().top + scroller.clientTop
+        return itemTop - contentTop
+      }
+
+      function run() {
+        const probes = []
+        for (let i = 7; i < COUNT; i += 97) probes.push(i)
+
+        const results = { carry: [], naive: [] }
+        for (const i of probes) {
+          scrollToIndexNaive(i)
+          results.naive.push(Math.abs(measureError(i)))
+          const info = scrollToIndexWithCarry(i)
+          results.carry.push({ err: Math.abs(measureError(i)), residual: info.residual })
+        }
+
+        const worst = (xs) => Math.max(...xs)
+        const carryErrs = results.carry.map((r) => r.err)
+        const summary = {
+          userAgent: navigator.userAgent,
+          devicePixelRatio: window.devicePixelRatio,
+          probes: probes.length,
+          scrollTopIsFractional: results.carry.some((r) => r.residual !== 0),
+          worstResidualSeen: worst(results.carry.map((r) => Math.abs(r.residual))),
+          worstErrorNaive: worst(results.naive),
+          worstErrorWithCarry: worst(carryErrs),
+          passesHalfPixelNaive: worst(results.naive) < 0.5,
+          passesHalfPixelWithCarry: worst(carryErrs) < 0.5,
+        }
+        document.getElementById('out').textContent = JSON.stringify(summary, null, 2)
+        window.__spike = summary
+      }
+
+      render(0)
+      requestAnimationFrame(() => requestAnimationFrame(run))
+    </script>
+  </body>
+</html>
