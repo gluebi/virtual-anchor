@@ -35,7 +35,7 @@ test.describe('residual carry', () => {
     const summary = await page.evaluate(
       () => (window as unknown as { __spike: SpikeSummary }).__spike,
     )
-    testInfo.attach('spike-summary', {
+    await testInfo.attach('spike-summary', {
       body: JSON.stringify(summary, null, 2),
       contentType: 'application/json',
     })

@@ -330,7 +330,7 @@ test.describe('visibility semantics', () => {
 
     const duplicates = await page.evaluate(() => {
       const entries = [...document.querySelectorAll('.panel ol li')].map(
-        (li) => li.textContent ?? '',
+        (li) => li.textContent,
       )
       const enters = entries.filter((text) => text.startsWith('enter'))
       return enters.length - new Set(enters).size

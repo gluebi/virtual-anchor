@@ -129,7 +129,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
    * during render.
    */
   const surface = useMemo(
-    () => createDomSurface({ getContainer: () => containerElement.current }),
+    () => createDomSurface({ container: containerElement }),
     [],
   )
 
@@ -203,11 +203,6 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     [scrollPaddingStart, scrollPaddingEnd, scrollMargin],
   )
 
-  // Callbacks are read through a ref so that changing them mid-flight does not
-  // tear the engine down and lose the scroll position with it.
-  const callbacks = useRef({ estimateSize, onVisibilityChange, getItemKey })
-  callbacks.current = { estimateSize, onVisibilityChange, getItemKey }
-
   const containerRef = useCallback((element: HTMLElement | null) => {
     containerElement.current = element
   }, [])
@@ -233,7 +228,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
       ...(keepMounted === undefined ? {} : { keepMounted }),
       ...(visibility === undefined ? {} : { visibility }),
       ...(sizeSnapshot === undefined ? {} : { sizeSnapshot }),
-      onVisibilityChange: (events) => callbacks.current.onVisibilityChange?.(events),
+      onVisibilityChange: (events) => onVisibilityChange?.(events),
     })
   }
 

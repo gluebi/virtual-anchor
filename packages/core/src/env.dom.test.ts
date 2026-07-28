@@ -125,7 +125,10 @@ describe('prefersReducedMotion', () => {
   })
 
   it('defaults to false where matchMedia is unavailable', () => {
-    const original = window.matchMedia
+    // jsdom does not implement `matchMedia` at all, so this captures `undefined` —
+    // which is the point. `Reflect.get` rather than a property read because the latter
+    // is an unbound-method reference as far as the linter is concerned.
+    const original: unknown = Reflect.get(window, 'matchMedia')
     Reflect.deleteProperty(window, 'matchMedia')
     expect(prefersReducedMotion()).toBe(false)
     Object.defineProperty(window, 'matchMedia', { configurable: true, value: original })

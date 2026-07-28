@@ -49,12 +49,16 @@ export function App(): ReactNode {
   const loadingRef = useRef(false)
   /** Lets the accuracy suite hold the data set still. */
   const paginationEnabled = useRef(true)
-  // Latest values for the test handle, which is created once per mount and must
-  // not close over a stale window or read-set.
+
+  // Latest values for the test handle. Assigned in an effect rather than during
+  // render: the handle's `loadOlder` has to read the window *after* a page has been
+  // fetched, so closing over the render-time value reports a delta of zero.
   const windowRef = useRef(window_)
-  windowRef.current = window_
   const seenRef = useRef(seen)
-  seenRef.current = seen
+  useEffect(() => {
+    windowRef.current = window_
+    seenRef.current = seen
+  }, [window_, seen])
 
   const items = useMemo(
     () => thread.slice(window_.from, window_.to),
@@ -90,14 +94,14 @@ export function App(): ReactNode {
   /** Deep-link on first paint, then flash the target once motion has settled. */
   useEffect(() => {
     const key = `comment-${String(target)}`
-    let cancelled = false
+    const run = { cancelled: false }
 
     void (async () => {
       // Two frames, so the first measurements have landed before aiming.
       await new Promise(requestAnimationFrame)
       await new Promise(requestAnimationFrame)
       const result = await listRef.current?.scrollToKey(key, { align: 'start' })
-      if (cancelled || !result) return
+      if (run.cancelled || !result) return
 
       setSettleInfo(
         `settled=${String(result.settled)} deviation=${result.deviation.toFixed(3)}px iterations=${String(result.iterations)}`,
@@ -109,7 +113,7 @@ export function App(): ReactNode {
     })()
 
     return () => {
-      cancelled = true
+      run.cancelled = true
     }
   }, [target])
 

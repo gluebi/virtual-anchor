@@ -125,12 +125,14 @@ const harness = (
 
 /** Runs frames until the promise settles, or gives up. */
 const settle = async (h: Harness, promise: Promise<ScrollResult>): Promise<ScrollResult> => {
-  let done = false
+  // A box rather than a `let`: TypeScript narrows a captured boolean to its literal
+  // initialiser, so `!done` reads as always-true even though the promise flips it.
+  const state = { done: false }
   const tracked = promise.then((result) => {
-    done = true
+    state.done = true
     return result
   })
-  for (let i = 0; i < 400 && !done; i++) {
+  for (let i = 0; i < 400 && !state.done; i++) {
     h.frames(1)
     await Promise.resolve()
   }
@@ -331,13 +333,13 @@ describe('scrollToIndex convergence', () => {
     const promise = h.scroller.scrollToIndex(500)
 
     let size = 100
-    let done = false
+    const state = { done: false }
     const tracked = promise.then((r) => {
-      done = true
+      state.done = true
       return r
     })
 
-    for (let i = 0; i < 500 && !done; i++) {
+    for (let i = 0; i < 500 && !state.done; i++) {
       size += 1
       h.cache.setSize(3, size)
       h.scroller.notifyMeasured()
@@ -499,7 +501,7 @@ describe('scrollToIndex interruption', () => {
 })
 
 describe('scrollToIndex smooth behaviour', () => {
-  it('asks for the destination to be mounted before animating', async () => {
+  it('asks for the destination to be mounted before animating', () => {
     const requestRange = vi.fn()
     const cache = new SizeCache({ keys: keysFor(1000), defaultEstimate: 100 })
     const viewport = fakeViewport()

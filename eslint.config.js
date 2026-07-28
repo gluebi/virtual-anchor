@@ -14,6 +14,8 @@ export default defineConfig(
       'test-results/**',
       'playwright-report/**',
       'spike/residual-carry.html',
+      // Not worth a program of its own; nothing here is shipped.
+      'eslint.config.js',
     ],
   },
 
@@ -93,6 +95,24 @@ export default defineConfig(
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-non-null-assertion': 'off',
       'no-console': 'off',
+      // Test doubles are mostly no-op members standing in for a real API.
+      '@typescript-eslint/no-empty-function': ['error', { allow: ['arrowFunctions', 'methods'] }],
+    },
+  },
+
+  {
+    files: ['packages/react/src/**/*.{ts,tsx}'],
+    rules: {
+      // These two are React-Compiler-oriented, and this library deliberately hands ref
+      // callbacks and a `{ current }` box across its own hook boundary — the item ref
+      // registry lives on the engine precisely so it is stable across renders. The rules
+      // cannot verify that a callback returned from a hook is a legitimate ref callback,
+      // so what remains after fixing every genuine instance is the seam itself.
+      //
+      // Left ON for the demo, which is ordinary consumer code — where they caught two
+      // real render-time ref writes.
+      'react-hooks/refs': 'off',
+      'react-hooks/preserve-manual-memoization': 'off',
     },
   },
 )

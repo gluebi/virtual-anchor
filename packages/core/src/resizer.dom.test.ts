@@ -333,8 +333,13 @@ describe('createResizer', () => {
 
     observer.deliver([[item, 300]])
     expect(onItemResize).not.toHaveBeenCalled()
-    expect(resizer.observeItem(addItem(), 'b')()).toBeUndefined()
-    expect(resizer.observeViewport(addItem())()).toBeUndefined()
+    // Observing after disposal is inert and its detach is safe to call.
+    const detachItem = resizer.observeItem(addItem(), 'b')
+    const detachViewport = resizer.observeViewport(addItem())
+    expect(() => {
+      detachItem()
+      detachViewport()
+    }).not.toThrow()
   })
 })
 

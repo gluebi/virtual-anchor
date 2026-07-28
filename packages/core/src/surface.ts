@@ -52,12 +52,14 @@ export interface Surface {
 
 export interface DomSurfaceOptions {
   /**
-   * The element that sizes the scrollable content and positions the items.
+   * A box holding the element that sizes the content and positions the items.
    *
-   * Read lazily rather than captured, because in React it is attached by a ref
-   * callback that can fire after the engine exists.
+   * A box rather than the element itself because in React it is attached by a ref
+   * callback that can fire after the engine exists — and a box rather than a
+   * `getContainer` closure so that no code React analyses during render reads a ref.
+   * Deliberately structural (`{ current }`) so the core does not depend on React.
    */
-  getContainer: () => HTMLElement | null
+  container: { current: HTMLElement | null }
 }
 
 /**
@@ -103,14 +105,14 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
     setContentSize(size) {
       if (size === lastContentSize) return
       lastContentSize = size
-      const container = options.getContainer()
+      const container = options.container.current
       if (container) container.style.height = `${String(size)}px`
     },
 
     setCarry(px) {
       if (px === lastCarry) return
       lastCarry = px
-      const container = options.getContainer()
+      const container = options.container.current
       // Applied as `top` on the relatively-positioned container for the same
       // antialiasing reason as items.
       if (container) container.style.top = px === 0 ? '' : `${String(-px)}px`
@@ -150,12 +152,12 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
 /** A surface that draws nothing, for tests and non-visual use. */
 export function createNullSurface(): Surface {
   return {
-    setContentSize() {},
-    setCarry() {},
-    setItemOffset() {},
+    setContentSize: () => {},
+    setCarry: () => {},
+    setItemOffset: () => {},
     attachItem: () => () => {},
     hasItem: () => false,
     focusItem: () => false,
-    dispose() {},
+    dispose: () => {},
   }
 }
