@@ -50,3 +50,9 @@ export type { ScrollerGate, ScrollerGateOptions } from './gate.js'
 
 export { createScroller, onScrollSettled } from './scroller.js'
 export type { Scroller, ScrollerOptions } from './scroller.js'
+
+export { createVirtualStore, EMPTY_STATE, needsRerender } from './store.js'
+export type { VirtualItem, VirtualState, VirtualStore } from './store.js'
+
+export { createEngine, itemScrollOffset, layoutSignatureFor } from './engine.js'
+export type { Engine, EngineOptions } from './engine.js'

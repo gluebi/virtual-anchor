@@ -7,7 +7,7 @@ import {
 } from './anchor.js'
 import { isIOSWebKit, prefersReducedMotion, supportsScrollEnd } from './env.js'
 import type { SizeCache } from './sizeCache.js'
-import type { ScrollAlign, ScrollResult, ScrollToOptions } from './types.js'
+import type { ScrollAlign, ScrollEndReason, ScrollResult, ScrollToOptions } from './types.js'
 import type { Viewport } from './viewport.js'
 
 /** How long without a measurement counts as "the model has stopped moving". */
@@ -22,6 +22,16 @@ const HARD_DEADLINE_MS = 5000
 const SCROLL_END_FALLBACK_MS = 150
 /** Time constant for the self-driven smooth approach. */
 const SMOOTH_TAU_MS = 120
+/**
+ * Smallest per-frame advance worth attempting, in CSS px.
+ *
+ * A whole pixel, not `1 / devicePixelRatio`: WebKit truncates a written scroll
+ * offset to an integer, so a sub-pixel advance is discarded outright — the offset
+ * does not move, the next frame computes the same advance, and the animation
+ * stalls short of its target forever. Below a pixel of remaining travel the jump
+ * is imperceptible anyway.
+ */
+const SMOOTH_MIN_STEP = 1
 /** iOS only fires touch events at the start of momentum, so a timer is needed. */
 const IOS_TOUCH_GRACE_MS = 150
 
@@ -68,6 +78,14 @@ export interface Scroller {
   notifyScroll(offset: number): boolean
   /** Whether a programmatic scroll is in flight (visibility events suppressed). */
   isScrolling(): boolean
+  /**
+   * Declare that the caller is about to write this scroll offset itself.
+   *
+   * The anchor-restore path writes `scrollTop` directly, and without this the
+   * resulting scroll event is indistinguishable from the user grabbing the
+   * scrollbar — which cancels any in-flight programmatic scroll.
+   */
+  markSelfWrite(offset: number): void
   /** Abandon any in-flight scroll, resolving it honestly as unsettled. */
   cancel(): void
   dispose(): void
@@ -109,9 +127,34 @@ export function createScroller(options: ScrollerOptions): Scroller {
 
   let pending: PendingScroll | null = null
   let frame: number | null = null
-  /** What we last asked the browser for, so its echo is recognisable. */
-  let intendedOffset: number | null = null
   let disposed = false
+
+  /**
+   * Offsets we have asked the browser for and not yet seen echoed back.
+   *
+   * A queue rather than a single slot, because scroll events are delivered
+   * *asynchronously*: two writes in the same task — an anchor restore followed by
+   * a scroll target, say — produce their events later, by which time a single slot
+   * only remembers the second. The first event then looks like the user grabbing
+   * the scrollbar and cancels the programmatic scroll that just started.
+   *
+   * Browsers also coalesce several writes into one event, so a match consumes
+   * every older entry too.
+   */
+  const intended: number[] = []
+  const MAX_INTENTS = 5
+
+  const rememberIntent = (offset: number): void => {
+    intended.push(offset)
+    if (intended.length > MAX_INTENTS) intended.shift()
+  }
+
+  const consumeIntent = (observed: number): boolean => {
+    const index = intended.findIndex((value) => isSelfWrite(observed, value))
+    if (index === -1) return false
+    intended.splice(0, index + 1)
+    return true
+  }
 
   // iOS WebKit: writing scrollTop during momentum cancels the fling, so
   // corrections are banked until the gesture is demonstrably over.
@@ -121,6 +164,33 @@ export function createScroller(options: ScrollerOptions): Scroller {
   let deferredCorrection = 0
 
   const cleanups: Array<() => void> = []
+
+  /**
+   * Cancel an in-flight programmatic scroll on genuine user input.
+   *
+   * Deliberately driven by *input* events rather than by unrecognised scroll
+   * offsets. The browser moves `scrollTop` on its own more often than it looks —
+   * clamping it when content shrinks, adjusting it when a window of items is
+   * replaced — and those are indistinguishable from a user drag if all you have is
+   * the offset. Treating them as input cancels scrolls nobody asked to cancel;
+   * watching for a wheel, a touch, a pointer or a key is unambiguous.
+   */
+  const cancelOnInput = (): void => {
+    if (pending) finish(false, 'input')
+  }
+
+  {
+    const element = viewport.getElement()
+    if (element) {
+      const events = ['wheel', 'touchstart', 'pointerdown', 'keydown'] as const
+      for (const type of events) {
+        element.addEventListener(type, cancelOnInput, { passive: true })
+      }
+      cleanups.push(() => {
+        for (const type of events) element.removeEventListener(type, cancelOnInput)
+      })
+    }
+  }
 
   if (isIOS) {
     const element = viewport.getElement()
@@ -214,14 +284,14 @@ export function createScroller(options: ScrollerOptions): Scroller {
       deferredCorrection = offset - viewport.getScrollOffset()
       return
     }
-    intendedOffset = offset
+    rememberIntent(offset)
     viewport.setScrollOffset(offset)
 
     // Recover the fraction the platform refused to take, as a visual offset.
     applyCarry(carryFor(offset, viewport.getScrollOffset()))
   }
 
-  const finish = (settled: boolean): void => {
+  const finish = (settled: boolean, reason: ScrollEndReason): void => {
     const current = pending
     if (!current) return
 
@@ -239,7 +309,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     const actual = viewport.getScrollOffset()
     const deviation = finalTarget - actual - carryFor(finalTarget, actual)
 
-    current.resolve({ settled, deviation, iterations: current.iterations })
+    current.resolve({ settled, deviation, iterations: current.iterations, reason })
   }
 
   const step = (): void => {
@@ -249,14 +319,23 @@ export function createScroller(options: ScrollerOptions): Scroller {
 
     const elapsed = now() - current.startedAt
     if (elapsed > HARD_DEADLINE_MS) {
-      finish(false)
+      finish(false, 'deadline')
       return
     }
 
     const target = targetFor(current.index, current.align, current.offset)
     const tolerance = convergenceTolerance(viewport.getDevicePixelRatio())
     const targetMoved = Math.abs(target - current.lastTarget) > tolerance
-    const arrived = Math.abs(viewport.getScrollOffset() - target) <= tolerance
+
+    // Arrival is judged on where the content *appears*, not on the raw scroll
+    // offset. The carry is what makes the visual position exact on an engine that
+    // will not accept a fractional offset, so ignoring it here asks the scroller
+    // to achieve something the platform has already refused — on WebKit at dPR 2
+    // a 0.75px truncation the carry fully absorbs would never satisfy a 0.5px
+    // tolerance, and the loop runs to its deadline reporting a deviation of zero.
+    const actual = viewport.getScrollOffset()
+    const uncarried = target - actual - carryFor(target, actual)
+    const arrived = Math.abs(uncarried) <= tolerance
     const quiet = now() - current.lastMeasurementAt > MEASUREMENT_QUIET_MS
 
     if (!targetMoved && arrived && quiet) {
@@ -265,7 +344,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
         // Converged at tolerance; commit the exact float so the landing is not
         // left a fraction short of where it was asked to be.
         write(target)
-        finish(true)
+        finish(true, 'converged')
         return
       }
     } else {
@@ -281,8 +360,14 @@ export function createScroller(options: ScrollerOptions): Scroller {
           // endpoint moves; absorbing the movement into the approach does not.
           const from = viewport.getScrollOffset()
           const k = 1 - Math.exp(-16 / SMOOTH_TAU_MS)
-          const next = from + (target - from) * k
-          write(Math.abs(target - next) <= tolerance ? target : next)
+          const advance = (target - from) * k
+
+          // Snap the last stretch rather than easing into it. An exponential
+          // approach's step shrinks without limit, and once it falls below what
+          // the platform will accept the offset simply stops changing — the next
+          // frame computes the same advance and the animation stalls short of its
+          // target forever. See SMOOTH_MIN_STEP.
+          write(Math.abs(advance) <= SMOOTH_MIN_STEP ? target : from + advance)
         } else {
           write(target)
         }
@@ -292,7 +377,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // Past the soft budget, stop re-aiming and settle for what we have rather
     // than fighting a list that will not hold still.
     if (elapsed > SOFT_DEADLINE_MS && quiet) {
-      finish(arrived)
+      finish(arrived, arrived ? 'converged' : 'deadline')
       return
     }
 
@@ -307,7 +392,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     scrollToIndex(index, scrollOptions = {}) {
       const cache = getCache()
       if (disposed || cache.length === 0) {
-        return Promise.resolve({ settled: false, deviation: 0, iterations: 0 })
+        return Promise.resolve({ settled: false, deviation: 0, iterations: 0, reason: 'empty' })
       }
 
       // A new absolute command invalidates any banked correction.
@@ -319,7 +404,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
       const smooth = scrollOptions.behavior === 'smooth' && !prefersReducedMotion()
 
       // Replace any scroll already in flight, resolving it honestly.
-      if (pending) finish(false)
+      if (pending) finish(false, 'replaced')
 
       const startedAt = now()
       let resolve!: (result: ScrollResult) => void
@@ -363,7 +448,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
       const fullyMeasured = cache.measuredCount === cache.length
       if (!smooth && fullyMeasured && Math.abs(viewport.getScrollOffset() - target) <= tolerance) {
         write(target)
-        finish(true)
+        finish(true, 'converged')
         return promise
       }
 
@@ -379,12 +464,10 @@ export function createScroller(options: ScrollerOptions): Scroller {
     },
 
     notifyScroll(offset) {
-      const self = isSelfWrite(offset, intendedOffset)
-      intendedOffset = null
-
-      // A genuine user scroll cancels an in-flight programmatic scroll: fighting
-      // the user's thumb is never the right answer.
-      if (!self && pending) finish(false)
+      // Recognising our own echo still matters — the caller uses it to decide
+      // whether to re-derive its anchor — but an unrecognised offset is *not*
+      // treated as a cancellation signal. See `cancelOnInput` for why.
+      const self = consumeIntent(offset)
 
       // Flush a correction banked during iOS momentum, now that scrolling has
       // demonstrably continued past it.
@@ -402,14 +485,18 @@ export function createScroller(options: ScrollerOptions): Scroller {
 
     isScrolling: () => pending !== null,
 
+    markSelfWrite(offset) {
+      rememberIntent(offset)
+    },
+
     cancel() {
-      if (pending) finish(false)
+      if (pending) finish(false, 'cancelled')
       deferredCorrection = 0
     },
 
     dispose() {
       disposed = true
-      if (pending) finish(false)
+      if (pending) finish(false, 'disposed')
       if (frame !== null) {
         cancelFrame(frame)
         frame = null

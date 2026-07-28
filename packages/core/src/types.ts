@@ -47,4 +47,30 @@ export interface ScrollResult {
   deviation: number
   /** How many measure-and-re-aim rounds the convergence loop needed. */
   iterations: number
+  /** Why the scroll stopped, so an unsettled result is actionable. */
+  reason: ScrollEndReason
 }
+
+export type ScrollEndReason =
+  /** Arrived, and the target held still. */
+  | 'converged'
+  /** Ran out of time — something in the list would not stop moving. */
+  | 'deadline'
+  /** A newer scroll request took over. */
+  | 'replaced'
+  /** The user took over: a wheel, touch, pointer or key. */
+  | 'input'
+  /** Cancelled explicitly by the caller. */
+  | 'cancelled'
+  /** The list was torn down mid-scroll. */
+  | 'disposed'
+  /** The list was empty. */
+  | 'empty'
+  /**
+   * The requested key is not in the loaded window.
+   *
+   * Distinct from `empty` on purpose: it usually means the caller changed the
+   * loaded window and scrolled before that change reached the list, which is a
+   * very different fix from "there is nothing here".
+   */
+  | 'unknown-key'

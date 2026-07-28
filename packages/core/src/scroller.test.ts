@@ -265,6 +265,7 @@ describe('scrollToIndex alignment', () => {
       settled: false,
       deviation: 0,
       iterations: 0,
+      reason: 'empty',
     })
   })
 })
@@ -415,19 +416,35 @@ describe('scrollToIndex sub-pixel landing', () => {
 })
 
 describe('scrollToIndex interruption', () => {
-  it('gives way to a genuine user scroll', async () => {
+  it('is not cancelled by a scroll offset it does not recognise', async () => {
+    // The browser moves `scrollTop` on its own more than it appears: clamping it
+    // when content shrinks, adjusting it when a window of items is replaced. Those
+    // are indistinguishable from a user drag by offset alone, so treating an
+    // unrecognised offset as input cancels scrolls nobody asked to cancel.
+    // Cancellation is driven by real input events instead — see the DOM tests.
     const h = harness()
     const promise = h.scroller.scrollToIndex(500)
+
+    h.viewport.offset = 900
+    expect(h.scroller.notifyScroll(900)).toBe(false)
     expect(h.scroller.isScrolling()).toBe(true)
 
-    // The user grabs the scrollbar and goes somewhere else entirely.
-    h.viewport.offset = 900
-    const self = h.scroller.notifyScroll(900)
+    await settle(h, promise)
+  })
 
-    expect(self).toBe(false)
-    const result = await promise
-    expect(result.settled).toBe(false)
-    expect(h.scroller.isScrolling()).toBe(false)
+  it('recognises its own echo even after a second write', async () => {
+    // Scroll events are delivered asynchronously, so two writes in one task
+    // produce their events later. A single remembered offset would only match the
+    // second, and the first would look like user input.
+    const h = harness()
+    const promise = h.scroller.scrollToIndex(42)
+
+    h.scroller.markSelfWrite(1234)
+    // The older intent still resolves as self-inflicted.
+    expect(h.scroller.notifyScroll(1234)).toBe(true)
+    expect(h.scroller.isScrolling()).toBe(true)
+
+    await settle(h, promise)
   })
 
   it('recognises the echo of its own write and keeps going', async () => {
