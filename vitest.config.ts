@@ -27,10 +27,39 @@ export default defineConfig({
       include: ['packages/core/src/**', 'packages/react/src/**'],
       exclude: ['**/*.test.*', '**/index.ts', '**/types.ts', '**/*.d.ts'],
       thresholds: {
-        // The three modules where a wrong number is a silent visual bug.
-        'packages/core/src/sizeCache.ts': { branches: 100, functions: 100, lines: 100 },
+        // Floors, not aspirations: each is at or just under what the suite reaches
+        // today, so coverage cannot quietly fall away again. Three files were enforced
+        // before this, which is how `engine.ts` and the whole React package sat at 0%
+        // while the build stayed green — and that is exactly where the defects were.
+        //
+        // The modules where a wrong number is a silent visual bug stay at 100%.
         'packages/core/src/anchor.ts': { branches: 100, functions: 100, lines: 100 },
+        'packages/core/src/sizeCache.ts': { branches: 100, functions: 100, lines: 100 },
         'packages/core/src/visibility.ts': { branches: 100, functions: 100, lines: 100 },
+        'packages/core/src/listGeometry.ts': { branches: 100, functions: 100, lines: 100 },
+        'packages/core/src/surface.ts': { branches: 100, functions: 100, lines: 100 },
+        'packages/core/src/store.ts': { branches: 100, functions: 100, lines: 100 },
+        'packages/core/src/env.ts': { branches: 100, functions: 100, lines: 100 },
+
+        // The integration layer. Not 100%: what is left is mostly iOS momentum and
+        // platform fallbacks that need a real device, and pretending otherwise would
+        // mean writing tests that assert the mock rather than the behaviour.
+        'packages/core/src/engine.ts': { branches: 77, functions: 91, lines: 90 },
+        'packages/core/src/scroller.ts': { branches: 92, functions: 100, lines: 89 },
+        'packages/core/src/viewport.ts': { branches: 85, functions: 91, lines: 100 },
+        'packages/core/src/resizer.ts': { branches: 95, functions: 100, lines: 100 },
+        'packages/core/src/gate.ts': { branches: 88, functions: 100, lines: 100 },
+        // The uncovered branch is the production build, which by definition is not
+        // this build.
+        'packages/core/src/trace.ts': { branches: 66, functions: 100, lines: 100 },
+
+        'packages/react/src/useItemVisibility.ts': {
+          branches: 100,
+          functions: 100,
+          lines: 100,
+        },
+        'packages/react/src/useVirtualList.ts': { branches: 69, functions: 50, lines: 88 },
+        'packages/react/src/VirtualList.tsx': { branches: 81, functions: 60, lines: 76 },
       },
     },
   },

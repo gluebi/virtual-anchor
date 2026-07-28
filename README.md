@@ -90,7 +90,7 @@ else console.warn('could not land:', result.reason, result.deviation)
 
 The headless `useVirtualList` gives the same engine with your own markup.
 
-## Three contracts worth reading before you start
+## Four contracts worth reading before you start
 
 **Item margins are not supported.** Use the `gap` option. No ResizeObserver box
 includes margins, and margin collapsing between adjacent items is not observable
@@ -105,6 +105,23 @@ content isn't in it. `content-visibility: auto` keeps nodes findable but require
 rendering all of them, which defeats the purpose. What the library can do is make
 jumping to a hit exact — build in-app search and use `scrollToKey`. The demo
 shows this.
+
+**Do not fetch a page while a programmatic scroll is in flight.** A prepend moves
+every offset below it, so a page arriving mid-animation moves the target the
+animation is chasing — and the newly inserted items are unmeasured, so it keeps
+moving as they measure. The scroll still lands on the right *item* (the target is
+tracked by key and re-resolved every frame), but convergence takes longer, and a
+fetch on every scroll event can outrun it indefinitely. Ask before you fetch:
+
+```tsx
+const onScroll = () => {
+  if (listRef.current?.isScrolling() === true) return
+  if (nearTop()) void loadOlder()
+}
+```
+
+The library cannot make this decision — when to fetch is a product question — but it
+will tell you when not to.
 
 **The first aim at an unmeasured target is always a guess.** You cannot know the
 height of something that has never been laid out. Error scales with
@@ -148,9 +165,15 @@ cannot express "comment 4211 of 12000" while sixty items are mounted.
 
 ## Older Safari
 
-`scrollend` reached baseline with Safari 26.2. Where it is missing, settle
-detection falls back to a timeout, so a promise never hangs. For better fidelity
-on older Safari, install the optional peer and import it once in your app:
+Settle detection is driven by a `requestAnimationFrame` loop, which works
+everywhere and is bounded by its own deadline, so a promise cannot hang. Where
+`scrollend` exists it is used to corroborate that loop — once the platform says the
+scrolling is over and the target is already still, there is nothing left to wait for,
+so the promise resolves a little sooner. A measurement or a prepend arriving
+afterwards invalidates it, because either one means the target may still be moving.
+
+`scrollend` reached baseline with Safari 26.2. For better fidelity on older Safari,
+install the optional peer and import it once in your app:
 
 ```ts
 import 'scrollyfills'
@@ -170,9 +193,16 @@ package). Generated reference: `pnpm docs`.
 
 Key options: `items`, `getItemKey`, `estimateSize`, `gap`, `buffer`,
 `scrollPaddingStart`/`End`, `scrollMargin`, `keepMounted`, `visibility`,
-`sizeSnapshot`, `windowScroller`.
+`sizeSnapshot`, `windowScroller`, `before`.
 
-Handle: `scrollToKey`, `scrollToIndex`, `getAnchor`/`setAnchor` (persist a position
+`scrollMargin` is how much content precedes the list *inside the same scroller*, and
+`before` is where you put that content — a description, a filter bar. Their heights
+have to agree. With `windowScroller`, the scroller is the page, so `scrollMargin` is
+the list's offset within the document: measure it rather than assuming, since page
+chrome and its borders count.
+
+Handle: `scrollToKey`, `scrollToIndex`, `cancelScroll`, `isScrolling` (see the
+fetching contract above), `focusItem`, `getAnchor`/`setAnchor` (persist a position
 across navigation), `takeSizeSnapshot` (persist measurements; keyed to a layout
 signature so a width or zoom change discards them rather than restoring lies).
 
@@ -182,6 +212,30 @@ fraction }`, `{ mode: 'full' }` — with `dwellMs` and `dwell: 'continuous' |
 for items that can exceed the viewport, where a fraction *of the item* is
 unreachable. The MRC viewable-impression standard is
 `{ rule: { mode: 'fraction', of: 'item', fraction: 0.5 }, dwellMs: 1000, dwell: 'continuous' }`.
+
+A dwell completes on time rather than on activity: stop scrolling with a comment
+half-read and it is still reported when its clock runs out. Events are suppressed
+during a programmatic scroll, so `scrollToKey` across ten thousand comments reports
+the destination and nothing it flew past.
+
+## Debugging
+
+The library can narrate its own decisions — scroll convergence frame by frame, anchor
+restores, measurement batches, visibility deadlines:
+
+```ts
+import { setTraceSink } from 'react-virtual-anchor'
+
+setTraceSink(({ topic, data }) => { console.log(topic, data) })
+```
+
+Off unless you install a sink, and absent from production builds: the payloads are
+built inside a thunk, and every call site folds away when a bundler inlines
+`NODE_ENV=production` (`setTraceSink` then returns `false`). The demo keeps the last
+3,000 events in a ring buffer behind `?trace=1`, readable as `__trace('scroll.')`.
+
+Every bug found in this library so far was found by measuring rather than by
+reasoning about the code. This is that, made repeatable.
 
 ## Coming from another library
 
@@ -207,6 +261,13 @@ pnpm size         # bundle budget
 
 WebKit is not optional in the e2e matrix. Three separate bugs in this library
 appeared only there, all downstream of its integer-only scroll offsets.
+
+Coverage thresholds are per-file floors set at what the suite actually reaches, so
+they cannot quietly slip. They were enforced on three files once, which is how the
+integration layer and the whole React adapter came to sit at 0% behind a green build.
+
+**Not verified here:** the iOS momentum path, which needs a real device — a
+simulator's scrolling does not reproduce WebKit's deferred-write behaviour.
 
 ## License
 

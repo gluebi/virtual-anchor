@@ -15,4 +15,12 @@ Also two things no existing virtual list offers: per-item viewport events with
 configurable threshold, dwell and fire-once semantics, and a settle promise that
 reports honestly when it could not get there, with a reason.
 
-Sub-pixel landing verified on Chromium, WebKit and Firefox.
+Sub-pixel landing verified on Chromium, WebKit and Firefox across alignments,
+scroll padding, a list sharing its scroller with other content, and the window
+scroller — with the whole 12,000-comment thread loaded, so the distances and the
+offset tree are real.
+
+Includes dev-only tracing (`setTraceSink`) for the decisions that are otherwise
+invisible from outside: scroll convergence frame by frame, anchor restores,
+measurement batches, visibility deadlines. It costs nothing unused and is absent
+from production builds.
