@@ -78,6 +78,17 @@ export async function open(page: Page, query = ''): Promise<void> {
   })
 }
 
+/**
+ * Open the pagination demo.
+ *
+ * A separate opener because its readiness signal is different: that page has no deep-link to
+ * settle, so waiting for `settled=` in the panel would wait forever.
+ */
+export async function openPagination(page: Page): Promise<void> {
+  await page.goto('/pagination.html')
+  await page.locator('[role="article"]').first().waitFor()
+}
+
 export interface ScrollOptions {
   align?: 'start' | 'center' | 'end'
   behavior?: 'auto' | 'smooth'
@@ -208,4 +219,47 @@ export function measure(
     },
     { index, align, paddingStart: view.paddingStart, windowScroller: view.windowScroller === true },
   )
+}
+
+/**
+ * Where every row a reader can see currently sits, keyed by item key.
+ *
+ * For the assertions about *not* moving: a prepend or an append is only correct if every row
+ * that was on screen is still exactly where it was. Rows hidden behind the sticky header are
+ * excluded — they are on screen only in the arithmetic sense.
+ */
+export function visibleRowTops(
+  page: Page,
+  paddingStart: number = DEFAULT_PADDING_START,
+): Promise<Record<string, number>> {
+  return page.evaluate((padding) => {
+    const scroller = document.querySelector('.scroller')
+    if (!scroller) return {}
+
+    const box = scroller.getBoundingClientRect()
+    const visibleTop = box.top + padding
+    return Object.fromEntries(
+      [...document.querySelectorAll<HTMLElement>('[data-virtual-key]')]
+        .filter((row) => {
+          const rect = row.getBoundingClientRect()
+          return rect.bottom > visibleTop && rect.top < box.bottom
+        })
+        .map((row) => [row.dataset.virtualKey ?? '', row.getBoundingClientRect().top - box.top]),
+    )
+  }, paddingStart)
+}
+
+/**
+ * The largest distance any row present in both snapshots moved.
+ *
+ * `null` when they share no rows, which means the view changed entirely — a different failure
+ * from "something shifted", and one an assertion should not silently pass.
+ */
+export function worstMovement(
+  before: Record<string, number>,
+  after: Record<string, number>,
+): number | null {
+  const shared = Object.keys(before).filter((key) => key in after)
+  if (shared.length === 0) return null
+  return Math.max(...shared.map((key) => Math.abs((after[key] ?? 0) - (before[key] ?? 0))))
 }

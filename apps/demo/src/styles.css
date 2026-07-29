@@ -33,21 +33,46 @@ body {
   flex: none;
 }
 
-.search {
+.controls {
   margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Buttons that belong together, so the header reads as three jobs rather than one row of
+   unrelated controls: navigate, insert, find. */
+.controls .group {
   display: flex;
   gap: 6px;
 }
 
-.search input {
+/* Each box keeps its own label, so neither the number nor the search field is a mystery
+   rectangle — and a label beats a placeholder, which disappears exactly when a screen
+   reader user needs it. */
+.controls label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.controls input {
   padding: 6px 10px;
   border: 1px solid #ccd0d6;
   border-radius: 6px;
   font: inherit;
-  width: 200px;
 }
 
-.search button {
+.go input {
+  width: 92px;
+}
+
+.find input {
+  width: 180px;
+}
+
+.controls button {
   padding: 6px 12px;
   border: 1px solid #ccd0d6;
   border-radius: 6px;
@@ -55,6 +80,16 @@ body {
   font: inherit;
   cursor: pointer;
 }
+
+.controls button:hover:not(:disabled) {
+  background: #f2f4f7;
+}
+
+.controls button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 
 .body {
   display: flex;
@@ -84,6 +119,10 @@ body {
 
 .comment.is-seen {
   border-left: 3px solid #9aa4b2;
+}
+
+.comment.is-posted {
+  border-left: 3px solid #2563eb;
 }
 
 .comment.is-highlighted {
@@ -192,11 +231,15 @@ code.leave {
     border-color: #7a6a30;
   }
 
-  .search input,
-  .search button {
+  .controls input,
+  .controls button {
     background: #22262c;
     border-color: #333940;
     color: inherit;
+  }
+
+  .controls button:hover:not(:disabled) {
+    background: #2a2f36;
   }
 
   .badge {

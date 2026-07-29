@@ -11,6 +11,7 @@ import {
 import {
   VirtualList,
   type VirtualListHandle,
+  type ItemKey,
   type VisibilityEvent,
   type SizeSnapshot,
 } from 'react-virtual-anchor'
@@ -20,6 +21,7 @@ import {
   extendUp,
   FETCH_LATENCY,
   initialWindow,
+  postComments,
   sleep,
   THREAD_SIZE,
   type Comment,
@@ -28,8 +30,48 @@ import {
 import { CONFIG, SNAPSHOT_KEY } from './config.js'
 import './styles.css'
 
+/**
+ * Where a row's top edge sits inside the scrollport, or null if it is not mounted.
+ *
+ * The demo measures this itself so the insert controls can report what actually happened
+ * rather than claiming it. Same measurement the e2e suite makes.
+ */
+function rowTop(key: ItemKey): number | null {
+  const row = document.querySelector(`[data-virtual-key="${String(key)}"]`)
+  const scroller = document.querySelector('.scroller')
+  if (!row || !scroller) return null
+  return (
+    row.getBoundingClientRect().top -
+    (scroller.getBoundingClientRect().top + scroller.clientTop)
+  )
+}
+
+/**
+ * Keys of the mounted rows a reader can actually see, top to bottom.
+ *
+ * The sticky header covers the first `scrollPaddingStart` pixels of the scrollport, and rows
+ * hidden behind it are on screen only in the arithmetic sense — treating them as visible put
+ * "inserted below" underneath a row nobody could see, so nothing appeared to happen.
+ */
+function keysOnScreen(): string[] {
+  const scroller = document.querySelector('.scroller')
+  if (!scroller) return []
+
+  const box = scroller.getBoundingClientRect()
+  const visibleTop = box.top + CONFIG.paddingStart
+  return [...document.querySelectorAll<HTMLElement>('[data-virtual-key]')]
+    .filter((row) => {
+      const rect = row.getBoundingClientRect()
+      return rect.bottom > visibleTop && rect.top < box.bottom
+    })
+    .map((row) => row.dataset.virtualKey ?? '')
+}
+
 export function App(): ReactNode {
-  const thread = useMemo(() => buildThread(), [])
+  // State rather than a constant: comments arrive while you are reading, which is the whole
+  // point of the insert controls below.
+  const [thread, setThread] = useState(() => buildThread())
+  const postedCount = useRef(0)
   const target = CONFIG.target
 
   const [window_, setWindow] = useState<ThreadWindow>(() =>
@@ -58,6 +100,10 @@ export function App(): ReactNode {
     }
   })
   const [search, setSearch] = useState('')
+  /** The comment number typed into the "go to" box, as text so it can be empty. */
+  const [target_, setTarget] = useState('')
+  /** How many comments the insert buttons post, as text so it can be edited freely. */
+  const [insertCount, setInsertCount] = useState('3')
   const [settleInfo, setSettleInfo] = useState<string>('')
 
   const listRef = useRef<VirtualListHandle>(null)
@@ -263,39 +309,139 @@ export function App(): ReactNode {
   }, [pageAtEdges])
 
   /**
+   * Insert freshly posted comments at the top or the bottom of what is loaded.
+   *
+   * "The top of the list" in a windowed list means the start of the loaded slice: the
+   * comments go in at that boundary and the window grows to include them, so they appear
+   * where you would see them arrive. Everything below them shifts by one index each —
+   * which is exactly the case an index-addressed virtual list handles badly and this one is
+   * built for.
+   *
+   * The delta is measured and reported rather than asserted: the claim is that inserting
+   * above the viewport does not move what you are reading, and you should be able to *see*
+   * that it is zero rather than take my word for it.
+   */
+  const insertComments = useCallback(
+    async (where: 'above' | 'below', requested: number) => {
+      // A demo, not a load test: a thousand at a time is already thousands of DOM nodes'
+      // worth of measurement, and the point is made long before that.
+      const count = Math.min(Math.max(Math.trunc(requested), 1), 1000)
+      const anchorKey = listRef.current?.getAnchor()?.key
+      const topBefore = anchorKey === undefined ? null : rowTop(anchorKey)
+
+      // Above means above the *anchored* item — the one the library has pinned the view to,
+      // which it will tell you — not above whichever row this file thinks is topmost. Those
+      // differ by one at a sub-pixel boundary: WebKit anchored to the comment ending exactly
+      // at the fold where Chromium anchored to the one starting there, so placing the insert
+      // by eye put it below the anchor on one engine and above it on the other. Below means
+      // after the last row anyone can see.
+      const boundary = where === 'above' ? anchorKey : keysOnScreen().at(-1)
+
+      const posted = postComments(count, ++postedCount.current)
+      setThread((current) => {
+        const found = boundary === undefined ? -1 : current.findIndex((c) => c.id === boundary)
+        const at =
+          found < 0
+            ? where === 'above'
+              ? windowRef.current.from
+              : windowRef.current.to
+            : found + (where === 'above' ? 0 : 1)
+
+
+        return [...current.slice(0, at), ...posted, ...current.slice(at)]
+      })
+      // Both insertion points are inside the loaded slice, so it grows by exactly `count`.
+      setWindow((current) => ({ from: current.from, to: current.to + count }))
+
+      // Let the insert reach the list and the anchor be restored from it.
+      await new Promise(requestAnimationFrame)
+      await new Promise(requestAnimationFrame)
+
+      const topAfter = anchorKey === undefined ? null : rowTop(anchorKey)
+      const moved =
+        topBefore === null || topAfter === null ? null : Math.abs(topAfter - topBefore)
+
+      setSettleInfo(
+        `${String(count)} comment${count === 1 ? '' : 's'} inserted ${where} the view — ` +
+          (moved === null
+            ? 'nothing anchored to compare'
+            : `it moved ${moved.toFixed(3)}px`) +
+          ` · scroll ${where === 'above' ? 'up' : 'down'} to see them`,
+      )
+    },
+    [],
+  )
+
+  /**
+   * Go to a comment by its position in the whole thread.
+   *
+   * The one path every control uses, because "scroll to a comment" is one operation with
+   * one awkward part: the target is usually *not loaded*. Only a window of the thread is
+   * in memory, so the window has to move first and the row has to exist before it can be
+   * aimed at — and `scrollToKey` reporting `unknown-key` is exactly how you know it does
+   * not yet. Retrying on that is more honest than guessing at a number of frames.
+   */
+  const goToComment = useCallback(
+    async (index: number, align: 'start' | 'end' = 'start') => {
+      const clamped = Math.min(Math.max(index, 0), THREAD_SIZE - 1)
+      const comment = thread[clamped]
+      if (!comment) return
+
+      if (!CONFIG.loadAll) setWindow(initialWindow(clamped))
+
+      for (let attempt = 0; attempt < 30; attempt++) {
+        const result = await listRef.current?.scrollToKey(comment.id, { align })
+        if (result && result.reason !== 'unknown-key') {
+          setHighlighted(comment.id)
+          setTimeout(() => {
+            setHighlighted(null)
+          }, 1600)
+          setSettleInfo(
+            `#${String(clamped)} — settled=${String(result.settled)} ` +
+              `deviation=${result.deviation.toFixed(3)}px iterations=${String(result.iterations)}`,
+          )
+          return
+        }
+        // Not loaded yet: the window change has not reached the list. React flushes state
+        // updates that originate outside itself asynchronously, so this takes a frame or
+        // two rather than none.
+        await new Promise(requestAnimationFrame)
+      }
+
+      setSettleInfo(`#${String(clamped)} never loaded`)
+    },
+    [thread],
+  )
+
+  /**
    * In-app search, which is the honest mitigation for find-in-page.
    *
-   * Ctrl+F cannot reach unmounted comments — no virtual list solves that, since
-   * keeping every node in the DOM defeats the purpose. What the library can do is
-   * make jumping to a hit exact, which is what this demonstrates.
+   * Ctrl+F cannot reach unmounted comments — no virtual list solves that, since keeping
+   * every node in the DOM defeats the purpose. What the library can do is make jumping to
+   * a hit exact, which is what this demonstrates.
    */
-  const jumpToMatch = useCallback(() => {
+  const findInThread = useCallback(() => {
     const needle = search.trim().toLowerCase()
     if (needle === '') return
+
     const match = thread.find((comment) =>
       comment.body.some((paragraph) => paragraph.toLowerCase().includes(needle)),
     )
     if (!match) {
-      setSettleInfo('no match in thread')
+      setSettleInfo(`no comment contains ${JSON.stringify(search.trim())}`)
       return
     }
+    void goToComment(match.index)
+  }, [search, thread, goToComment])
 
-    // The match may be outside the loaded window, so widen it first.
-    setWindow(initialWindow(match.index))
-    void (async () => {
-      await new Promise(requestAnimationFrame)
-      const result = await listRef.current?.scrollToKey(match.id, { align: 'start' })
-      setHighlighted(match.id)
-      setTimeout(() => {
-        setHighlighted(null)
-      }, 1600)
-      if (result) {
-        setSettleInfo(
-          `jumped to #${String(match.index)} — settled=${String(result.settled)} deviation=${result.deviation.toFixed(3)}px`,
-        )
-      }
-    })()
-  }, [search, thread])
+  /** How many to insert: whatever is in the box, or one if it has been emptied. */
+  const insertRequested = Math.max(1, Number.parseInt(insertCount.trim(), 10) || 1)
+
+  /** What the "go to" box currently holds, as an index, or null if it is not usable. */
+  const requestedIndex = ((): number | null => {
+    const parsed = Number.parseInt(target_.trim(), 10)
+    return Number.isFinite(parsed) && parsed >= 0 && parsed < THREAD_SIZE ? parsed : null
+  })()
 
   return (
     <div className="app">
@@ -305,19 +451,87 @@ export function App(): ReactNode {
           {THREAD_SIZE.toLocaleString()} comments · loaded {window_.from}–{window_.to}
           {loading ? ' · loading…' : ''}
         </span>
-        <span className="search">
-          <input
-            aria-label="Search the thread"
-            placeholder="Search thread…"
-            value={search}
-            onChange={(event) => { setSearch(event.target.value); }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') jumpToMatch()
-            }}
-          />
-          <button type="button" onClick={jumpToMatch}>
-            Jump
+        <span className="controls">
+          {/* The ends of the thread, which are the interesting cases: neither is loaded,
+              and the last one can only be reached by aligning to the bottom. */}
+          <button type="button" onClick={() => void goToComment(0)}>
+            First
           </button>
+          <button type="button" onClick={() => void goToComment(THREAD_SIZE - 1, 'end')}>
+            Last
+          </button>
+
+          <label className="go">
+            <span className="muted">Go to&nbsp;#</span>
+            <input
+              type="number"
+              min={0}
+              max={THREAD_SIZE - 1}
+              inputMode="numeric"
+              placeholder="8642"
+              value={target_}
+              onChange={(event) => {
+                setTarget(event.target.value)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && requestedIndex !== null) {
+                  void goToComment(requestedIndex)
+                }
+              }}
+            />
+          </label>
+          <button
+            type="button"
+            disabled={requestedIndex === null}
+            onClick={() => {
+              if (requestedIndex !== null) void goToComment(requestedIndex)
+            }}
+          >
+            Go
+          </button>
+
+          <span className="group" role="group" aria-label="Insert comments">
+            {/* Above the view is the case that matters: every index below the insertion
+                shifts, and what you are reading must not move. The panel reports by how
+                much, so the claim is visible rather than asserted. */}
+            <label className="go">
+              <span className="muted">Insert</span>
+              <input
+                type="number"
+                min={1}
+                max={1000}
+                aria-label="How many comments to insert"
+                value={insertCount}
+                onChange={(event) => {
+                  setInsertCount(event.target.value)
+                }}
+              />
+            </label>
+            <button type="button" onClick={() => void insertComments('above', insertRequested)}>
+              above view
+            </button>
+            <button type="button" onClick={() => void insertComments('below', insertRequested)}>
+              below view
+            </button>
+          </span>
+
+          <a className="muted" href="/pagination.html">
+            pagination demo →
+          </a>
+
+          <label className="find">
+            <span className="muted">Find</span>
+            <input
+              placeholder="text in a comment…"
+              value={search}
+              onChange={(event) => {
+                setSearch(event.target.value)
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') findInThread()
+              }}
+            />
+          </label>
         </span>
       </header>
 
@@ -343,7 +557,7 @@ export function App(): ReactNode {
             ) : undefined
           }
           windowScroller={CONFIG.windowScroller}
-          totalCount={THREAD_SIZE}
+          totalCount={thread.length}
           firstItemPosition={window_.from + 1}
           loading={loading}
           label="Thread comments"
@@ -362,6 +576,7 @@ export function App(): ReactNode {
             <article
               className={[
                 'comment',
+                comment.posted === true ? 'is-posted' : '',
                 highlighted === comment.id ? 'is-highlighted' : '',
                 seen.has(comment.id) ? 'is-seen' : '',
               ]
@@ -374,9 +589,13 @@ export function App(): ReactNode {
                 {/* A real permalink, and the only focusable thing *inside* a row: focus
                     landing here still has to pin the row, which is what `closest` is
                     for. Without one, that path had no coverage anywhere. */}
-                <a className="muted permalink" href={`?comment=${String(comment.index)}`}>
-                  #{comment.index}
-                </a>
+                {comment.posted === true ? (
+                  <span className="muted">just posted</span>
+                ) : (
+                  <a className="muted permalink" href={`?comment=${String(comment.index)}`}>
+                    #{comment.index}
+                  </a>
+                )}
                 {seen.has(comment.id) ? <span className="badge">read</span> : null}
               </div>
               {comment.body.map((paragraph, i) => (

@@ -271,12 +271,17 @@ throws away.
 
 ```bash
 pnpm install
-pnpm dev           # the forum-thread demo
+pnpm dev           # the demos: a forum thread, and /pagination.html
 pnpm test          # unit + property tests
 pnpm test:coverage # the same, with the per-file floors enforced (what CI runs)
 pnpm test:e2e      # accuracy across Chromium, WebKit and Firefox
 pnpm size          # bundle budget
 ```
+
+The thread demo can post comments above or below what you are reading, in any number, and
+reports how far the view moved — which should be zero. The pagination page covers the two
+collection changes the thread page does not: replacing every item (pages) and appending
+(infinite scrolling), including the defer-while-scrolling protocol in action.
 
 WebKit is not optional in the e2e matrix. Three separate bugs in this library
 appeared only there, all downstream of its integer-only scroll offsets.

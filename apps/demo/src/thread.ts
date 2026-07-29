@@ -6,6 +6,13 @@ export interface Comment {
   author: string
   postedAt: string
   body: string[]
+  /**
+   * Whether this comment was posted during the session rather than loaded with the thread.
+   *
+   * Only the demo cares: a posted comment has no stable position in the thread, so it gets
+   * no permalink, and it is tinted so you can see where it landed.
+   */
+  posted?: true
 }
 
 /** Total comments in the simulated thread — more than fits in memory comfortably. */
@@ -38,6 +45,26 @@ export function buildThread(): Comment[] {
       body: Array.from({ length: paragraphs }, () => faker.lorem.paragraph()),
     }
   })
+}
+
+/**
+ * Comments posted while you are reading, for the insert-above and insert-below controls.
+ *
+ * Fresh ids, never reused: keys are load-bearing in this library, and an id colliding with
+ * a loaded comment would anchor the view to the wrong row. Their `index` is only a display
+ * number here — position in the thread is decided by where they are inserted.
+ */
+export function postComments(count: number, seed: number): Comment[] {
+  faker.seed(seed)
+
+  return Array.from({ length: count }, (_, offset) => ({
+    id: `posted-${String(seed)}-${String(offset)}`,
+    index: offset + 1,
+    author: faker.person.fullName(),
+    postedAt: new Date(0).toISOString(),
+    body: [faker.lorem.paragraph()],
+    posted: true as const,
+  }))
 }
 
 /** Latency for a simulated page fetch, in ms. */

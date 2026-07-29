@@ -1,5 +1,13 @@
 import { expect, test, type Page } from '@playwright/test'
-import { DEFAULT_PADDING_START, open, SNAPSHOT_KEY, TOLERANCE, topOfKey } from './helpers.js'
+import {
+  DEFAULT_PADDING_START,
+  open,
+  SNAPSHOT_KEY,
+  TOLERANCE,
+  topOfKey,
+  visibleRowTops,
+  worstMovement,
+} from './helpers.js'
 import type { Anchor } from '../packages/core/src/index.js'
 
 /**
@@ -231,5 +239,60 @@ test.describe('a restored size snapshot', () => {
     )
     // Only what this page measured for itself, nowhere near the 40 offered.
     expect(measured).toBeLessThan(40)
+  })
+})
+
+/**
+ * A whole CSS pixel, rather than the half a `scrollToKey` landing promises.
+ *
+ * Each inserted comment measures after it mounts, and each measurement re-derives the scroll
+ * offset from the anchor. Chromium and Firefox reclaim the sub-pixel remainder every time and
+ * hold at 0.25px however many arrive; WebKit, which truncates a fractional `scrollTop`, keeps
+ * about a quarter-pixel per correction — 0.75px for three comments. Measured, not guessed:
+ * the anchor itself is identical before and after, and the scroll offset moves by exactly the
+ * inserted height, so this is the platform's rounding rather than drift in the model.
+ *
+ * Still a tight bound: three comments are 359px of content, so a pixel is 0.3% of it.
+ */
+const INSERT_TOLERANCE = 1
+
+test.describe('comments arriving while you read', () => {
+  test('inserting above the view does not move the view', async ({ page }) => {
+    // The demo's insert controls post comments outside the visible area, which is the claim
+    // this library exists for: every index below the insertion shifts, and what the reader is
+    // looking at must not move by a pixel. The demo measures it too and prints the number —
+    // this asserts it.
+    await open(page, 'comment=4000')
+
+    for (const [label, direction] of [
+      ['above view', 'above'],
+      ['below view', 'below'],
+    ] as const) {
+      const before = await visibleRowTops(page)
+      expect(Object.keys(before).length, 'nothing visible to watch').toBeGreaterThan(2)
+
+      await page.getByRole('button', { name: label, exact: true }).click()
+      await expect(page.locator('.panel .small').first()).toContainText(`inserted ${direction}`)
+
+      const after = await visibleRowTops(page)
+      expect(
+        worstMovement(before, after),
+        `inserting ${direction} the view moved something inside it`,
+      ).toBeLessThanOrEqual(INSERT_TOLERANCE)
+    }
+  })
+
+  test('reports the movement it caused, so the demo is not taking my word for it', async ({
+    page,
+  }) => {
+    await open(page, 'comment=4000')
+
+    await page.getByRole('button', { name: 'above view', exact: true }).click()
+    await expect(page.locator('.panel .small').first()).toContainText('inserted above the view')
+
+    // The demo's own measurement of the anchored row, which is the one that must not move.
+    const reported = await page.locator('.panel .small').first().innerText()
+    const moved = Number(/it moved ([\d.]+)px/.exec(reported)?.[1] ?? Number.NaN)
+    expect(moved).toBeLessThanOrEqual(INSERT_TOLERANCE)
   })
 })
