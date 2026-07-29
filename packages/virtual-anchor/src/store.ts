@@ -1,5 +1,4 @@
 import { createStore, type StoreApi } from 'zustand/vanilla'
-import { subscribeWithSelector } from 'zustand/middleware'
 import type { ItemKey } from './types.js'
 
 /** One item's position in the list, as handed to the renderer. */
@@ -38,11 +37,20 @@ export interface VirtualState {
   readonly scrolling: boolean
 }
 
+/**
+ * The empty index range, shared rather than written out per use.
+ *
+ * One reference, because the engine hands back *this* tuple for an empty list and a subscriber
+ * comparing ranges by identity has to see the empty state and the first empty publish as the same
+ * value. Two equal-looking literals would make an empty→empty transition look like a change.
+ */
+export const EMPTY_RANGE: readonly [number, number] = [0, -1]
+
 export const EMPTY_STATE: VirtualState = {
   version: 0,
   items: [],
-  renderedRange: [0, -1],
-  visibleRange: [0, -1],
+  renderedRange: EMPTY_RANGE,
+  visibleRange: EMPTY_RANGE,
   totalSize: 0,
   scrollOffset: 0,
   viewportSize: 0,
@@ -52,7 +60,7 @@ export const EMPTY_STATE: VirtualState = {
 export type VirtualStore = StoreApi<VirtualState>
 
 export function createVirtualStore(): VirtualStore {
-  return createStore(subscribeWithSelector<VirtualState>(() => EMPTY_STATE))
+  return createStore<VirtualState>(() => EMPTY_STATE)
 }
 
 /**

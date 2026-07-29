@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createEngine, layoutSignatureFor, type Engine } from './engine.js'
+import { EMPTY_STATE } from './store.js'
 import type { Surface } from './surface.js'
 import type { ItemKey } from './types.js'
 import type { Viewport } from './viewport.js'
@@ -254,6 +255,37 @@ describe('engine option plumbing', () => {
 
     h.scroll(1500)
     expect(h.engine.store.getState().visibleRange[0]).toBe(10)
+  })
+
+  it('publishes the same range tuple while the range has not moved', () => {
+    // Identity is the contract a subscriber compares on, so an unchanged range must be the
+    // unchanged *reference*. Without this, `computeRanges` allocated a fresh tuple per publish
+    // and every consumer had to compare element-wise instead.
+    const h = setup({ count: 1000 })
+    const first = h.engine.store.getState()
+
+    // A sub-item nudge: a new state is published — `version` always bumps — with the same range.
+    h.scroll(10)
+    const nudged = h.engine.store.getState()
+    expect(nudged).not.toBe(first)
+    expect(nudged.visibleRange).toBe(first.visibleRange)
+    expect(nudged.renderedRange).toBe(first.renderedRange)
+
+    // Far enough for the range to genuinely move, which must be a new tuple.
+    h.scroll(5000)
+    const moved = h.engine.store.getState()
+    expect(moved.visibleRange).not.toBe(first.visibleRange)
+    expect(moved.visibleRange[0]).toBeGreaterThan(first.visibleRange[0])
+  })
+
+  it('keeps one empty-range reference for an empty list', () => {
+    // An empty list publishing a fresh `[0, -1]` each time would read as a change on every
+    // publish, and the adapter seeds its comparison from `EMPTY_STATE`'s range.
+    const h = setup({ count: 0 })
+    expect(h.engine.store.getState().visibleRange).toBe(EMPTY_STATE.visibleRange)
+
+    h.scroll(100)
+    expect(h.engine.store.getState().visibleRange).toBe(EMPTY_STATE.visibleRange)
   })
 
   it('starts the visible range below `scrollPaddingStart`', () => {
