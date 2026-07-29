@@ -21,28 +21,35 @@
     "check:package": "pnpm build && node scripts/prepare-package.mjs && node scripts/check-package.mjs"
   },
   "devDependencies": {
-    "@axe-core/playwright": "^4.10.2",
+    "@axe-core/playwright": "^4.12.1",
     "@changesets/cli": "^2.31.1",
     "@eslint/js": "^10.0.1",
-    "@playwright/test": "^1.56.0",
-    "@size-limit/preset-small-lib": "^13.0.1",
+    "@playwright/test": "^1.62.0",
+    "@size-limit/preset-small-lib": "^13.0.2",
     "@testing-library/jest-dom": "^7.0.0",
-    "@testing-library/react": "^16.3.0",
-    "@types/node": "^24.9.0",
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0",
-    "@vitejs/plugin-react": "^5.0.0",
-    "@vitest/coverage-v8": "^3.2.7",
-    "eslint": "^9.39.0",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^26.1.2",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.4",
+    "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^10.8.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "fast-check": "^4.9.0",
     "globals": "^17.8.0",
-    "jsdom": "^27.0.0",
-    "size-limit": "^13.0.1",
-    "tsup": "^8.5.0",
+    "jsdom": "^30.0.1",
+    "size-limit": "^13.0.2",
+    "tsup": "^8.5.1",
     "typedoc": "^0.28.20",
-    "typescript": "^5.9.0",
+    "typescript": "~6.0.3",
     "typescript-eslint": "^8.65.0",
-    "vitest": "^3.2.0"
-  }
+    "vitest": "^4.1.10"
+  },
+  "//typescript": "Pinned to 6.0.x, not `latest`. TypeScript 7 is out and the library compiles against it cleanly, but typescript-eslint refuses to load with it and typedoc caps at 6.0.x \u2014 so \"latest\" would cost type-aware linting, which has caught more defects in this project than any other tool. Revisit when typescript-eslint ships TS 7 support: https://github.com/typescript-eslint/typescript-eslint/issues/10940",
+  "pnpm": {
+    "overrides": {
+      "esbuild": ">=0.28.1"
+    }
+  },
+  "//pnpm": "esbuild is held at >=0.28.1 because vite still pins 0.27.7, which has a dev-server file-read advisory (GHSA-g7r4-m6w7-qqqr). Dev-only and not part of the published package, but there is no reason to carry it. Remove the override once vite ships 0.28.x."
 }

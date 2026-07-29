@@ -25,6 +25,16 @@ import type { Viewport } from './viewport.js'
  * the gap after a prepend.
  */
 const MODEL_QUIET_MS = 150
+/**
+ * Longest step the smooth approach will integrate over.
+ *
+ * After a stall — a background tab, a long task — the honest thing is to cover the ground
+ * that time actually passed for, rather than crawling as though no time had. Capped so a
+ * multi-second stall resolves to "jump there" instead of an enormous single easing step
+ * whose arithmetic is dominated by one sample.
+ */
+const MAX_STEP_MS = 100
+
 /** Consecutive frames at the target before declaring victory. */
 const STABLE_FRAMES = 2
 /** Soft budget: past this, stop re-aiming and report what we got. */
@@ -172,6 +182,8 @@ interface PendingScroll {
   stableFrames: number
   /** When the model last moved — a measurement, or items inserted or removed. */
   lastModelChangeAt: number
+  /** When `step` last ran, so the smooth approach can advance by elapsed time. */
+  lastStepAt: number
   iterations: number
   resolve: (result: ScrollResult) => void
 }
@@ -513,8 +525,19 @@ export function createScroller(options: ScrollerOptions): Scroller {
           // Exponential approach, re-aimed every frame. A fixed-duration ease
           // over a moving endpoint produces a visible discontinuity each time the
           // endpoint moves; absorbing the movement into the approach does not.
+          //
+          // Stepped by *elapsed time*, not per frame. A fixed fraction per frame ties the
+          // animation's wall-clock duration to the frame rate: the same scroll that takes
+          // 700ms at 60fps takes 1.4s at 30fps and can then miss the deadline entirely —
+          // four WebKit landings on a loaded CI runner ended 300–580px short, reporting
+          // `deadline` honestly for a scroll that simply ran out of frames. Time-based, it
+          // takes the same wall clock at any frame rate.
           const from = viewport.getScrollOffset()
-          const k = 1 - Math.exp(-16 / SMOOTH_TAU_MS)
+          const elapsedSinceStep = Math.min(
+            Math.max(now() - current.lastStepAt, 0),
+            MAX_STEP_MS,
+          )
+          const k = 1 - Math.exp(-elapsedSinceStep / SMOOTH_TAU_MS)
           const advance = (target - from) * k
 
           // Snap the last stretch rather than easing into it. An exponential
@@ -522,6 +545,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
           // the platform will accept the offset simply stops changing — the next
           // frame computes the same advance and the animation stalls short of its
           // target forever. See SMOOTH_MIN_STEP.
+          current.lastStepAt = now()
           write(Math.abs(advance) <= SMOOTH_MIN_STEP ? target : from + advance)
         } else {
           write(target)
@@ -584,6 +608,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
         lastTarget: Number.NaN,
         stableFrames: 0,
         lastModelChangeAt: startedAt,
+        lastStepAt: startedAt,
         iterations: 0,
         resolve,
       }

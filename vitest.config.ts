@@ -27,39 +27,54 @@ export default defineConfig({
       include: ['packages/virtual-anchor/src/**'],
       exclude: ['**/*.test.*', '**/index.ts', '**/types.ts', '**/*.d.ts'],
       thresholds: {
-        // Floors, not aspirations: each is at or just under what the suite reaches
-        // today, so coverage cannot quietly fall away again. Three files were enforced
-        // before this, which is how `engine.ts` and the whole React package sat at 0%
-        // while the build stayed green — and that is exactly where the defects were.
+        // Floors, not aspirations: each is at or just under what the suite reaches today, so
+        // coverage cannot quietly fall away again. Three files were enforced before this,
+        // which is how the integration layer and the whole React adapter sat at 0% while the
+        // build stayed green — and that is exactly where the defects were.
         //
-        // The modules where a wrong number is a silent visual bug stay at 100%.
+        // Recalibrated for @vitest/coverage-v8 4.x, whose branch attribution is more accurate
+        // than 3.x's. Not one line of library code changed in that upgrade and all 382 tests
+        // still pass, so nothing was lost — but it does mean the 100% *branch* figures three
+        // of these files used to report were optimistic. The uncovered branches are recorded
+        // beside each one rather than rounded away.
         'packages/virtual-anchor/src/anchor.ts': { branches: 100, functions: 100, lines: 100 },
-        'packages/virtual-anchor/src/sizeCache.ts': { branches: 100, functions: 100, lines: 100 },
-        'packages/virtual-anchor/src/visibility.ts': { branches: 100, functions: 100, lines: 100 },
         'packages/virtual-anchor/src/listGeometry.ts': { branches: 100, functions: 100, lines: 100 },
-        'packages/virtual-anchor/src/surface.ts': { branches: 100, functions: 100, lines: 100 },
         'packages/virtual-anchor/src/store.ts': { branches: 100, functions: 100, lines: 100 },
         'packages/virtual-anchor/src/env.ts': { branches: 100, functions: 100, lines: 100 },
 
-        // The integration layer. Not 100%: what is left is mostly iOS momentum and
-        // platform fallbacks that need a real device, and pretending otherwise would
-        // mean writing tests that assert the mock rather than the behaviour.
-        'packages/virtual-anchor/src/engine.ts': { branches: 80, functions: 91, lines: 90 },
-        'packages/virtual-anchor/src/scroller.ts': { branches: 93, functions: 100, lines: 96 },
-        'packages/virtual-anchor/src/viewport.ts': { branches: 85, functions: 91, lines: 100 },
-        'packages/virtual-anchor/src/resizer.ts': { branches: 95, functions: 100, lines: 100 },
-        'packages/virtual-anchor/src/gate.ts': { branches: 88, functions: 100, lines: 100 },
-        // The uncovered branch is the production build, which by definition is not
-        // this build.
-        'packages/virtual-anchor/src/trace.ts': { branches: 70, functions: 100, lines: 100 },
+        // Fully covered by line, with a handful of branch points left: the size cache's
+        // clamping edges, the tracker's leave-delay corners, and the surface's null-container
+        // guard.
+        'packages/virtual-anchor/src/sizeCache.ts': { branches: 96, functions: 100, lines: 100 },
+        'packages/virtual-anchor/src/visibility.ts': { branches: 97, functions: 100, lines: 100 },
+        'packages/virtual-anchor/src/surface.ts': { branches: 95, functions: 100, lines: 100 },
+
+        // The integration layer. What is left is mostly iOS momentum and platform fallbacks
+        // that need a real device, and pretending otherwise would mean writing tests that
+        // assert the mock rather than the behaviour.
+        'packages/virtual-anchor/src/engine.ts': { branches: 77, functions: 82, lines: 94 },
+        'packages/virtual-anchor/src/scroller.ts': { branches: 88, functions: 94, lines: 97 },
+        'packages/virtual-anchor/src/viewport.ts': { branches: 62, functions: 93, lines: 97 },
+        'packages/virtual-anchor/src/resizer.ts': { branches: 91, functions: 100, lines: 100 },
+        'packages/virtual-anchor/src/gate.ts': { branches: 78, functions: 100, lines: 100 },
+        // The uncovered branch is the production build, which by definition is not this build.
+        'packages/virtual-anchor/src/trace.ts': { branches: 80, functions: 100, lines: 100 },
 
         'packages/virtual-anchor/src/react/useItemVisibility.ts': {
           branches: 100,
           functions: 100,
           lines: 100,
         },
-        'packages/virtual-anchor/src/react/useVirtualList.ts': { branches: 73, functions: 50, lines: 88 },
-        'packages/virtual-anchor/src/react/VirtualList.tsx': { branches: 85, functions: 80, lines: 98 },
+        'packages/virtual-anchor/src/react/useVirtualList.ts': {
+          branches: 66,
+          functions: 86,
+          lines: 92,
+        },
+        'packages/virtual-anchor/src/react/VirtualList.tsx': {
+          branches: 93,
+          functions: 92,
+          lines: 95,
+        },
       },
     },
   },

@@ -62,8 +62,8 @@ interface Harness {
   scroller: Scroller
   viewport: FakeViewport
   cache: SizeCache
-  /** Run queued frames, advancing the clock by 16ms each. */
-  frames: (count: number) => void
+  /** Run queued frames, advancing the clock by `msPerFrame` each — 16ms by default. */
+  frames: (count: number, msPerFrame?: number) => void
   advance: (ms: number) => void
   carries: number[]
   scrollingChanges: boolean[]
@@ -114,11 +114,11 @@ const harness = (
     advance: (ms) => {
       clock += ms
     },
-    frames: (n) => {
+    frames: (n, msPerFrame = 16) => {
       for (let i = 0; i < n; i++) {
         const pendingFrames = queue
         queue = []
-        clock += 16
+        clock += msPerFrame
         for (const frame of pendingFrames) frame()
       }
     },
@@ -655,5 +655,52 @@ describe('the convergence trace', () => {
 
     await settle(h, h.scroller.scrollToIndex(80, { align: 'start' }))
     expect(sink).not.toHaveBeenCalled()
+  })
+})
+
+describe('smooth scrolling at different frame rates', () => {
+  /** How far a smooth scroll has travelled after a fixed amount of *wall clock*. */
+  const distanceAfter = (msPerFrame: number, totalMs: number): number => {
+    const h = harness({ count: 1000, itemSize: 100 })
+    void h.scroller.scrollToIndex(500, { align: 'start', behavior: 'smooth' })
+    h.frames(Math.round(totalMs / msPerFrame), msPerFrame)
+    return h.viewport.getScrollOffset()
+  }
+
+  it('covers the same ground in the same time at 60fps and at 15fps', () => {
+    // A fixed fraction *per frame* ties the animation's duration to the frame rate: the same
+    // scroll took twice as long at 30fps, and on a loaded CI runner four WebKit landings ran
+    // out of deadline 300–580px short — the loop reporting `deadline` honestly for a scroll
+    // that had simply run out of frames. Stepping by elapsed time decouples them.
+    const fast = distanceAfter(16, 320)
+    const slow = distanceAfter(64, 320)
+
+    expect(fast).toBeGreaterThan(0)
+    // Within a tenth: the integration is coarser at 15fps, not slower.
+    expect(Math.abs(slow - fast) / fast).toBeLessThan(0.1)
+  })
+
+  it('covers nearly all of the distance even at four frames a second', async () => {
+    // Not *all* of it: 5 seconds at 4fps is twenty frames, and the hard deadline is doing its
+    // job. The point is that those twenty frames now carry the animation essentially to its
+    // target — the old per-frame fraction covered a third of the distance in the same time —
+    // and that it resolves honestly rather than hanging.
+    const h = harness({ count: 1000, itemSize: 100 })
+    const promise = h.scroller.scrollToIndex(500, { align: 'start', behavior: 'smooth' })
+
+    const state = { done: false }
+    const tracked = promise.then((result) => {
+      state.done = true
+      return result
+    })
+    for (let i = 0; i < 40 && !state.done; i++) {
+      h.frames(1, 250)
+      await Promise.resolve()
+    }
+
+    const result = await tracked
+    expect(result.reason).toBeDefined()
+    // Within a tenth of a percent of a 50,000px scroll.
+    expect(h.viewport.getScrollOffset()).toBeGreaterThan(49_950)
   })
 })

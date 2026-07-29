@@ -17,7 +17,6 @@ export function isIOSWebKit(): boolean {
   // (`navigator.userAgentData`) is not implemented in Safari — the very engine
   // this function exists to detect. So it stays, narrowed to the one case the
   // user agent cannot answer: an iPad claiming to be a Mac.
-  // eslint-disable-next-line @typescript-eslint/no-deprecated
   const isIPadOS13Plus = navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 0
 
   if (!isIPhoneLike && !isIPadOS13Plus) return false

@@ -71,6 +71,7 @@ class FakeResizeObserver implements ResizeObserver {
 }
 
 class FakeIntersectionObserver implements IntersectionObserver {
+  readonly scrollMargin = '0px'
   readonly root = null
   readonly rootMargin = '0px'
   readonly thresholds = [0]

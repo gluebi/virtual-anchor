@@ -1,0 +1,22 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # One PR for the toolchain rather than fifteen: this repo pins its whole dev stack, and
+    # they are only meaningfully testable together.
+    groups:
+      dev-tooling:
+        patterns: ['*']
+        update-types: [minor, patch]
+    ignore:
+      # Held at 6.0.x deliberately — typescript-eslint refuses to load with TypeScript 7 and
+      # typedoc caps below it, so a bump here silently costs type-aware linting.
+      # See the `//typescript` note in package.json.
+      - dependency-name: typescript
+        update-types: [version-update:semver-major]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

@@ -3,6 +3,7 @@ import { createScrollerGate } from './gate.js'
 
 /** Controllable IntersectionObserver — jsdom has none. */
 class FakeIntersectionObserver implements IntersectionObserver {
+  readonly scrollMargin = '0px'
   static instances: FakeIntersectionObserver[] = []
 
   readonly root: Element | null

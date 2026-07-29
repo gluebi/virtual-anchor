@@ -1,6 +1,10 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
   "compilerOptions": {
+    // tsup's declaration builder synthesises a config containing `baseUrl`, which TypeScript 6
+    // reports as a deprecation error and 7 will drop. Nothing here sets it, so this
+    // acknowledges a deprecation on tsup's behalf until it stops emitting one.
+    "ignoreDeprecations": "6.0",
     "target": "ES2022",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",

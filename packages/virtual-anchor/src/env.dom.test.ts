@@ -110,17 +110,32 @@ describe('supportsScrollEnd', () => {
 })
 
 describe('prefersReducedMotion', () => {
+  /**
+   * Install a `matchMedia` returning a fixed answer.
+   *
+   * Defined rather than spied on: jsdom does not implement `matchMedia` at all, so there is
+   * nothing to spy on — `vi.spyOn` fails with "can only spy on a function". Which is also the
+   * reason the third case below exists.
+   */
+  const stubMatchMedia = (matches: boolean): void => {
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: () => ({ matches }) as unknown as MediaQueryList,
+    })
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'matchMedia')
+  })
+
   it('follows the media query', () => {
-    vi.spyOn(window, 'matchMedia').mockReturnValue({
-      matches: true,
-    } as unknown as MediaQueryList)
+    stubMatchMedia(true)
     expect(prefersReducedMotion()).toBe(true)
   })
 
   it('defaults to false when the query does not match', () => {
-    vi.spyOn(window, 'matchMedia').mockReturnValue({
-      matches: false,
-    } as unknown as MediaQueryList)
+    stubMatchMedia(false)
     expect(prefersReducedMotion()).toBe(false)
   })
 
