@@ -1,6 +1,6 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { setTraceSink, type TraceEvent } from 'react-virtual-anchor'
+import { setTraceSink, type TraceEvent } from 'virtual-anchor/react'
 import { App } from './App.js'
 import { CONFIG } from './config.js'
 

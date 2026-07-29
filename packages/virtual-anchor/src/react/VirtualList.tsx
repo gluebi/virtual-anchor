@@ -1,4 +1,4 @@
-import type { Anchor, ItemKey, ScrollResult, ScrollToOptions, SizeSnapshot } from 'virtual-anchor'
+import type { Anchor, ItemKey, ScrollResult, ScrollToOptions, SizeSnapshot } from '../index.js'
 import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,

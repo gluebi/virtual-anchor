@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { StrictMode, useState, type ReactNode } from 'react'
 import { VirtualList, type VirtualListHandle } from './VirtualList.js'
-import type { ItemKey } from 'virtual-anchor'
+import type { ItemKey } from '../index.js'
 import { useVirtualList } from './useVirtualList.js'
 import { useItemVisibility } from './useItemVisibility.js'
 

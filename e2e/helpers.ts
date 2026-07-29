@@ -1,5 +1,5 @@
 import { expect, type Page } from '@playwright/test'
-import type { Anchor, ScrollResult, SizeSnapshot } from '../packages/core/src/index.js'
+import type { Anchor, ScrollResult, SizeSnapshot } from '../packages/virtual-anchor/src/index.js'
 
 /**
  * The harness every accuracy spec shares.

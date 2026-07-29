@@ -24,6 +24,9 @@ jobs:
       - run: pnpm test:coverage
       - run: pnpm build
       - run: pnpm size
+      # Packs the real tarball, installs it, and imports both entries — packaging is
+      # configuration, and no other job here would notice it being wrong.
+      - run: pnpm check:package
 
   e2e:
     runs-on: ubuntu-latest

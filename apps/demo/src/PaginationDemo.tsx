@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from 'react'
-import { VirtualList, type VirtualListHandle } from 'react-virtual-anchor'
+import { VirtualList, type VirtualListHandle } from 'virtual-anchor/react'
 import { buildThread, sleep, THREAD_SIZE, type Comment } from './thread.js'
 import './styles.css'
 
@@ -166,7 +166,7 @@ export function PaginationDemo(): ReactNode {
   return (
     <div className="app">
       <header className="header" ref={headerRef} style={{ minHeight: 64 }}>
-        <strong>react-virtual-anchor</strong>
+        <strong>virtual-anchor</strong>
         <span className="muted">pagination · {THREAD_SIZE.toLocaleString()} comments</span>
 
         <span className="controls">

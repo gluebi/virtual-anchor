@@ -14,7 +14,7 @@ import {
   type ItemKey,
   type VisibilityEvent,
   type SizeSnapshot,
-} from 'react-virtual-anchor'
+} from 'virtual-anchor/react'
 import {
   buildThread,
   extendDown,
@@ -477,7 +477,7 @@ export function App(): ReactNode {
     <div className="app">
       {CONFIG.paddingStart === 0 ? null : (
       <header className="header" ref={headerRef} style={{ minHeight: CONFIG.paddingStart }}>
-        <strong>react-virtual-anchor</strong>
+        <strong>virtual-anchor</strong>
         <span className="muted">
           {THREAD_SIZE.toLocaleString()} comments · loaded {window_.from}–{window_.to}
           {loading ? ' · loading…' : ''}

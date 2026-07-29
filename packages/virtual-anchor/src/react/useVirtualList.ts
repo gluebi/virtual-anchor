@@ -16,7 +16,7 @@ import {
   EMPTY_STATE,
   layoutSignatureFor,
   needsRerender,
-} from 'virtual-anchor'
+} from '../index.js'
 import {
   useCallback,
   useEffect,

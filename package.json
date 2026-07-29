@@ -1,5 +1,5 @@
 {
-  "name": "react-virtual-anchor-monorepo",
+  "name": "virtual-anchor-monorepo",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.28.2",
@@ -17,7 +17,8 @@
     "lint": "eslint .",
     "size": "pnpm build && size-limit",
     "docs": "typedoc",
-    "release": "pnpm build && changeset publish"
+    "release": "pnpm build && node scripts/prepare-package.mjs && changeset publish",
+    "check:package": "pnpm build && node scripts/prepare-package.mjs && node scripts/check-package.mjs"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.10.2",

@@ -1,0 +1,94 @@
+{
+  "name": "virtual-anchor",
+  "version": "0.0.0",
+  "description": "Virtual scrolling that models position as an anchor rather than a pixel offset: variable item heights, per-item viewport events, and scroll-to-item that lands sub-pixel exactly. Framework-agnostic core, with a React adapter at virtual-anchor/react.",
+  "license": "MIT",
+  "author": "gluebi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gluebi/virtual-anchor.git",
+    "directory": "packages/virtual-anchor"
+  },
+  "homepage": "https://github.com/gluebi/virtual-anchor#readme",
+  "bugs": "https://github.com/gluebi/virtual-anchor/issues",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "//": "Entries point at source so typecheck, vitest and vite dev need no prior build. pnpm rewrites them from publishConfig on publish.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./react": "./src/react/index.ts"
+  },
+  "publishConfig": {
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "exports": {
+      ".": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "./react": {
+        "types": "./dist/react.d.ts",
+        "default": "./dist/react.js"
+      }
+    },
+    "typesVersions": {
+      "*": {
+        "react": [
+          "./dist/react.d.ts"
+        ]
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsup",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zustand": "^5.0.14"
+  },
+  "//peerDependencies": "React is needed only for the `virtual-anchor/react` entry, and npm cannot express 'required for this subpath only' — so they are optional, and a consumer of the framework-agnostic entry gets no warnings about a framework it does not use.",
+  "peerDependencies": {
+    "react": ">=19",
+    "react-dom": ">=19",
+    "scrollyfills": "^1.0.4"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "react-dom": {
+      "optional": true
+    },
+    "scrollyfills": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "virtual",
+    "virtualization",
+    "virtual-list",
+    "virtual-scroll",
+    "windowing",
+    "react",
+    "scroll-anchoring",
+    "scroll-to-index",
+    "variable-height",
+    "intersection",
+    "infinite-scroll"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "//publishConfig": "ESM only. No `require` condition, so there is no dual-package hazard: one module instance, which matters because the trace sink is module state. A CJS consumer needs dynamic `import()`.",
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "publint": "^0.3.22"
+  }
+}

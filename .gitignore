@@ -14,3 +14,7 @@ playwright/.cache/
 .DS_Store
 *.log
 .vite/
+
+# Copied into the package at release time by scripts/prepare-package.mjs.
+packages/virtual-anchor/README.md
+packages/virtual-anchor/LICENSE

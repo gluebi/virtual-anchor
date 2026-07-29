@@ -1,14 +1,22 @@
-# react-virtual-anchor
+# virtual-anchor
 
-A React virtual list for long, variable-height content — built for the case where
-"scroll to comment #4211" has to land on comment #4211, and where loading older
-comments at the top must not move the view by a single pixel.
+A virtual list for long, variable-height content — built for the case where "scroll to
+comment #4211" has to land on comment #4211, and where loading older comments at the top
+must not move the view by a single pixel.
 
 ```bash
-pnpm add react-virtual-anchor
+pnpm add virtual-anchor
 ```
 
-Requires React 19.
+One package, two entry points:
+
+```ts
+import { createEngine } from 'virtual-anchor'          // framework-agnostic
+import { VirtualList } from 'virtual-anchor/react'     // React 19 adapter
+```
+
+The React entry needs React 19; the core entry needs nothing. React is an *optional* peer
+dependency, so using the core alone pulls in no framework and warns about none.
 
 ## Why another one
 
@@ -52,7 +60,7 @@ And two things no other virtual list offers at all:
 ## Quick start
 
 ```tsx
-import { VirtualList, type VirtualListHandle } from 'react-virtual-anchor'
+import { VirtualList, type VirtualListHandle } from 'virtual-anchor/react'
 import { useRef } from 'react'
 
 function Thread({ comments, totalCount, firstLoadedPosition }) {
@@ -192,8 +200,8 @@ debounce can still fire mid-gesture. It ships no types; add
 
 ## API
 
-`virtual-anchor` (the framework-agnostic core) and `react-virtual-anchor` (this
-package). Generated reference: `pnpm docs`.
+`virtual-anchor` is the framework-agnostic core; `virtual-anchor/react` is the React
+adapter. Generated reference: `pnpm docs`.
 
 Key options: `items`, `getItemKey`, `estimateSize`, `gap`, `buffer`,
 `scrollPaddingStart`/`End`, `scrollMargin`, `keepMounted`, `visibility`,
@@ -228,7 +236,7 @@ The library can narrate its own decisions — scroll convergence frame by frame,
 restores, measurement batches, visibility deadlines:
 
 ```ts
-import { setTraceSink } from 'react-virtual-anchor'
+import { setTraceSink } from 'virtual-anchor/react'
 
 setTraceSink(({ topic, data }) => { console.log(topic, data) })
 ```
@@ -258,10 +266,18 @@ reasoning about the code. This is that, made repeatable.
 
 ## Requirements
 
-React 19, and a bundler (or Node) that defines `process.env.NODE_ENV` — the same
-assumption React itself makes. Development warnings and tracing are keyed to it, and
-loading the ESM build straight from a CDN into a browser without substituting it will fail
-at module evaluation.
+**ESM only.** There is no CommonJS build: a `require()` of this package will fail, and a
+CJS consumer needs a dynamic `import()`. That is deliberate rather than lazy — a dual build
+means two module instances, and this package holds module state (the trace sink), so a
+`setTraceSink` call through one instance would silently miss the other's events. Vite, Next,
+Rollup, esbuild and modern webpack are all fine; Jest needs its ESM support enabled.
+
+React 19 for the `virtual-anchor/react` entry only — it is an *optional* peer, so using the
+core entry pulls in no framework and warns about none.
+
+A bundler (or Node) that defines `process.env.NODE_ENV`, which is the same assumption React
+itself makes. Development warnings and tracing are keyed to it, and loading the build
+straight from a CDN into a browser without substituting it will fail at module evaluation.
 
 Client-only: there is no SSR path. A virtual list cannot render meaningfully on a server
 that has no viewport, and pretending otherwise produces markup the client immediately

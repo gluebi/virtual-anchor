@@ -1,7 +1,9 @@
 {
   "$schema": "https://typedoc.org/schema.json",
-  "entryPointStrategy": "packages",
-  "entryPoints": ["packages/core", "packages/react"],
+  "entryPoints": [
+    "packages/virtual-anchor/src/index.ts",
+    "packages/virtual-anchor/src/react/index.ts"
+  ],
   "out": "docs-api",
   "excludeInternal": true,
   "readme": "none"

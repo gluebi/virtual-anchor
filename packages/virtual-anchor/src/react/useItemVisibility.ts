@@ -1,4 +1,4 @@
-import type { Engine, ItemKey, ItemVisibility } from 'virtual-anchor'
+import type { Engine, ItemKey, ItemVisibility } from '../index.js'
 import { useCallback, useSyncExternalStore } from 'react'
 
 const NOT_VISIBLE: ItemVisibility = {

@@ -9,7 +9,7 @@ import {
   visibleRowTops,
   worstMovement,
 } from './helpers.js'
-import type { Anchor } from '../packages/core/src/index.js'
+import type { Anchor } from '../packages/virtual-anchor/src/index.js'
 
 /**
  * The cases the plan promised and the suite did not cover.

@@ -14,7 +14,7 @@ export type {
   VisibilityEvent,
   VisibilityOptions,
   VisibilityRule,
-} from 'virtual-anchor'
+} from '../index.js'
 
 export { useVirtualList } from './useVirtualList.js'
 export type {
@@ -32,4 +32,4 @@ export type { VirtualListHandle, VirtualListProps } from './VirtualList.js'
  * Tracing, re-exported so an app that only depends on the React package can turn it on.
  * Inert in a production build — see the core's `trace` module.
  */
-export { isTracing, setTraceSink, TRACING } from 'virtual-anchor'
+export { isTracing, setTraceSink, TRACING } from '../index.js'

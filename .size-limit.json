@@ -1,13 +1,16 @@
 [
   {
-    "name": "virtual-anchor (core, incl. zustand)",
-    "path": "packages/core/dist/index.js",
+    "name": "virtual-anchor \u2014 the core entry, what a non-React consumer ships",
+    "path": "packages/virtual-anchor/dist/index.js",
     "limit": "9 kB"
   },
   {
-    "name": "react-virtual-anchor (adapter only)",
-    "path": "packages/react/dist/index.js",
-    "limit": "3 kB",
-    "ignore": ["react", "react-dom", "virtual-anchor"]
+    "name": "virtual-anchor/react \u2014 core and adapter, what a React consumer ships",
+    "path": "packages/virtual-anchor/dist/react.js",
+    "limit": "11 kB",
+    "ignore": [
+      "react",
+      "react-dom"
+    ]
   }
 ]

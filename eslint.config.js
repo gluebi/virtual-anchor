@@ -35,7 +35,7 @@ export default defineConfig(
         // linted file belongs to a real program with `strictNullChecks` on. The
         // alternative — `allowDefaultProject` — gives them a program *without* it, and
         // four type-aware rules then report themselves as unusable once per file.
-        projectService: { allowDefaultProject: ['*.js'] },
+        projectService: { allowDefaultProject: ['*.js', 'scripts/*.mjs'] },
         tsconfigRootDir: import.meta.dirname,
       },
       globals: { ...globals.browser, ...globals.node },
@@ -67,7 +67,7 @@ export default defineConfig(
   },
 
   {
-    files: ['packages/react/**/*.{ts,tsx}', 'apps/demo/**/*.{ts,tsx}'],
+    files: ['packages/virtual-anchor/src/react/**/*.{ts,tsx}', 'apps/demo/**/*.{ts,tsx}'],
     plugins: { 'react-hooks': reactHooks },
     rules: {
       ...reactHooks.configs.recommended.rules,
@@ -101,7 +101,20 @@ export default defineConfig(
   },
 
   {
-    files: ['packages/react/src/**/*.{ts,tsx}'],
+    files: ['scripts/**/*.mjs'],
+    rules: {
+      // Release scripts are command-line tools: reporting what they did on stdout is the
+      // point, and a packaging check that said nothing would be useless.
+      'no-console': 'off',
+      // `JSON.parse` is `any`, and the file being parsed here is this repo's own manifest.
+      // The shape is documented in JSDoc where it is read; a runtime validator would add
+      // ceremony rather than safety, since the script's job is to fail loudly either way.
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+    },
+  },
+
+  {
+    files: ['packages/virtual-anchor/src/react/**/*.{ts,tsx}'],
     rules: {
       // These two are React-Compiler-oriented, and this library deliberately hands ref
       // callbacks and a `{ current }` box across its own hook boundary — the item ref
