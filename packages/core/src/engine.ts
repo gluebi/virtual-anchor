@@ -635,7 +635,16 @@ export function createEngine(initial: EngineOptions): Engine {
           // anchor and undo the carry.
           const restoreIndex = restoreIntents.findIndex((value) => isSelfWrite(offset, value))
           if (restoreIndex === -1) {
-            anchor = deriveAnchor(offset, cache, geometry())
+            // From where the content visually *is*: the offset the platform accepted plus the
+            // carry compensating for the fraction it refused. `carryFor` is `desired - actual`,
+            // so their sum is the position we asked for.
+            //
+            // Deriving from the raw offset instead folded the platform's rounding into the
+            // anchor, and the next restore then reproduced it faithfully — the whole view
+            // shifting half a pixel on the first prepend after a landing. Invisible while
+            // every inset was a whole number; a sticky header that wraps to 85.5px makes it
+            // routine.
+            anchor = deriveAnchor(offset + carry, cache, geometry())
           } else {
             restoreIntents.splice(0, restoreIndex + 1)
           }

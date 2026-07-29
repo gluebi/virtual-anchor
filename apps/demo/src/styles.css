@@ -26,8 +26,14 @@ body {
   z-index: 2;
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 0 16px;
+  /* Wraps rather than overflowing when the window is narrow. Its *height* is what
+     `scrollPaddingStart` compensates for, so growing a row is not merely cosmetic — the demo
+     measures the header and feeds the new height to the list, which is what a responsive
+     sticky header requires of any consumer. */
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding: 8px 16px;
+  box-sizing: border-box;
   background: #fff;
   border-bottom: 1px solid #e2e4e8;
   flex: none;
@@ -37,6 +43,9 @@ body {
   margin-left: auto;
   display: flex;
   align-items: center;
+  /* Wrap within the header too, so a narrow window breaks between control groups rather
+     than pushing them off the edge. */
+  flex-wrap: wrap;
   gap: 6px;
 }
 
@@ -209,6 +218,27 @@ code.leave {
   color: #a1442f;
 }
 
+/*
+ * Narrow windows: the panel sits under the list instead of taking a third of the width.
+ *
+ * Below about 900px the side-by-side layout left the comments in a ~280px column, which is
+ * not a fair demonstration of a reading list — and the panel is commentary, so it is what
+ * should give way.
+ */
+@media (max-width: 900px) {
+  .body {
+    flex-direction: column;
+  }
+
+  .panel {
+    width: auto;
+    border-left: none;
+    border-top: 1px solid #e2e4e8;
+    /* A third of the height at most, so the list keeps the screen. */
+    max-height: 33vh;
+  }
+}
+
 @media (prefers-color-scheme: dark) {
   body {
     color: #e6e8eb;
@@ -220,6 +250,12 @@ code.leave {
   .comment {
     background: #1e2126;
     border-color: #2c3138;
+  }
+
+  @media (max-width: 900px) {
+    .panel {
+      border-top-color: #2c3138;
+    }
   }
 
   .scroller {

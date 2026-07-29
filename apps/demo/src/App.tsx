@@ -53,12 +53,17 @@ function rowTop(key: ItemKey): number | null {
  * hidden behind it are on screen only in the arithmetic sense — treating them as visible put
  * "inserted below" underneath a row nobody could see, so nothing appeared to happen.
  */
+/** The sticky header's current height, or zero when there is no header. */
+function headerHeightNow(): number {
+  return document.querySelector('.header')?.getBoundingClientRect().height ?? 0
+}
+
 function keysOnScreen(): string[] {
   const scroller = document.querySelector('.scroller')
   if (!scroller) return []
 
   const box = scroller.getBoundingClientRect()
-  const visibleTop = box.top + CONFIG.paddingStart
+  const visibleTop = box.top + headerHeightNow()
   return [...document.querySelectorAll<HTMLElement>('[data-virtual-key]')]
     .filter((row) => {
       const rect = row.getBoundingClientRect()
@@ -109,6 +114,31 @@ export function App(): ReactNode {
   const listRef = useRef<VirtualListHandle>(null)
   const loadingRef = useRef(false)
   const hostRef = useRef<HTMLDivElement>(null)
+  const headerRef = useRef<HTMLElement>(null)
+
+  /**
+   * The sticky header's real height, which is what `scrollPaddingStart` has to be.
+   *
+   * A narrow window wraps the controls onto a second row, and a deep link that still aimed
+   * for the old 64px would land *underneath* the header. Measured rather than assumed, and
+   * fed back into the list — which is what any consumer with a responsive sticky header has
+   * to do, and a decent demonstration that the option can change at runtime.
+   *
+   * Starts at the configured value so the first paint aims correctly, before any observation.
+   */
+  const [headerHeight, setHeaderHeight] = useState(CONFIG.paddingStart)
+  useLayoutEffect(() => {
+    const header = headerRef.current
+    if (!header) return
+
+    const observer = new ResizeObserver(() => {
+      setHeaderHeight(header.getBoundingClientRect().height)
+    })
+    observer.observe(header)
+    return () => {
+      observer.disconnect()
+    }
+  }, [])
 
   /**
    * When the *page* is the scroller, everything the page renders above the list is part
@@ -445,7 +475,8 @@ export function App(): ReactNode {
 
   return (
     <div className="app">
-      <header className="header" style={{ height: CONFIG.paddingStart }}>
+      {CONFIG.paddingStart === 0 ? null : (
+      <header className="header" ref={headerRef} style={{ minHeight: CONFIG.paddingStart }}>
         <strong>react-virtual-anchor</strong>
         <span className="muted">
           {THREAD_SIZE.toLocaleString()} comments · loaded {window_.from}–{window_.to}
@@ -534,6 +565,7 @@ export function App(): ReactNode {
           </label>
         </span>
       </header>
+      )}
 
       <main className="body" ref={hostRef}>
         <VirtualList<Comment>
@@ -541,7 +573,7 @@ export function App(): ReactNode {
           getItemKey={(comment) => comment.id}
           estimateSize={(comment) => 90 + comment.body.length * 70}
           gap={12}
-          scrollPaddingStart={CONFIG.paddingStart}
+          scrollPaddingStart={CONFIG.paddingStart === 0 ? 0 : headerHeight}
           {...(restoredSnapshot === undefined ? {} : { sizeSnapshot: restoredSnapshot })}
           scrollMargin={CONFIG.scrollMargin + documentOffset}
           // Real content above the list inside the same scroller, which is the layout

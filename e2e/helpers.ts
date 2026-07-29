@@ -15,13 +15,18 @@ import type { Anchor, ScrollResult, SizeSnapshot } from '../packages/core/src/in
 export const TOLERANCE = 0.5
 
 /**
- * The demo's sticky header, and so its default `scrollPaddingStart`.
+ * The sticky header's height, which is the top inset a landing has to respect.
  *
- * Duplicated from the demo's `config.ts` for the same reason as `SNAPSHOT_KEY` below: that
- * module reads `window.location` at module scope and cannot be imported into Playwright's
- * Node context.
+ * Measured, never assumed: the demo's header wraps onto more rows as the window narrows, so
+ * `scrollPaddingStart` changes at runtime — and a suite with 64 written into it started
+ * failing by 21.5px the moment the header needed two rows. Zero when there is no header,
+ * which is what the `paddingStart=0` scenarios render.
  */
-export const DEFAULT_PADDING_START = 64
+export function headerHeight(page: Page): Promise<number> {
+  return page.evaluate(
+    () => document.querySelector('.header')?.getBoundingClientRect().height ?? 0,
+  )
+}
 
 /**
  * The demo's test handle.
@@ -191,7 +196,10 @@ export function measure(
           }
         : {
             top: box.top + scroller.clientTop,
-            height: scroller.clientHeight,
+            // The exact content height, not `clientHeight` — that is an integer, and
+            // comparing an exact landing against a rounded expectation reads as a bug in
+            // whichever of the two happens to round the other way.
+            height: box.height - (scroller.offsetHeight - scroller.clientHeight),
             scrollOffset: scroller.scrollTop,
             max: scroller.scrollHeight - scroller.clientHeight,
           }
@@ -228,16 +236,13 @@ export function measure(
  * that was on screen is still exactly where it was. Rows hidden behind the sticky header are
  * excluded — they are on screen only in the arithmetic sense.
  */
-export function visibleRowTops(
-  page: Page,
-  paddingStart: number = DEFAULT_PADDING_START,
-): Promise<Record<string, number>> {
-  return page.evaluate((padding) => {
+export function visibleRowTops(page: Page): Promise<Record<string, number>> {
+  return page.evaluate(() => {
     const scroller = document.querySelector('.scroller')
     if (!scroller) return {}
 
     const box = scroller.getBoundingClientRect()
-    const visibleTop = box.top + padding
+    const visibleTop = box.top + (document.querySelector('.header')?.getBoundingClientRect().height ?? 0)
     return Object.fromEntries(
       [...document.querySelectorAll<HTMLElement>('[data-virtual-key]')]
         .filter((row) => {
@@ -246,7 +251,7 @@ export function visibleRowTops(
         })
         .map((row) => [row.dataset.virtualKey ?? '', row.getBoundingClientRect().top - box.top]),
     )
-  }, paddingStart)
+  })
 }
 
 /**

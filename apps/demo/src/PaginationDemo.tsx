@@ -1,4 +1,11 @@
-import { type ReactNode, type UIEvent as ReactUIEvent, useCallback, useRef, useState } from 'react'
+import {
+  type ReactNode,
+  type UIEvent as ReactUIEvent,
+  useCallback,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react'
 import { VirtualList, type VirtualListHandle } from 'react-virtual-anchor'
 import { buildThread, sleep, THREAD_SIZE, type Comment } from './thread.js'
 import './styles.css'
@@ -39,6 +46,27 @@ export function PaginationDemo(): ReactNode {
 
   const listRef = useRef<VirtualListHandle>(null)
   const loadingRef = useRef(false)
+  const headerRef = useRef<HTMLElement>(null)
+
+  /**
+   * The sticky header's real height, which is what `scrollPaddingStart` has to be.
+   *
+   * A narrow window wraps the controls onto another row, and a page change that still aimed
+   * for 64px would land underneath the header.
+   */
+  const [headerHeight, setHeaderHeight] = useState(64)
+  useLayoutEffect(() => {
+    const header = headerRef.current
+    if (!header) return
+
+    const observer = new ResizeObserver(() => {
+      setHeaderHeight(header.getBoundingClientRect().height)
+    })
+    observer.observe(header)
+    return () => {
+      observer.disconnect()
+    }
+  }, [])
 
   const items =
     mode === 'pages'
@@ -137,7 +165,7 @@ export function PaginationDemo(): ReactNode {
 
   return (
     <div className="app">
-      <header className="header" style={{ height: 64 }}>
+      <header className="header" ref={headerRef} style={{ minHeight: 64 }}>
         <strong>react-virtual-anchor</strong>
         <span className="muted">pagination · {THREAD_SIZE.toLocaleString()} comments</span>
 
@@ -215,7 +243,7 @@ export function PaginationDemo(): ReactNode {
           getItemKey={(comment) => comment.id}
           estimateSize={(comment) => 90 + comment.body.length * 70}
           gap={12}
-          scrollPaddingStart={64}
+          scrollPaddingStart={headerHeight}
           // The whole collection either way, so a screen reader hears "comment 51 of 12,000"
           // rather than "1 of 50" — the page is a fetching detail, not the size of the thread.
           totalCount={THREAD_SIZE}

@@ -4,8 +4,21 @@ import { createElementViewport, createWindowViewport } from './viewport.js'
 /** jsdom reports zero for layout, so the values a real engine would give are stubbed. */
 const stubLayout = (
   element: HTMLElement,
-  layout: { scrollHeight: number; clientHeight: number; clientTop?: number; top?: number },
+  layout: {
+    scrollHeight: number
+    clientHeight: number
+    clientTop?: number
+    top?: number
+    /** The exact box height, which can be fractional where `clientHeight` cannot. */
+    boxHeight?: number
+    /** Border box height: `offsetHeight - clientHeight` is borders plus any scrollbar. */
+    offsetHeight?: number
+  },
 ): void => {
+  Object.defineProperty(element, 'offsetHeight', {
+    configurable: true,
+    value: layout.offsetHeight ?? layout.clientHeight,
+  })
   Object.defineProperty(element, 'scrollHeight', {
     configurable: true,
     value: layout.scrollHeight,
@@ -19,7 +32,7 @@ const stubLayout = (
     value: layout.clientTop ?? 0,
   })
   vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(
-    new DOMRect(0, layout.top ?? 0, 400, layout.clientHeight),
+    new DOMRect(0, layout.top ?? 0, 400, layout.boxHeight ?? layout.clientHeight),
   )
 }
 
@@ -51,6 +64,42 @@ describe('createElementViewport', () => {
   it('reports the visible extent', () => {
     const { viewport } = setup()
     expect(viewport.getViewportSize()).toBe(600)
+  })
+
+  it('reports a fractional extent exactly, rather than the rounded clientHeight', () => {
+    // `clientHeight` is an integer: a scrollport 634.5px tall reports 635. Alignment
+    // arithmetic is built from this number, so that half-pixel landed an `align: 'end'`
+    // target below the visible bottom — on any scrollport with a fractional height, which a
+    // flex layout under a wrapping header produces immediately.
+    const element = document.createElement('div')
+    stubLayout(element, {
+      scrollHeight: 10_000,
+      clientHeight: 635,
+      offsetHeight: 635,
+      boxHeight: 634.5,
+    })
+
+    expect(createElementViewport(element).getViewportSize()).toBe(634.5)
+  })
+
+  it('excludes borders and a horizontal scrollbar from the extent', () => {
+    // `offsetHeight - clientHeight` is what the box height includes and the content height
+    // does not: the horizontal borders, plus a horizontal scrollbar if there is one.
+    const element = document.createElement('div')
+    stubLayout(element, {
+      scrollHeight: 10_000,
+      clientHeight: 600,
+      offsetHeight: 620,
+      boxHeight: 619.5,
+    })
+
+    expect(createElementViewport(element).getViewportSize()).toBe(599.5)
+  })
+
+  it('never reports a negative extent', () => {
+    const element = document.createElement('div')
+    stubLayout(element, { scrollHeight: 100, clientHeight: 0, offsetHeight: 20, boxHeight: 0 })
+    expect(createElementViewport(element).getViewportSize()).toBe(0)
   })
 
   it('takes the maximum offset from the DOM, not from an estimate', () => {

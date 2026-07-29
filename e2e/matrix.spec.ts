@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 import {
-  DEFAULT_PADDING_START,
+  headerHeight,
   measure,
   open,
   scrollTo,
@@ -23,9 +23,10 @@ import {
  * The demo is parameterised from the URL, so all of it runs against one build.
  */
 
-interface Scenario extends View {
+interface Scenario {
   name: string
   query: string
+  windowScroller?: boolean
   /**
    * Whether the whole thread is loaded.
    *
@@ -39,25 +40,21 @@ interface Scenario extends View {
 const SCENARIOS: Scenario[] = [
   {
     name: 'inner scroller, a sticky header',
-    query: `paddingStart=${String(DEFAULT_PADDING_START)}`,
-    paddingStart: DEFAULT_PADDING_START,
+    query: 'paddingStart=64',
   },
   { name: 'inner scroller, no header', query: 'paddingStart=0', paddingStart: 0 },
   {
     name: 'inner scroller, content above the list',
-    query: `paddingStart=${String(DEFAULT_PADDING_START)}&scrollMargin=300`,
-    paddingStart: DEFAULT_PADDING_START,
+    query: 'paddingStart=64&scrollMargin=300',
   },
   {
     name: 'window scroller',
     query: 'paddingStart=0&windowScroller=1',
-    paddingStart: 0,
     windowScroller: true,
   },
   {
     name: 'a 40-comment paged window',
-    query: `paddingStart=${String(DEFAULT_PADDING_START)}`,
-    paddingStart: DEFAULT_PADDING_START,
+    query: 'paddingStart=64',
     paged: true,
   },
 ]
@@ -69,6 +66,17 @@ const ALIGNMENTS = ['start', 'center', 'end'] as const
 /** Load the whole thread unless the scenario is specifically about paging. */
 const openScenario = (page: Parameters<typeof open>[0], scenario: Scenario): Promise<void> =>
   open(page, scenario.paged ? scenario.query : `loadAll=1&${scenario.query}`)
+
+/**
+ * What a landing has to satisfy in this scenario.
+ *
+ * The top inset is the header's measured height rather than the number in the URL: the demo's
+ * header wraps as the window narrows, so the two are the same only when it fits on one row.
+ */
+const viewOf = async (page: Parameters<typeof open>[0], scenario: Scenario): Promise<View> => ({
+  paddingStart: await headerHeight(page),
+  ...(scenario.windowScroller === true ? { windowScroller: true } : {}),
+})
 
 /** In the paged regime the target has to be brought into the window first. */
 const aim = async (
@@ -90,7 +98,7 @@ for (const scenario of SCENARIOS) {
         const failures: string[] = []
         for (const index of TARGETS) {
           const result = await aim(page, scenario, index, { align })
-          const landing = await measure(page, index, align, scenario)
+          const landing = await measure(page, index, align, await viewOf(page, scenario))
 
           if (!landing.found) {
             failures.push(`#${String(index)}: not mounted`)
@@ -115,7 +123,7 @@ for (const scenario of SCENARIOS) {
       const failures: string[] = []
       for (const index of [1013, 7777]) {
         const result = await aim(page, scenario, index, { align: 'start', behavior: 'smooth' })
-        const landing = await measure(page, index, 'start', scenario)
+        const landing = await measure(page, index, 'start', await viewOf(page, scenario))
         if (landing.clamped) continue
 
         // Where it landed is the promise, and it is asserted strictly.
@@ -177,7 +185,7 @@ test.describe('accuracy matrix — deep targets in a fully loaded thread', () =>
     const failures: string[] = []
     for (const index of [500, 9000, 1200, 11_000, 300, 6000]) {
       await scrollTo(page, index, { align: 'start' })
-      const landing = await measure(page, index, 'start', SCENARIOS[0]!)
+      const landing = await measure(page, index, 'start', await viewOf(page, SCENARIOS[0]!))
       if (!landing.clamped && Math.abs(landing.error) > TOLERANCE) {
         failures.push(`#${String(index)}: off by ${landing.error.toFixed(3)}px`)
       }

@@ -1,6 +1,6 @@
 import { expect, test } from '@playwright/test'
 import {
-  DEFAULT_PADDING_START,
+  headerHeight,
   measure,
   open,
   scrollTo,
@@ -19,8 +19,6 @@ import {
  * changes underneath it, a deep link with nothing measured yet, and the boundaries.
  */
 
-const VIEW = { paddingStart: DEFAULT_PADDING_START }
-
 /** The comment every prepend test watches. */
 const watched = 'comment-4211'
 
@@ -30,7 +28,7 @@ test.describe('a deep link with nothing measured', () => {
     // convergence loop is the whole reason this can still be exact.
     await open(page, 'comment=8642')
 
-    const landing = await measure(page, 8642, 'start', VIEW)
+    const landing = await measure(page, 8642, 'start', { paddingStart: await headerHeight(page) })
     expect(landing.found).toBe(true)
     // Not merely in view — at the requested offset.
     expect(Math.abs(landing.error)).toBeLessThan(TOLERANCE)

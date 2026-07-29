@@ -57,11 +57,29 @@ export interface Viewport {
   getDevicePixelRatio(): number
 }
 
+/**
+ * The scrollport's content height, as a float.
+ *
+ * `clientHeight` is an *integer*: a scrollport 634.5px tall reports 635. Every other number
+ * in this library is exact float64, and alignment arithmetic is built from this one — so that
+ * rounding leaked straight into a landing, putting an `align: 'end'` target half a pixel
+ * below the visible bottom on any scrollport with a fractional height. Which is most of them:
+ * a flex layout with a wrapping sticky header above it produces one immediately.
+ *
+ * `offsetHeight - clientHeight` is the integer part that `getBoundingClientRect` includes and
+ * `clientHeight` does not — the horizontal borders plus a horizontal scrollbar if there is
+ * one. Subtracting it from the exact box height leaves the exact content height.
+ */
+function contentHeightOf(element: HTMLElement): number {
+  const chrome = element.offsetHeight - element.clientHeight
+  return Math.max(0, element.getBoundingClientRect().height - chrome)
+}
+
 /** A viewport backed by an element with its own scrollbar. */
 export function createElementViewport(element: HTMLElement): Viewport {
   return {
     getScrollOffset: () => element.scrollTop,
-    getViewportSize: () => element.clientHeight,
+    getViewportSize: () => contentHeightOf(element),
     getMaxScrollOffset: () => Math.max(0, element.scrollHeight - element.clientHeight),
     setScrollOffset: (offset) => {
       element.scrollTop = offset

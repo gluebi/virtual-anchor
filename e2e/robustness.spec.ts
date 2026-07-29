@@ -1,7 +1,8 @@
 import { expect, test, type Page } from '@playwright/test'
 import {
-  DEFAULT_PADDING_START,
+  headerHeight,
   open,
+  scrollTo,
   SNAPSHOT_KEY,
   TOLERANCE,
   topOfKey,
@@ -112,8 +113,10 @@ test.describe('a prepend during an in-flight smooth scroll', () => {
     expect(result.settled, `reason=${result.reason}`).toBe(true)
 
     const top = await topOfKey(page, 'comment-5988')
-    // Below the sticky header, which is what `scrollPaddingStart` accounts for.
-    expect(Math.abs(top - DEFAULT_PADDING_START), `landed at ${String(top)}`).toBeLessThan(
+    // Below the sticky header, which is what `scrollPaddingStart` accounts for — measured,
+    // because the header wraps onto more rows as the window narrows.
+    const inset = await headerHeight(page)
+    expect(Math.abs(top - inset), `landed at ${String(top)}, header is ${String(inset)}`).toBeLessThan(
       TOLERANCE,
     )
   })
@@ -294,5 +297,44 @@ test.describe('comments arriving while you read', () => {
     const reported = await page.locator('.panel .small').first().innerText()
     const moved = Number(/it moved ([\d.]+)px/.exec(reported)?.[1] ?? Number.NaN)
     expect(moved).toBeLessThanOrEqual(INSERT_TOLERANCE)
+  })
+})
+
+test.describe('a sticky header that changes height', () => {
+  test('lands below the header after it wraps onto more rows', async ({ page }) => {
+    // A narrow window wraps the demo's header controls onto extra rows, so the top inset the
+    // list has to respect grows at runtime. A landing that still aimed at the original height
+    // would put the target *underneath* the header — visible to a reader, and exactly the kind
+    // of thing a fixed number in a demo hides.
+    await open(page, 'comment=4000')
+
+    const wideHeader = await page.locator('.header').evaluate((el) => el.getBoundingClientRect().height)
+
+    await page.setViewportSize({ width: 620, height: 800 })
+    // Let the resize observer land and the list take the new inset.
+    await expect
+      .poll(async () => page.locator('.header').evaluate((el) => el.getBoundingClientRect().height))
+      .toBeGreaterThan(wideHeader)
+
+    const narrowHeader = await page
+      .locator('.header')
+      .evaluate((el) => el.getBoundingClientRect().height)
+
+    // Aim again now the geometry has changed.
+    await scrollTo(page, 4000, { align: 'start' })
+
+    const landing = await page.evaluate((headerHeight) => {
+      const row = document
+        .querySelector('[data-comment-index="4000"]')
+        ?.closest('[role="article"]')
+      const scroller = document.querySelector('.scroller')
+      if (!row || !scroller) return Number.NaN
+      const contentTop = scroller.getBoundingClientRect().top + scroller.clientTop
+      return row.getBoundingClientRect().top - contentTop - headerHeight
+    }, narrowHeader)
+
+    expect(Math.abs(landing), `landed ${String(landing)}px from below the header`).toBeLessThan(
+      TOLERANCE,
+    )
   })
 })
