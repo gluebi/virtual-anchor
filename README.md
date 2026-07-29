@@ -18,7 +18,7 @@ import { VirtualList } from 'virtual-anchor/react'     // React 19 adapter
 The React entry needs React 19; the core entry needs nothing. React is an *optional* peer
 dependency, so using the core alone pulls in no framework and warns about none.
 
-Minified and brotlied, including its one dependency: **8.34 kB** for the core entry, **9.96 kB**
+Minified and brotlied, including its one dependency: **8.39 kB** for the core entry, **10.31 kB**
 if you import the React adapter (which contains the core — they share a chunk rather than
 duplicating it). Both are enforced as budgets in CI, so this figure cannot drift from the
 truth.
@@ -57,7 +57,9 @@ And two things no other virtual list offers at all:
   *rendered* range with overscan folded in, so it calls items 600px off-screen
   visible; virtua removed its range event; TanStack's `VirtualItem` has no
   visibility field. Here every item reports its own enter and leave, with
-  configurable thresholds, dwell time and fire-once semantics.
+  configurable thresholds, dwell time and fire-once semantics — including a
+  trailing-edge rule, so "they read this" holds for a comment taller than the
+  screen as well as a one-line one.
 - **An honest settle signal.** `scrollToKey` returns a promise resolving with
   `{ settled, deviation, iterations, reason }`. When it could not get there, it
   says so — and says why.
@@ -210,7 +212,8 @@ adapter. Generated reference: `pnpm docs`.
 
 Key options: `items`, `getItemKey`, `estimateSize`, `gap`, `buffer`,
 `scrollPaddingStart`/`End`, `scrollMargin`, `keepMounted`, `visibility`,
-`sizeSnapshot`, `windowScroller`, `before`.
+`sizeSnapshot`, `windowScroller`, `before`, `onVisibleRangeChange`, and on the
+component `scrollerRef` and `onEngineReady`.
 
 `scrollMargin` is how much content precedes the list *inside the same scroller*, and
 `before` is where you put that content — a description, a filter bar. Their heights
@@ -223,12 +226,41 @@ fetching contract above), `focusItem`, `getAnchor`/`setAnchor` (persist a positi
 across navigation), `takeSizeSnapshot` (persist measurements; keyed to a layout
 signature so a width or zoom change discards them rather than restoring lies).
 
+The handle is the scroll *API*; `scrollerRef` is the *node*, for sharing the
+scrollport with something else — pull-to-refresh, a scroll-linked gradient, a
+third-party scroll library. Observe through the ref and move through the handle:
+writing `scrollTop` yourself means fighting the convergence loop. With
+`windowScroller` it resolves to `document.scrollingElement`, since the page is what
+scrolls.
+
+`onEngineReady` hands out the `Engine`, which is what `useItemVisibility(engine,
+key)` wants — a callback rather than a handle field because that hook subscribes
+through it, so it has to be reactive, and there is no engine until the scrollport
+exists. It is called with `null` on teardown.
+
+`onVisibleRangeChange` reports the on-screen index range, buffer excluded. A
+notification rather than a value on purpose: a scroll that moves the range within the
+mounted set triggers no React render at all, which is most scroll frames, so a field
+fed from a render would sit still through exactly what it describes. When you need the
+range *now* rather than on change — a keyboard handler, a fetch decision — the
+headless hook's `getVisibleRange()` reads it live.
+
 Visibility rules: `{ mode: 'any' }`, `{ mode: 'fraction', of: 'item' | 'viewport',
-fraction }`, `{ mode: 'full' }` — with `dwellMs` and `dwell: 'continuous' |
-'cumulative'`, `once`, `quiet`, `leaveDelayMs`, `rootMargin`. Use `of: 'viewport'`
-for items that can exceed the viewport, where a fraction *of the item* is
-unreachable. The MRC viewable-impression standard is
+fraction }`, `{ mode: 'full' }`, `{ mode: 'edge', edge: 'start' | 'end', tolerancePx }`
+— with `dwellMs` and `dwell: 'continuous' | 'cumulative'`, `once`, `quiet`,
+`leaveDelayMs`, `rootMargin`. The MRC viewable-impression standard is
 `{ rule: { mode: 'fraction', of: 'item', fraction: 0.5 }, dwellMs: 1000, dwell: 'continuous' }`.
+
+`edge` is the rule for "the reader got to the end of this", and the only one that is
+satisfiable whatever an item's height happens to be. Every fraction has a hole:
+`of: 'item'` is unreachable above `viewport / fraction`, `of: 'viewport'` unreachable
+below `fraction × viewport`, and `full` unreachable for anything taller than the
+viewport at all. A thread with both one-liners and fourteen-paragraph essays in it has
+no single correct fraction — one setting marks a long comment read with half of it
+still below the fold, the other never marks it at all. `tolerancePx` absorbs sub-pixel
+rounding at the boundary and defaults to 1; it stacks on `rootMargin`. Use
+`of: 'viewport'` instead when you want "enough of this was on screen" rather than
+"they reached its end".
 
 A dwell completes on time rather than on activity: stop scrolling with a comment
 half-read and it is still reported when its clock runs out. Events are suppressed
@@ -264,10 +296,11 @@ reasoning about the code. This is that, made repeatable.
 | TanStack `scrollToIndex` + `scrollAdjustments` | `scrollToKey`; there is no adjustment concept to configure |
 | TanStack `getItemKey` | `getItemKey` — but keys are load-bearing here, not an optimisation |
 | Virtuoso `firstItemIndex` | nothing; just pass a longer array |
-| Virtuoso `rangeChanged` | `visibleRange` (excludes buffer) or per-item `onVisibilityChange` |
+| Virtuoso `rangeChanged` | `onVisibleRangeChange` (excludes buffer) or per-item `onVisibilityChange` |
 | Virtuoso `computeItemKey` | `getItemKey` |
 | virtua `shift` | nothing; prepending is the default behaviour |
 | react-window `useDynamicRowHeight` | automatic |
+| an `IntersectionObserver` per row for "read" tracking | `{ mode: 'edge', edge: 'end' }` on the shared tracker — nothing else offers a rule that works for items taller than the viewport |
 
 ## Requirements
 

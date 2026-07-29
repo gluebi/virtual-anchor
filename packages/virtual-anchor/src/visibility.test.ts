@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest'
+import fc from 'fast-check'
 import {
   type VisibilityCandidate,
   type VisibilityEvent,
@@ -157,6 +158,176 @@ describe('VisibilityTracker rules', () => {
 
     const strict = harness({ rootMargin: -60, rule: { mode: 'full' } }, 300)
     expect(keysOf(strict.at({ top: 0, size: 300 }), 'enter')).toEqual(['c1'])
+  })
+})
+
+describe('VisibilityTracker edge rules', () => {
+  /** One item of an arbitrary height, for the cases uniform 100px rows cannot express. */
+  const giant = (size: number, start = 0): VisibilityCandidate[] => [
+    { index: 0, key: 'c0', start, size, measured: true },
+  ]
+
+  it('reports a short item when its trailing edge crosses the band, and not before', () => {
+    const h = harness({ rule: { mode: 'edge', edge: 'end' } }, 400)
+
+    // Item 4 spans [400, 500). A 400px viewport at 98 ends at 498, so the edge is still 2px
+    // below the band — outside the 1px tolerance.
+    expect(keysOf(h.at({ top: 98, size: 400 }), 'enter')).not.toContain('c4')
+
+    // One more pixel and 500 is exactly a tolerance away from the band end.
+    expect(keysOf(h.at({ top: 99, size: 400 }), 'enter')).toContain('c4')
+  })
+
+  it('reports an item three times the viewport height once its bottom edge arrives', () => {
+    const h = harness({ rule: { mode: 'edge', edge: 'end' } }, 300)
+    const candidates = giant(900)
+
+    // Top on screen, then the middle: nothing about this item's end is visible yet, and no
+    // fraction rule can distinguish these frames from the one below.
+    expect(h.at({ top: 0, size: 300, candidates })).toEqual([])
+    expect(h.at({ top: 300, size: 300, candidates })).toEqual([])
+    expect(h.at({ top: 560, size: 300, candidates })).toEqual([])
+
+    // [600, 900): the trailing edge has arrived.
+    expect(keysOf(h.at({ top: 600, size: 300, candidates }), 'enter')).toEqual(['c0'])
+  })
+
+  it('keys the start edge on the leading edge, not on any overlap', () => {
+    const candidates = giant(900)
+    const start = harness({ rule: { mode: 'edge', edge: 'start' } }, 300)
+    const any = harness({ rule: { mode: 'any' } }, 300)
+
+    expect(keysOf(start.at({ top: 0, size: 300, candidates }), 'enter')).toEqual(['c0'])
+    expect(keysOf(any.at({ top: 0, size: 300, candidates }), 'enter')).toEqual(['c0'])
+
+    // Scrolled into the item's middle. `any` still sees a full screen of it; the start edge is
+    // 600px above the band, so this rule does not — which is the whole distinction.
+    expect(keysOf(start.at({ top: 600, size: 300, candidates }), 'leave')).toEqual(['c0'])
+    expect(any.at({ top: 600, size: 300, candidates })).toEqual([])
+  })
+
+  it('absorbs sub-pixel rounding at the boundary, but not whole pixels', () => {
+    const near = harness({ rule: { mode: 'edge', edge: 'end' } }, 300)
+    // Edge at 300.5, band ends at 300: half a pixel out, inside the default tolerance.
+    expect(keysOf(near.at({ top: 0, size: 300, candidates: giant(300.5) }), 'enter')).toEqual([
+      'c0',
+    ])
+
+    const far = harness({ rule: { mode: 'edge', edge: 'end' } }, 300)
+    expect(far.at({ top: 0, size: 300, candidates: giant(302) })).toEqual([])
+  })
+
+  it('honours an explicit tolerancePx', () => {
+    const exact = harness({ rule: { mode: 'edge', edge: 'end', tolerancePx: 0 } }, 300)
+    expect(exact.at({ top: 0, size: 300, candidates: giant(300.5) })).toEqual([])
+    // Dead on the band end still counts: the edge is inside the band, not past it.
+    expect(keysOf(exact.at({ top: 0, size: 300, candidates: giant(300) }), 'enter')).toEqual(['c0'])
+
+    const loose = harness({ rule: { mode: 'edge', edge: 'end', tolerancePx: 20 } }, 300)
+    expect(keysOf(loose.at({ top: 0, size: 300, candidates: giant(315) }), 'enter')).toEqual(['c0'])
+  })
+
+  it('reports an estimated edge, and says so', () => {
+    const tracker = new VisibilityTracker({ rule: { mode: 'edge', edge: 'end' } })
+    const events = tracker.sample({
+      viewportStart: 0,
+      viewportEnd: 300,
+      items: items(0, 2, false),
+      now: 0,
+      gated: true,
+    })
+
+    // Not gated on measurement, unlike `fraction` and `full`: withholding the event would read
+    // as "not read yet" rather than "not sure yet". The flag carries the uncertainty instead.
+    expect(keysOf(events, 'enter')).toEqual(['c0', 'c1', 'c2'])
+    expect(events.every((e) => !e.measured)).toBe(true)
+  })
+
+  it('stacks the tolerance on rootMargin', () => {
+    const plain = harness({ rule: { mode: 'edge', edge: 'end' } }, 300)
+    expect(plain.at({ top: 0, size: 300, candidates: giant(400) })).toEqual([])
+
+    const margined = harness({ rule: { mode: 'edge', edge: 'end' }, rootMargin: 150 }, 300)
+    expect(
+      keysOf(margined.at({ top: 0, size: 300, candidates: giant(400) }), 'enter'),
+    ).toEqual(['c0'])
+  })
+
+  it('composes with dwellMs and once', () => {
+    const h = harness({ rule: { mode: 'edge', edge: 'end' }, dwellMs: 500, once: true }, 300)
+    const candidates = giant(900)
+
+    // The edge is in the band from here on, so the dwell clock starts — and gates.
+    expect(h.at({ top: 600, size: 300, now: 0, candidates })).toEqual([])
+    expect(h.at({ top: 600, size: 300, now: 400, candidates })).toEqual([])
+    expect(keysOf(h.at({ top: 600, size: 300, now: 500, candidates }), 'enter')).toEqual(['c0'])
+
+    // Away and back: `once` means it is never reported a second time.
+    h.at({ top: 0, size: 300, now: 600, candidates })
+    expect(h.at({ top: 600, size: 300, now: 2000, candidates })).toEqual([])
+  })
+
+  it('reports nothing while a programmatic scroll is suppressed', () => {
+    const h = harness({ rule: { mode: 'edge', edge: 'end' } }, 300)
+    const candidates = giant(900)
+    expect(h.at({ top: 600, size: 300, suppressed: true, candidates })).toEqual([])
+    expect(keysOf(h.at({ top: 600, size: 300, candidates }), 'enter')).toEqual(['c0'])
+  })
+
+  /**
+   * The invariant a read ratchet rests on.
+   *
+   * A consumer marking comments read takes a running maximum over `enter` events, so what
+   * matters is not which frame reported what but that the maximum never falls short of the
+   * furthest the reader actually got. Asserted over mixed heights — the case where a single
+   * fraction threshold is wrong for half the list — with tolerance off, so the reference
+   * computation is the rule itself rather than an approximation of it.
+   */
+  it('never reports a lower maximum than the furthest trailing edge reached', () => {
+    const heights = fc.array(fc.double({ min: 1, max: 3000, noNaN: true }), {
+      minLength: 1,
+      maxLength: 40,
+    })
+    const tops = fc.array(fc.double({ min: 0, max: 20_000, noNaN: true }), {
+      minLength: 1,
+      maxLength: 30,
+    })
+
+    fc.assert(
+      fc.property(heights, tops, fc.double({ min: 50, max: 900, noNaN: true }), (sizes, ts, size) => {
+        const candidates: VisibilityCandidate[] = []
+        let offset = 0
+        sizes.forEach((itemSize, index) => {
+          candidates.push({ index, key: `c${String(index)}`, start: offset, size: itemSize, measured: true })
+          offset += itemSize
+        })
+
+        const tracker = new VisibilityTracker({
+          rule: { mode: 'edge', edge: 'end', tolerancePx: 0 },
+        })
+
+        let reported = -1
+        let reachable = -1
+        ts.forEach((top, frame) => {
+          const events = tracker.sample({
+            viewportStart: top,
+            viewportEnd: top + size,
+            items: candidates,
+            now: frame,
+            gated: true,
+          })
+          for (const event of events) {
+            if (event.phase === 'enter') reported = Math.max(reported, event.index)
+          }
+          for (const item of candidates) {
+            const end = item.start + item.size
+            if (end >= top && end <= top + size) reachable = Math.max(reachable, item.index)
+          }
+        })
+
+        expect(reported).toBe(reachable)
+      }),
+    )
   })
 })
 
@@ -445,6 +616,20 @@ describe('VisibilityTracker scroller gate', () => {
 
     // Idempotent: nothing left to flush.
     expect(h.tracker.flushLeaves(600)).toEqual([])
+  })
+
+  it('flushes an item whose clock was already banked', () => {
+    // The hidden-tab sequence: `pauseDwell` stops the clocks of items that are still reported,
+    // so `flushLeaves` then meets a visible item with no running clock — and must not try to
+    // bank the time a second time.
+    const h = harness({ dwell: 'cumulative' })
+    h.at({ top: 0, now: 0 })
+    h.tracker.pauseDwell(300)
+
+    const events = h.tracker.flushLeaves(1000)
+    expect(keysOf(events, 'leave')).toEqual(['c0', 'c1', 'c2'])
+    // 300ms of reading banked, not 1000: the time after the pause was spent elsewhere.
+    expect(h.tracker.get('c0').visible).toBe(false)
   })
 })
 

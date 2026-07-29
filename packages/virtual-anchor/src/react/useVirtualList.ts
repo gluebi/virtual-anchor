@@ -87,6 +87,19 @@ export interface UseVirtualListOptions<T> {
   keepMounted?: readonly ItemKey[]
   visibility?: VisibilityOptions
   onVisibilityChange?: (events: VisibilityEvent[]) => void
+  /**
+   * Fires when the on-screen index range changes. Buffer excluded, unlike Virtuoso's
+   * `rangeChanged`.
+   *
+   * A notification rather than a value, because the range is not something a render can observe:
+   * `needsRerender` deliberately omits it, so a scroll that moves the visible range within the
+   * mounted set produces no React work at all — which is the point of this library, and also the
+   * reason a `visibleRange` field would be stale exactly while the user is scrolling.
+   *
+   * Fed by a store subscription, so it costs no renders of its own. What a consumer does with it
+   * — set state, fetch a page, update a progress indicator — is theirs to decide.
+   */
+  onVisibleRangeChange?: (range: readonly [number, number]) => void
   /** Restore measured sizes from a previous visit. */
   sizeSnapshot?: SizeSnapshot
   /** Scroll the page rather than an element. */
@@ -107,7 +120,16 @@ export interface UseVirtualListResult<T> {
   items: readonly RenderedItem<T>[]
   totalSize: number
   renderedRange: readonly [number, number]
-  visibleRange: readonly [number, number]
+  /**
+   * The index range genuinely on screen, buffer excluded, read live.
+   *
+   * A getter rather than a field, and that is the whole point: `renderedRange` above is a field
+   * because it *is* part of `needsRerender`, so a render always sees a current one. The visible
+   * range is not, so a field fed from the render snapshot would sit still through exactly the
+   * scrolling it is meant to describe. Read this when you need the value now — a keyboard
+   * handler, a fetch decision — and use `onVisibleRangeChange` when you need to react to it.
+   */
+  getVisibleRange: () => readonly [number, number]
   scrolling: boolean
   scrollToKey: (key: ItemKey, options?: ScrollToOptions) => Promise<ScrollResult>
   scrollToIndex: (index: number, options?: ScrollToOptions) => Promise<ScrollResult>
@@ -163,6 +185,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     keepMounted,
     visibility,
     onVisibilityChange,
+    onVisibleRangeChange,
     sizeSnapshot,
     windowScroller = false,
   } = options
@@ -280,6 +303,41 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     })
   }
 
+  /**
+   * The last range handed to `onVisibleRangeChange`.
+   *
+   * Outside the effect, not seeded from the store inside it, and that distinction is the whole
+   * behaviour: options are pushed into the engine *during render*, so a range has usually been
+   * published before any effect runs. Seeding from the store would adopt that first range
+   * silently and the consumer would never learn where the list started. Starting from the empty
+   * sentinel reports it — and because the memory outlives the subscription, resubscribing when
+   * the callback identity changes still reports nothing.
+   */
+  const reportedRange = useRef<readonly [number, number]>(EMPTY_STATE.visibleRange)
+
+  /**
+   * Report visible-range changes straight from the store.
+   *
+   * Declared *before* the mount effect below, so any publish `mount()` provokes is observed too.
+   *
+   * Compared element-wise, never by identity: `computeRanges` allocates a fresh tuple on every
+   * publish, so a reference check would fire on every scroll frame.
+   */
+  useEffect(() => {
+    if (!engine || !onVisibleRangeChange) return
+
+    const notify = (range: readonly [number, number]): void => {
+      if (range[0] === reportedRange.current[0] && range[1] === reportedRange.current[1]) return
+      reportedRange.current = range
+      onVisibleRangeChange(range)
+    }
+
+    notify(engine.store.getState().visibleRange)
+    return engine.store.subscribe((next) => {
+      notify(next.visibleRange)
+    })
+  }, [engine, onVisibleRangeChange])
+
   useEffect(() => engine?.mount(), [engine])
 
   /**
@@ -377,7 +435,12 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     items: rendered,
     totalSize: state.totalSize,
     renderedRange: state.renderedRange,
-    visibleRange: state.visibleRange,
+    // Straight from the store rather than from `state`, so a caller reading it mid-scroll gets
+    // where the view actually is and not where the last render left it.
+    getVisibleRange: useCallback(
+      () => engine?.store.getState().visibleRange ?? EMPTY_STATE.visibleRange,
+      [engine],
+    ),
     keyAt: useCallback((index: number) => engine?.keyAt(index), [engine]),
     // Through the engine, which already owns the element registry. The component used to
     // keep a second `Map<ItemKey, HTMLElement>` — which leaked every element ever mounted,
