@@ -41,6 +41,7 @@ const harness = (): Harness => {
     observeSize: () => () => {},
     getGateTarget: () => element,
     getElement: () => element,
+    getScrollportElement: () => element,
     getWindow: () => window,
     getDevicePixelRatio: () => 1,
   }
@@ -135,6 +136,7 @@ describe('scroller cancellation on user input', () => {
     observeSize: () => () => {},
     getGateTarget: () => element,
         getElement: () => element,
+        getScrollportElement: () => element,
         getWindow: () => window,
         getDevicePixelRatio: () => 1,
       },
@@ -200,6 +202,7 @@ describe('settle detection', () => {
         observeSize: () => () => {},
         getGateTarget: () => element,
         getElement: () => element,
+        getScrollportElement: () => element,
         getWindow: () => window,
         getDevicePixelRatio: () => 1,
       },

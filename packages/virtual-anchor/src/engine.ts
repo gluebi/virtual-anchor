@@ -544,7 +544,10 @@ export function createEngine(initial: EngineOptions): Engine {
     // `layoutSignatureFor` already hashes exactly the things that *do* reflow — content
     // width, root font size, device pixel ratio — and is already the key a size snapshot
     // is trusted against. Reusing it means one definition of "the layout changed".
-    const signature = layoutSignatureFor(viewport.getElement())
+    // From the scrollport, not `getElement()`: it is the scrolling box's width that decides how
+    // text wraps, and this has to read the same element the adapter seeded the signature from —
+    // otherwise the very first observation sees a change and clears every measurement.
+    const signature = layoutSignatureFor(viewport.getScrollportElement())
     const changed = cache.setLayoutSignature(signature)
 
     // The first observation merely learns the signature; there is no previous layout for

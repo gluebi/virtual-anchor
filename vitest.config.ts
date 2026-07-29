@@ -58,7 +58,10 @@ export default defineConfig({
         // assert the mock rather than the behaviour.
         'packages/virtual-anchor/src/engine.ts': { branches: 79, functions: 82, lines: 94 },
         'packages/virtual-anchor/src/scroller.ts': { branches: 88, functions: 94, lines: 97 },
-        'packages/virtual-anchor/src/viewport.ts': { branches: 62, functions: 93, lines: 97 },
+        // Both scroller kinds now answer for their scrollport as well as their measurement
+        // scope, and the quirks-mode path is exercised — so this is no longer the file with the
+        // thinnest coverage in the integration layer.
+        'packages/virtual-anchor/src/viewport.ts': { branches: 70, functions: 96, lines: 100 },
         'packages/virtual-anchor/src/resizer.ts': { branches: 91, functions: 100, lines: 100 },
         'packages/virtual-anchor/src/gate.ts': { branches: 78, functions: 100, lines: 100 },
         // The uncovered branch is the production build, which by definition is not this build.

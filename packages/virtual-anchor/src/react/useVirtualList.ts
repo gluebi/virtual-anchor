@@ -3,6 +3,7 @@ import {
   createDomSurface,
   createEngine,
   createWindowViewport,
+  documentScrollElement,
   type Anchor,
   type AnchorGeometry,
   type Engine,
@@ -228,7 +229,11 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     // The window is available immediately, so that mode needs no element and no ref; an
     // element scroller has to wait for one. Beyond the viewport and the element the
     // signature is taken from, the two are the same engine.
-    const measured = windowScroller ? document.documentElement : scrollElement
+    //
+    // The scrollport, not `documentElement`, and it has to match what the engine recomputes the
+    // signature from on its first scrollport observation — read a different element there and
+    // that observation sees a change and clears every measurement, snapshot included.
+    const measured = windowScroller ? documentScrollElement(window) : scrollElement
     if (!measured) return null
 
     return createEngine({

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen } from '@testing-library/react'
 import { StrictMode, useState, type ReactNode } from 'react'
 import { VirtualList, type VirtualListHandle } from './VirtualList.js'
-import type { ItemKey } from '../index.js'
+import { layoutSignatureFor, type Engine, type ItemKey } from '../index.js'
 import { useVirtualList } from './useVirtualList.js'
 import { useItemVisibility } from './useItemVisibility.js'
 
@@ -1118,23 +1118,59 @@ describe('VirtualList scrollerRef', () => {
     expect(scroller.current).not.toBe(container.firstElementChild)
   })
 
-  it('prefers the real scrollingElement where the document has one', () => {
-    // A browser reports one, and in quirks mode it is `body` rather than `documentElement` — so
-    // the fallback must not be the only path ever exercised. Defined rather than spied: jsdom
-    // does not expose this as a configurable accessor for `vi.spyOn` to wrap.
+  it('hands over the same element the engine fingerprints', () => {
+    // The node a consumer receives and the element the library measures its layout against used
+    // to be resolved separately: this test asserted only that the ref got `body`, while the
+    // adapter went on fingerprinting `documentElement`. It now asserts they agree, which is the
+    // whole point of #12 — and it is the assertion that fails if only one of the two sites moves.
+    //
+    // Defined rather than spied: jsdom does not expose this as a configurable accessor for
+    // `vi.spyOn` to wrap, and reports `null` by default so the fallback is otherwise the only
+    // path ever exercised.
     const original = Object.getOwnPropertyDescriptor(Document.prototype, 'scrollingElement')
     Object.defineProperty(document, 'scrollingElement', {
       configurable: true,
       get: () => document.body,
     })
+    // jsdom reports zero width for everything, so without this the two candidate elements
+    // fingerprint identically and the assertion below could not tell them apart.
+    Object.defineProperty(document.body, 'clientWidth', { configurable: true, get: () => 777 })
 
     try {
       const scroller = { current: null as HTMLElement | null }
-      render(list({ windowScroller: true, scrollerRef: scroller }))
+      const captured: { engine?: Engine } = {}
+      render(
+        list({
+          windowScroller: true,
+          scrollerRef: scroller,
+          onEngineReady: (next) => {
+            if (next) captured.engine ??= next
+          },
+        }),
+      )
+
       expect(scroller.current).toBe(document.body)
+      const signature = captured.engine?.cache.layoutSignature
+      expect(signature).toBe(layoutSignatureFor(document.body))
+      // And emphatically not the element it merely scopes measurements to.
+      expect(signature).not.toBe(layoutSignatureFor(document.documentElement))
     } finally {
       delete (document as unknown as Record<string, unknown>).scrollingElement
+      delete (document.body as unknown as Record<string, unknown>).clientWidth
       if (original) Object.defineProperty(Document.prototype, 'scrollingElement', original)
+    }
+  })
+
+  it('publishes and releases the same way in both modes', () => {
+    // Two mechanisms for one prop meant two lifetimes: element mode published in the ref phase,
+    // window mode from an effect. A future node-shaped prop would have copied whichever it found.
+    for (const windowScroller of [false, true]) {
+      const scroller = { current: null as HTMLElement | null }
+      const { unmount } = render(list({ windowScroller, scrollerRef: scroller }))
+
+      expect(scroller.current, `mode windowScroller=${String(windowScroller)}`).not.toBeNull()
+      unmount()
+      expect(scroller.current, `mode windowScroller=${String(windowScroller)}`).toBeNull()
     }
   })
 

@@ -1,10 +1,11 @@
-import type {
-  Anchor,
-  Engine,
-  ItemKey,
-  ScrollResult,
-  ScrollToOptions,
-  SizeSnapshot,
+import {
+  documentScrollElement,
+  type Anchor,
+  type Engine,
+  type ItemKey,
+  type ScrollResult,
+  type ScrollToOptions,
+  type SizeSnapshot,
 } from '../index.js'
 import {
   type CSSProperties,
@@ -101,8 +102,9 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
    * through this ref means fighting the convergence loop, which is the one thing it is not for.
    *
    * With `windowScroller` there is no scrollport of ours — the page scrolls — so this resolves
-   * to `document.scrollingElement`. That is `documentElement` in standards mode, which is what
-   * the engine measures; in quirks mode the two can differ.
+   * to whatever the document actually scrolls: `documentElement` in standards mode, `body` in
+   * quirks mode. The library resolves it in one place, so the node you get here is the same one
+   * it clamps and fingerprints against.
    */
   scrollerRef?: Ref<HTMLElement>
   /**
@@ -143,18 +145,6 @@ function applyRef<T>(ref: Ref<T> | undefined, value: T | null): () => void {
   return () => {
     ref.current = null
   }
-}
-
-/**
- * The page scroller, for `windowScroller` mode.
- *
- * `scrollingElement` rather than `documentElement` because that is the element the platform
- * actually scrolls, and narrowed by `instanceof` rather than asserted: the property is typed
- * `Element | null`, and it really is null on a detached document.
- */
-function pageScroller(): HTMLElement {
-  const scrolling = document.scrollingElement
-  return scrolling instanceof HTMLElement ? scrolling : document.documentElement
 }
 
 /**
@@ -310,35 +300,38 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
   // Destructured, so the dependency is the callback rather than the result object: `list` is
   // fresh every render, and depending on it would defeat the whole point of this indirection.
   const { scrollRef } = list
-  const setScrollport = useCallback(
-    (element: HTMLElement | null) => {
-      scrollRef(element)
-
-      if (element === null) {
-        releaseScroller.current()
-        releaseScroller.current = NO_RELEASE
-        return
-      }
-      // In the commit's ref phase, not an effect: a consumer whose `useEffect(…, [])` reads
-      // `scrollerRef.current` once must not find it empty.
-      releaseScroller.current = applyRef(consumerScrollerRef.current, element)
-    },
-    // Permanently stable: `scrollRef` is a `useCallback` with no dependencies, and the consumer's
-    // ref is reached through a box rather than a dependency.
-    [scrollRef],
-  )
 
   /**
-   * Cover the window-scrolled mode, which has no element of ours to attach to.
+   * Attach the scrollport, and publish it to the consumer's ref.
    *
-   * Keyed on the mode alone: depending on the consumer's ref would re-run this on every render
-   * for an inline arrow, publishing `null` and then the element again each time. `pageScroller()`
-   * always resolves, so there is nothing to guard against.
+   * One mechanism for both modes. The host `<div>` renders either way — it simply must not feed
+   * `list.scrollRef` when the page is the scroller, since a window-scrolled list has no
+   * scrollport of its own to derive an engine from. What the consumer is *handed* differs: the
+   * div in element mode, the page scroller in window mode, resolved by the viewport module so
+   * this component holds no opinion about quirks mode.
+   *
+   * In the commit's ref phase rather than an effect, and that is the reason this is the surviving
+   * mechanism: a consumer whose `useEffect(…, [])` reads `scrollerRef.current` once must not find
+   * it empty. Publishing window mode from an effect also re-ran it per render for an inline ref.
    */
-  useEffect(() => {
-    if (!windowScroller) return
-    return applyRef(consumerScrollerRef.current, pageScroller())
-  }, [windowScroller])
+  const setScrollport = useCallback(
+    (element: HTMLElement | null) => {
+      if (!windowScroller) scrollRef(element)
+
+      releaseScroller.current()
+      releaseScroller.current =
+        element === null
+          ? NO_RELEASE
+          : applyRef(
+              consumerScrollerRef.current,
+              windowScroller ? documentScrollElement(window) : element,
+            )
+    },
+    // `scrollRef` is a `useCallback` with no dependencies and the consumer's ref is reached
+    // through a box, so the only thing that can change this identity is the mode — which already
+    // rebuilds the engine when it flips.
+    [scrollRef, windowScroller],
+  )
 
   /**
    * Hand the engine out, and take it back when it goes.
@@ -439,8 +432,9 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
 
   return (
     <div
-      // A window-scrolled list has no scrollport of its own to attach to.
-      ref={windowScroller ? undefined : setScrollport}
+      // One ref in both modes. It only feeds `list.scrollRef` when this element really is the
+      // scrollport; see `setScrollport`.
+      ref={setScrollport}
       className={className}
       style={{ ...(windowScroller ? WINDOW_HOST_STYLE : SCROLLER_STYLE), ...style }}
       onScroll={onScroll}
