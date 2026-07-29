@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { DEFAULT_PADDING_START, open, SNAPSHOT_KEY, topOfKey } from './helpers.js'
+import { DEFAULT_PADDING_START, open, SNAPSHOT_KEY, TOLERANCE, topOfKey } from './helpers.js'
 import type { Anchor } from '../packages/core/src/index.js'
 
 /**
@@ -105,7 +105,9 @@ test.describe('a prepend during an in-flight smooth scroll', () => {
 
     const top = await topOfKey(page, 'comment-5988')
     // Below the sticky header, which is what `scrollPaddingStart` accounts for.
-    expect(Math.abs(top - DEFAULT_PADDING_START), `landed at ${String(top)}`).toBeLessThan(0.5)
+    expect(Math.abs(top - DEFAULT_PADDING_START), `landed at ${String(top)}`).toBeLessThan(
+      TOLERANCE,
+    )
   })
 })
 

@@ -33,6 +33,38 @@ import {
  */
 const RENDER_STORM_PER_SECOND = 600
 
+/** A one-second window of store-driven renders. */
+interface Burst {
+  at: number
+  count: number
+  warned: boolean
+}
+
+/**
+ * Complain once per second if the store is driving renders faster than any real scroll can.
+ *
+ * Guarded by its single caller so a production build drops it, which is the convention the
+ * `trace` module documents.
+ */
+function warnOnRenderStorm(burst: Burst): void {
+  const now = Date.now()
+  if (now - burst.at > 1000) {
+    burst.at = now
+    burst.count = 0
+    burst.warned = false
+  }
+
+  burst.count++
+  if (burst.count <= RENDER_STORM_PER_SECOND || burst.warned) return
+
+  burst.warned = true
+  console.error(
+    `[virtual-anchor] over ${String(RENDER_STORM_PER_SECOND)} store-driven renders in a ` +
+      'second. A publish is provoking a render that publishes again — this is a loop, and ' +
+      'without this message it would spin silently.',
+  )
+}
+
 export interface UseVirtualListOptions<T> {
   /** The loaded window, in display order. */
   items: readonly T[]
@@ -94,14 +126,7 @@ export interface UseVirtualListResult<T> {
    * be expressible on it.
    */
   keyAt: (index: number) => ItemKey | undefined
-  /**
-   * Move focus to an item, if it is mounted. Returns whether it could.
-   *
-   * Goes through the engine, which already owns the element registry. The component used to
-   * keep a second `Map<ItemKey, HTMLElement>` — which leaked every element ever mounted,
-   * because its cleanup branch is unreachable under React 19's ref semantics — and
-   * recovered the key from a `data-` attribute React knew at render time.
-   */
+  /** Move focus to an item, if it is mounted. Returns whether it could. */
   focusItem: (key: ItemKey) => boolean
   engine: Engine | null
 }
@@ -257,38 +282,26 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
 
   useEffect(() => engine?.mount(), [engine])
 
-  // A versioned immutable snapshot, filtered so React only wakes for changes it
-  // has to render. Reading the DOM inside a selector would be the canonical
-  // tearing bug here: React may call it several times per render, so two rows
-  // could observe different scroll positions in one pass.
   /**
    * A development-only detector for the failure the microtask hop below would otherwise
    * hide: a publish that provokes a render that publishes again.
    *
    * React's own "Maximum update depth exceeded" only fires for updates nested inside a
-   * render or effect. Once the notification hops a microtask each cycle is a separate
-   * task, so React sees unrelated root updates and says nothing — the loop just pins a
-   * core in silence. A rate is the only honest signal: a busy scroll drives at most one
-   * store-driven render per frame.
+   * render or effect. Once the notification hops a microtask, each cycle is a separate
+   * task, so React sees unrelated root updates and says nothing.
+   *
+   * Counted in the notify path and reported inline, *not* from a timer: React schedules
+   * sync-lane root work on the microtask queue too, so the whole cycle — publish, notify,
+   * render, publish — stays on that queue and never yields to a timer. An interval would
+   * have been silent in precisely the case it was written for, which was measured rather
+   * than assumed. A `console.error` is one of the few things that escapes a microtask spin.
    */
-  const storeRenders = useRef(0)
-  useEffect(() => {
-    if (process.env.NODE_ENV === 'production') return
-    const interval = setInterval(() => {
-      if (storeRenders.current > RENDER_STORM_PER_SECOND) {
-        console.error(
-          `[virtual-anchor] ${String(storeRenders.current)} store-driven renders in a second. ` +
-            'A publish is provoking a render that publishes again — this is a loop, and ' +
-            'without this message it would spin silently.',
-        )
-      }
-      storeRenders.current = 0
-    }, 1000)
-    return () => {
-      clearInterval(interval)
-    }
-  }, [])
+  const burst = useRef<Burst>({ at: 0, count: 0, warned: false })
 
+  // A versioned immutable snapshot, filtered so React only wakes for changes it
+  // has to render. Reading the DOM inside a selector would be the canonical
+  // tearing bug here: React may call it several times per render, so two rows
+  // could observe different scroll positions in one pass.
   const state = useSyncExternalStore(
     useCallback(
       (onChange: () => void) => {
@@ -313,7 +326,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
           // The one thing it costs is React's own "Maximum update depth exceeded", which
           // catches a render→publish→render cycle loudly. A cycle here would instead spin
           // on microtasks in silence, so development keeps a detector of its own.
-          storeRenders.current++
+          if (process.env.NODE_ENV !== 'production') warnOnRenderStorm(burst.current)
           queueMicrotask(onChange)
         })
       },
@@ -366,6 +379,10 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     renderedRange: state.renderedRange,
     visibleRange: state.visibleRange,
     keyAt: useCallback((index: number) => engine?.keyAt(index), [engine]),
+    // Through the engine, which already owns the element registry. The component used to
+    // keep a second `Map<ItemKey, HTMLElement>` — which leaked every element ever mounted,
+    // because its cleanup branch is unreachable under React 19's ref semantics — and
+    // recovered the key from a `data-` attribute React knew at render time.
     focusItem: useCallback((key: ItemKey) => engine?.focusItem(key) ?? false, [engine]),
     scrolling: state.scrolling,
     scrollToKey,

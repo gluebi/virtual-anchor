@@ -167,7 +167,7 @@ test.describe('accuracy matrix — deep targets in a fully loaded thread', () =>
       const max = el.scrollHeight - el.clientHeight
       return max - el.scrollTop
     })
-    expect(atBottom).toBeLessThanOrEqual(0.5)
+    expect(atBottom).toBeLessThanOrEqual(TOLERANCE)
   })
 
   test('holds sub-pixel accuracy across many consecutive jumps', async ({ page }) => {

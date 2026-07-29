@@ -198,7 +198,6 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
     ...(keepMounted === undefined ? {} : { keepMounted }),
   })
 
-
   /**
    * Scroll to an item and give it focus once the motion has genuinely stopped.
    *

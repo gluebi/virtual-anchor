@@ -14,7 +14,13 @@ import type { Anchor, ScrollResult, SizeSnapshot } from '../packages/core/src/in
 /** Half a CSS pixel: the promise `scrollToKey` makes. */
 export const TOLERANCE = 0.5
 
-/** The demo's sticky header, and so its default `scrollPaddingStart`. */
+/**
+ * The demo's sticky header, and so its default `scrollPaddingStart`.
+ *
+ * Duplicated from the demo's `config.ts` for the same reason as `SNAPSHOT_KEY` below: that
+ * module reads `window.location` at module scope and cannot be imported into Playwright's
+ * Node context.
+ */
 export const DEFAULT_PADDING_START = 64
 
 /**

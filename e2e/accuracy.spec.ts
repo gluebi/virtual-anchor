@@ -51,8 +51,8 @@ test.describe('a deep link with nothing measured', () => {
         max: el.scrollHeight - el.clientHeight,
       }))
 
-      if (edge === 'top') expect(position.scrollTop).toBeLessThanOrEqual(0.5)
-      else expect(position.max - position.scrollTop).toBeLessThanOrEqual(0.5)
+      if (edge === 'top') expect(position.scrollTop).toBeLessThanOrEqual(TOLERANCE)
+      else expect(position.max - position.scrollTop).toBeLessThanOrEqual(TOLERANCE)
     }
   })
 })
@@ -118,9 +118,16 @@ test.describe('visibility semantics', () => {
   })
 
   test('does not double-count under StrictMode', async ({ page }) => {
-    await open(page)
     // The demo runs in StrictMode, whose double mount re-fires anything derived from
     // effects. The tracker's state lives outside React for this reason.
+    await open(page)
+
+    // Scroll rather than waiting out the dwell at rest. Same events either way, but the
+    // idle path depends on a 600ms timer completing while every other worker in the suite
+    // competes for the CPU, which made this assertion fail about one run in three.
+    await page.locator('.scroller').evaluate((el) => {
+      el.scrollTop += 400
+    })
     await expect(page.locator('.panel ol li').first()).toBeVisible({ timeout: 15_000 })
 
     const duplicates = await page.evaluate(() => {
