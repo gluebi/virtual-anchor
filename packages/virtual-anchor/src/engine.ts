@@ -11,7 +11,13 @@ import { createScroller, type Scroller } from './scroller.js'
 import { createNullSurface, type Surface } from './surface.js'
 import { TRACING, trace } from './trace.js'
 import { SizeCache, type SizeSnapshot } from './sizeCache.js'
-import { createVirtualStore, type VirtualItem, type VirtualState, type VirtualStore } from './store.js'
+import {
+  createVirtualStore,
+  EMPTY_RANGE,
+  type VirtualItem,
+  type VirtualState,
+  type VirtualStore,
+} from './store.js'
 import type { Anchor, ItemKey, ScrollResult, ScrollToOptions } from './types.js'
 import type { Viewport } from './viewport.js'
 import {
@@ -162,6 +168,17 @@ export function createEngine(initial: EngineOptions): Engine {
    * `renderedRange` cannot disagree.
    */
   let pinnedRange: [number, number] | null = null
+  /**
+   * The last ranges published, kept so an unchanged range is the *same* tuple.
+   *
+   * `computeRanges` runs once per scroll frame and once per React render, and the numbers it
+   * produces are unchanged for most of them. Returning a fresh tuple each time made identity
+   * meaningless, so every subscriber had to compare element-wise and say so in a comment;
+   * handing back the previous tuple lets a reference check mean what it looks like it means.
+   * Same technique as `VisibilityTracker#get`, and for the same reason.
+   */
+  let lastRendered: readonly [number, number] = EMPTY_RANGE
+  let lastVisible: readonly [number, number] = EMPTY_RANGE
   let gate: ScrollerGate | null = null
   let disposed = false
   /** Whether a size snapshot has been taken up; see `setOptions`. */
@@ -201,10 +218,24 @@ export function createEngine(initial: EngineOptions): Engine {
   }
 
   /** Items to mount: everything within the viewport plus the buffer. */
+  /** The previous tuple when it still describes the range, so identity survives. */
+  const sameRange = (
+    previous: readonly [number, number],
+    from: number,
+    to: number,
+  ): readonly [number, number] =>
+    previous[0] === from && previous[1] === to ? previous : [from, to]
+
   const computeRanges = (
     scrollOffset: number,
-  ): { rendered: [number, number]; visible: [number, number] } => {
-    if (cache.length === 0) return { rendered: [0, -1], visible: [0, -1] }
+  ): { rendered: readonly [number, number]; visible: readonly [number, number] } => {
+    // Through the shared constant, not a fresh `[0, -1]`: an empty list must keep publishing the
+    // same reference, or emptying and staying empty reads as a change.
+    if (cache.length === 0) {
+      lastRendered = EMPTY_RANGE
+      lastVisible = EMPTY_RANGE
+      return { rendered: EMPTY_RANGE, visible: EMPTY_RANGE }
+    }
 
     const g = syncGeometry()
     const visible = g.visibleBand(scrollOffset)
@@ -215,10 +246,17 @@ export function createEngine(initial: EngineOptions): Engine {
     // scroll from comment 0 to comment 7,777 mounted 7,798 rows in a single frame,
     // which took 103 seconds and never scrolled at all. It is mounted as an extra
     // segment by `itemsFor` instead.
-    return {
-      rendered: [cache.indexAt(buffered.start), cache.indexAt(buffered.end)],
-      visible: [cache.indexAt(visible.start), cache.indexAt(Math.max(visible.start, visible.end))],
-    }
+    lastRendered = sameRange(
+      lastRendered,
+      cache.indexAt(buffered.start),
+      cache.indexAt(buffered.end),
+    )
+    lastVisible = sameRange(
+      lastVisible,
+      cache.indexAt(visible.start),
+      cache.indexAt(Math.max(visible.start, visible.end)),
+    )
+    return { rendered: lastRendered, visible: lastVisible }
   }
 
   const itemsFor = (range: readonly [number, number]): VirtualItem[] => {

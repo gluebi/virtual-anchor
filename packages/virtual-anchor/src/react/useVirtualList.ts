@@ -350,8 +350,8 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
    *
    * Declared *before* the mount effect below, so any publish `mount()` provokes is observed too.
    *
-   * Compared element-wise, never by identity: `computeRanges` allocates a fresh tuple on every
-   * publish, so a reference check would fire on every scroll frame.
+   * A reference check is enough: the engine hands back the *same* tuple while the range is
+   * unchanged, so identity means "this range moved" rather than "something published".
    *
    * Keyed on the engine alone, with the callback read through a box: a call site passing an
    * inline arrow would otherwise unsubscribe and resubscribe on every render, re-reading the
@@ -362,7 +362,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     if (!engine) return
 
     const notify = (range: readonly [number, number]): void => {
-      if (range[0] === reportedRange.current[0] && range[1] === reportedRange.current[1]) return
+      if (range === reportedRange.current) return
       reportedRange.current = range
       latestRangeListener.current?.(range)
     }

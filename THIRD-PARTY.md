@@ -3,8 +3,7 @@
 ## Bundled dependencies
 
 **[zustand](https://github.com/pmndrs/zustand)** — MIT, © 2019 Paul Henschel.
-Used by `virtual-anchor` as the store transport (`zustand/vanilla` plus
-`subscribeWithSelector`).
+Used by `virtual-anchor` as the store transport (`zustand/vanilla`).
 
 ## Optional peer dependency
 
