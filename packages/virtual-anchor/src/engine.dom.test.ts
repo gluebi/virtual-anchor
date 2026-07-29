@@ -143,6 +143,7 @@ const setup = (
     },
     getGateTarget: () => scroller,
     getElement: () => scroller,
+    getScrollportElement: () => scroller,
     getWindow: () => window,
     getDevicePixelRatio: () => 1,
   }

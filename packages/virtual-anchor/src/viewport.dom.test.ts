@@ -52,6 +52,15 @@ describe('createElementViewport', () => {
     return { element, viewport: createElementViewport(element) }
   }
 
+  it('is its own scrollport, measurement scope and gate target', () => {
+    // All three coincide for an element scroller — the distinction only exists because a
+    // document scroller has to answer them with different nodes.
+    const { element, viewport } = setup()
+    expect(viewport.getScrollportElement()).toBe(element)
+    expect(viewport.getElement()).toBe(element)
+    expect(viewport.getGateTarget()).toBe(element)
+  })
+
   it('reads and writes the scroll offset', () => {
     const { element, viewport } = setup()
     expect(viewport.getScrollOffset()).toBe(0)
@@ -211,6 +220,42 @@ describe('createWindowViewport', () => {
     const viewport = createWindowViewport(window)
     expect(viewport.getElement()).toBe(document.documentElement)
     expect(viewport.getWindow()).toBe(window)
+    expect(viewport.getDevicePixelRatio()).toBeGreaterThan(0)
+  })
+
+  it('follows scrollingElement for the scrollport, while observers keep documentElement', () => {
+    // Quirks mode: `body` is what scrolls, so `documentElement.scrollHeight` is not the page's
+    // scroll extent and clamping against it is wrong — the TanStack #1001 failure this
+    // interface's own doc warns about. `getElement()` must *not* follow, because it is the
+    // measurement and input scope, and moving it once made every content growth look like a
+    // viewport resize.
+    stubWindow({ scrollY: 0, innerHeight: 800, scrollHeight: 20_000 })
+    Object.defineProperty(document.body, 'scrollHeight', { configurable: true, get: () => 50_000 })
+    const original = Object.getOwnPropertyDescriptor(Document.prototype, 'scrollingElement')
+    Object.defineProperty(document, 'scrollingElement', {
+      configurable: true,
+      get: () => document.body,
+    })
+
+    try {
+      const viewport = createWindowViewport(window)
+      expect(viewport.getScrollportElement()).toBe(document.body)
+      expect(viewport.getMaxScrollOffset()).toBe(49_200)
+      expect(viewport.getElement()).toBe(document.documentElement)
+    } finally {
+      delete (document as unknown as Record<string, unknown>).scrollingElement
+      delete (document.body as unknown as Record<string, unknown>).scrollHeight
+      if (original) Object.defineProperty(Document.prototype, 'scrollingElement', original)
+    }
+  })
+
+  it('falls back to documentElement when the document reports no scrollingElement', () => {
+    // jsdom's default, and a real state for a document with no browsing context. The fallback is
+    // what keeps the resolver from handing back null.
+    stubWindow({ scrollY: 0, innerHeight: 800, scrollHeight: 20_000 })
+    const viewport = createWindowViewport(window)
+    expect(viewport.getScrollportElement()).toBe(document.documentElement)
+    expect(viewport.getMaxScrollOffset()).toBe(19_200)
   })
 })
 

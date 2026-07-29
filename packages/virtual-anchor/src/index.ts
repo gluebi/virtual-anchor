@@ -26,7 +26,7 @@ export {
 } from './anchor.js'
 export type { AnchorGeometry } from './anchor.js'
 
-export { createElementViewport, createWindowViewport } from './viewport.js'
+export { createElementViewport, createWindowViewport, documentScrollElement } from './viewport.js'
 export type { Viewport } from './viewport.js'
 
 export { createResizer } from './resizer.js'

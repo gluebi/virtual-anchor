@@ -18,7 +18,7 @@ import { VirtualList } from 'virtual-anchor/react'     // React 19 adapter
 The React entry needs React 19; the core entry needs nothing. React is an *optional* peer
 dependency, so using the core alone pulls in no framework and warns about none.
 
-Minified and brotlied, including its one dependency: **8.42 kB** for the core entry, **10.36 kB**
+Minified and brotlied, including its one dependency: **8.45 kB** for the core entry, **10.35 kB**
 if you import the React adapter (which contains the core — they share a chunk rather than
 duplicating it). Both are enforced as budgets in CI, so this figure cannot drift from the
 truth.
@@ -230,8 +230,9 @@ The handle is the scroll *API*; `scrollerRef` is the *node*, for sharing the
 scrollport with something else — pull-to-refresh, a scroll-linked gradient, a
 third-party scroll library. Observe through the ref and move through the handle:
 writing `scrollTop` yourself means fighting the convergence loop. With
-`windowScroller` it resolves to `document.scrollingElement`, since the page is what
-scrolls.
+`windowScroller` it resolves to whatever the document actually scrolls, which the
+`Viewport` decides in one place — so the node you are handed is the same one the
+library clamps and fingerprints against, in quirks mode as well as standards.
 
 `onEngineReady` hands out the `Engine`, which is what `useItemVisibility(engine,
 key)` wants — a callback rather than a handle field because that hook subscribes

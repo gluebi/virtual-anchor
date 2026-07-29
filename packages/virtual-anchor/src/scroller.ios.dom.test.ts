@@ -85,6 +85,7 @@ const harness = (options: { max?: number } = {}): Harness => {
     observeSize: () => () => {},
     getGateTarget: () => element,
     getElement: () => element,
+    getScrollportElement: () => element,
     getWindow: () => window,
     getDevicePixelRatio: () => 2,
   }

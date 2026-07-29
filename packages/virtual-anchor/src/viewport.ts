@@ -1,6 +1,25 @@
 import { devicePixelRatioOf } from './env.js'
 
 /**
+ * The element a document actually scrolls.
+ *
+ * `documentElement` in standards mode and `body` in quirks mode, which is what
+ * `scrollingElement` exists to tell you. Exported because three places used to answer this
+ * question separately and disagreed: the window viewport clamped against
+ * `documentElement.scrollHeight`, the React adapter fingerprinted the layout from
+ * `documentElement`, and `VirtualList` handed `scrollingElement` to `scrollerRef`. In standards
+ * mode all three coincide, so the disagreement was invisible — and wrong in quirks mode, where
+ * `documentElement.scrollHeight` is not the page's scroll extent at all.
+ *
+ * Narrowed with `instanceof` rather than asserted: the property is typed `Element | null` and
+ * really is null on a document with no browsing context.
+ */
+export function documentScrollElement(view: Window): HTMLElement {
+  const scrolling = view.document.scrollingElement
+  return scrolling instanceof HTMLElement ? scrolling : view.document.documentElement
+}
+
+/**
  * A scroll container, whether that is an element with `overflow: auto` or the
  * document itself.
  *
@@ -28,7 +47,6 @@ export interface Viewport {
   /** Write the scroll offset. Fractional values are passed through as-is. */
   setScrollOffset(offset: number): void
   addEventListener(type: 'scroll' | 'scrollend', listener: () => void): () => void
-  /** The element measurements and observers should be scoped to. */
   /**
    * The element items are measured against and input listeners attach to.
    *
@@ -36,6 +54,17 @@ export interface Viewport {
    * thing whose size equals {@link getViewportSize} — see {@link observeSize}.
    */
   getElement(): HTMLElement | null
+  /**
+   * The element that scrolls — the scrollport itself.
+   *
+   * Distinct from {@link getElement} on purpose. That one is the measurement and input scope,
+   * which for a document scroller is `documentElement` and must stay so; this one is the node
+   * that actually scrolls, which in quirks mode is `body`. They coincide in standards mode.
+   *
+   * This is what a consumer should be handed when it asks for the scroller, and what the layout
+   * fingerprint is taken from, since it is the scrollport's width that decides how text wraps.
+   */
+  getScrollportElement(): HTMLElement | null
   /**
    * Observe changes to the *scrollport's* size.
    *
@@ -123,6 +152,8 @@ export function createElementViewport(element: HTMLElement): Viewport {
       }
     },
     getGateTarget: () => element,
+    // The element is both the measurement scope and the thing that scrolls.
+    getScrollportElement: () => element,
     getWindow: () => element.ownerDocument.defaultView,
     getDevicePixelRatio: () => devicePixelRatioOf(element.ownerDocument.defaultView),
   }
@@ -142,7 +173,12 @@ export function createWindowViewport(view: Window): Viewport {
   return {
     getScrollOffset: () => view.scrollY,
     getViewportSize: () => view.innerHeight,
-    getMaxScrollOffset: () => Math.max(0, doc.scrollHeight - view.innerHeight),
+    // Through the resolver, not `doc`: in quirks mode `documentElement.scrollHeight` is not the
+    // page's scroll extent, so clamping against it is the TanStack #1001 failure this interface's
+    // own doc warns about. Resolved per call rather than captured, since `body` may not exist yet
+    // when a viewport is constructed.
+    getMaxScrollOffset: () =>
+      Math.max(0, documentScrollElement(view).scrollHeight - view.innerHeight),
     setScrollOffset: (offset) => {
       view.scrollTo({ top: offset, behavior: 'auto' })
     },
@@ -171,6 +207,7 @@ export function createWindowViewport(view: Window): Viewport {
       }
     },
     getElement: () => doc,
+    getScrollportElement: () => documentScrollElement(view),
     getWindow: () => view,
     getDevicePixelRatio: () => devicePixelRatioOf(view),
   }

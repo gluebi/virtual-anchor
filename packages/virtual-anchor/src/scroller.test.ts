@@ -51,6 +51,7 @@ const fakeViewport = (
     observeSize: () => () => {},
     getGateTarget: () => null,
     getElement: () => null,
+    getScrollportElement: () => null,
     getWindow: () => null,
     getDevicePixelRatio: () => 1,
   }
