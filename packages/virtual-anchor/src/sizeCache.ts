@@ -54,8 +54,12 @@ export interface SizeCacheOptions {
    * because the first target is computed entirely from estimates.
    *
    * When omitted, the cache estimates from the median of what it has measured.
+   *
+   * May return `undefined` for an item it has no opinion about — a key the caller
+   * cannot resolve to data, say — which falls back to `defaultEstimate` or the
+   * learned median rather than making the caller reproduce that choice.
    */
-  estimateSize?: (index: number, key: ItemKey) => number
+  estimateSize?: (index: number, key: ItemKey) => number | undefined
   /** Fallback before anything is measured and with no `estimateSize`. */
   defaultEstimate?: number
   layoutSignature?: string
@@ -106,7 +110,20 @@ export class SizeCache {
   #liftStart = 0
 
   #gap: number
+  /**
+   * The estimate actually used for unmeasured items: the caller's default until the
+   * median estimator has learned better, and the median after that.
+   */
   #estimate: number
+  /**
+   * The caller's `defaultEstimate`, remembered separately from `#estimate`.
+   *
+   * Two fields rather than one because `setDefaultEstimate` has to tell "the caller
+   * changed their mind" from "the estimator has since learned a median". Sharing the
+   * slot meant a caller passing a constant every render compared it against a learned
+   * median, found them different, and overwrote it — rebuilding the tree each time.
+   */
+  #defaultEstimate: number
   #estimateSize: SizeCacheOptions['estimateSize']
   #layoutSignature: string
 
@@ -117,7 +134,8 @@ export class SizeCache {
 
   constructor(options: SizeCacheOptions = {}) {
     this.#gap = options.gap ?? 0
-    this.#estimate = options.defaultEstimate ?? DEFAULT_ESTIMATE
+    this.#defaultEstimate = options.defaultEstimate ?? DEFAULT_ESTIMATE
+    this.#estimate = this.#defaultEstimate
     this.#estimateSize = options.estimateSize
     this.#layoutSignature = options.layoutSignature ?? ''
 
@@ -319,6 +337,55 @@ export class SizeCache {
   setGap(gap: number): boolean {
     if (gap === this.#gap) return false
     this.#gap = gap
+    this.#rebuild()
+    return true
+  }
+
+  /**
+   * Install a new estimator, after construction.
+   *
+   * Needed because the React adapter cannot supply this at construction — the engine is
+   * derived from a scroll element that does not exist on the first render — so without a
+   * setter the option was accepted and silently dropped.
+   *
+   * **The rebuild is not optional.** `setSize` folds a first measurement in
+   * incrementally, as `size - (previous ?? estimateFor(index, key))`, so a slot built
+   * with the old estimate and adjusted with the new one is wrong by the difference, for
+   * good. Recomputing every slot here is what keeps the tree honest.
+   *
+   * The reference check is what makes this safe to call every render, exactly as in
+   * `setKeys` — but it does mean the caller must hand over a stable function rather than
+   * a fresh closure each time, or every render pays an O(n) rebuild.
+   *
+   * There is deliberately no way to *unset* the estimator: `gap` and `layoutSignature`
+   * behave the same way, since an absent option and a cleared one are indistinguishable
+   * to `setOptions`.
+   *
+   * @returns whether the estimator changed.
+   */
+  setEstimateSize(estimateSize: SizeCacheOptions['estimateSize']): boolean {
+    if (estimateSize === this.#estimateSize) return false
+    this.#estimateSize = estimateSize
+    this.#rebuild()
+    return true
+  }
+
+  /**
+   * Change the fallback estimate, after construction.
+   *
+   * Only takes effect while the median estimator has learned nothing — once it has, its
+   * median comes from real measurements and is strictly the better number, so the
+   * caller's default becomes bookkeeping. Recorded either way, so the comparison above
+   * stays answerable.
+   *
+   * @returns whether the estimate used for unmeasured items changed.
+   */
+  setDefaultEstimate(defaultEstimate: number): boolean {
+    if (defaultEstimate === this.#defaultEstimate) return false
+    this.#defaultEstimate = defaultEstimate
+
+    if (this.#lastEstimateAt !== 0 || defaultEstimate === this.#estimate) return false
+    this.#estimate = defaultEstimate
     this.#rebuild()
     return true
   }

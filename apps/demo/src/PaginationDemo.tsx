@@ -241,7 +241,7 @@ export function PaginationDemo(): ReactNode {
         <VirtualList<Comment>
           items={items}
           getItemKey={(comment) => comment.id}
-          estimateSize={(comment) => 90 + comment.body.length * 70}
+          estimateSize={(comment) => 56 + comment.body.length * 53}
           gap={12}
           scrollPaddingStart={headerHeight}
           // The whole collection either way, so a screen reader hears "comment 51 of 12,000"

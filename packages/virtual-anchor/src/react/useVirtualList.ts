@@ -278,6 +278,44 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     containerElement.current = element
   }, [])
 
+  /**
+   * The consumer's `estimateSize`, read through a box.
+   *
+   * Assigned during render because the wrapper below is called during render too — pushing
+   * options into the engine rebuilds the offset tree, which asks for estimates immediately.
+   */
+  const latestEstimateSize = useRef(estimateSize)
+  latestEstimateSize.current = estimateSize
+
+  /**
+   * The estimator handed to the engine: (item, index) translated to its (index, key).
+   *
+   * Keyed on the data rather than on the consumer's function, which is the whole subtlety
+   * here. A call site naturally writes `estimateSize={(comment) => …}` — a fresh closure every
+   * render — and the cache compares this by reference to decide whether to rebuild. Depending
+   * on that identity meant rebuilding every slot, republishing, and re-aiming any in-flight
+   * scroll *on every render*, which is not merely slow: it makes a smooth `scrollToKey` chase a
+   * target that keeps moving, and the accuracy matrix failed by a pixel.
+   *
+   * `itemByKey` is the honest signal instead. An estimate is a pure function of the item, so it
+   * can only really change when the data does — and when the data does, `setKeys` rebuilds
+   * anyway, so the two coincide.
+   *
+   * Returns `undefined` for a key it cannot resolve, rather than reproducing the cache's own
+   * fallback here — the cache already prefers `defaultEstimate` and then its learned median.
+   */
+  const hasEstimateSize = estimateSize !== undefined
+  const estimateForIndex = useMemo(
+    () =>
+      hasEstimateSize
+        ? (index: number, key: ItemKey): number | undefined => {
+            const item = itemByKey.get(key)
+            return item === undefined ? undefined : latestEstimateSize.current?.(item, index)
+          }
+        : undefined,
+    [hasEstimateSize, itemByKey],
+  )
+
   // Push option changes into the engine during render rather than in an effect,
   // so a prepend is reflected in the very first commit that renders it — one
   // frame of stale positions is exactly the visible jump this design avoids.
@@ -285,14 +323,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     engine.setOptions({
       keys,
       geometry,
-      ...(estimateSize === undefined
-        ? {}
-        : {
-            estimateSize: (index: number, key: ItemKey) => {
-              const item = itemByKey.get(key)
-              return item === undefined ? (defaultEstimate ?? 120) : estimateSize(item, index)
-            },
-          }),
+      ...(estimateForIndex === undefined ? {} : { estimateSize: estimateForIndex }),
       ...(defaultEstimate === undefined ? {} : { defaultEstimate }),
       ...(gap === undefined ? {} : { gap }),
       ...(buffer === undefined ? {} : { buffer }),

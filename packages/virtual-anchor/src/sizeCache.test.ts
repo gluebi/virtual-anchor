@@ -377,6 +377,96 @@ describe('SizeCache window changes', () => {
   })
 })
 
+describe('SizeCache estimates set after construction', () => {
+  it('rebuilds when the estimator changes', () => {
+    // The whole of issue #8: the React adapter cannot supply this at construction, because the
+    // engine is derived from a scroll element that does not exist on the first render.
+    const cache = new SizeCache({ keys: keysFor(3), defaultEstimate: 100 })
+    expect(cache.totalSize()).toBe(300)
+
+    expect(cache.setEstimateSize(() => 250)).toBe(true)
+    expect(cache.totalSize()).toBe(750)
+    expect(cache.offsetOf(2)).toBe(500)
+  })
+
+  it('ignores an unchanged estimator reference', () => {
+    // What makes this callable on every render: the adapter memoises the function, so the
+    // common case must cost nothing rather than rebuilding 50,000 slots.
+    const estimateSize = (): number => 250
+    const cache = new SizeCache({ keys: keysFor(3), estimateSize })
+    expect(cache.setEstimateSize(estimateSize)).toBe(false)
+  })
+
+  it('falls back to the default for an item the estimator declines', () => {
+    // A key the caller cannot resolve to data. Returning `undefined` rather than a number
+    // keeps the choice of fallback in one place.
+    const cache = new SizeCache({
+      keys: keysFor(3),
+      defaultEstimate: 100,
+      estimateSize: (index) => (index === 1 ? undefined : 300),
+    })
+
+    expect(cache.sizeOf(0)).toBe(300)
+    expect(cache.sizeOf(1)).toBe(100)
+    expect(cache.totalSize()).toBe(700)
+  })
+
+  it('keeps offsets exact when an item is measured after the estimator changed', () => {
+    // The regression that makes the rebuild non-optional. `setSize` folds a first measurement
+    // in incrementally, as `size - (previous ?? estimateFor(index, key))`. A slot built with
+    // the old estimate and adjusted with the new one is wrong by the difference — permanently,
+    // since nothing recomputes it.
+    const cache = new SizeCache({ keys: keysFor(5), defaultEstimate: 100 })
+    cache.setEstimateSize(() => 400)
+    cache.setSize(2, 137)
+
+    // 400 + 400 + 137 + 400 + 400
+    expect(cache.totalSize()).toBe(1737)
+    expect(cache.offsetOf(3)).toBe(937)
+    // The invariant everything else rests on.
+    for (let index = 0; index < 5; index++) {
+      expect(cache.indexAt(cache.offsetOf(index))).toBe(index)
+    }
+  })
+
+  it('changes the fallback estimate while nothing has been learned', () => {
+    const cache = new SizeCache({ keys: keysFor(3), defaultEstimate: 100 })
+    expect(cache.setDefaultEstimate(200)).toBe(true)
+    expect(cache.estimate).toBe(200)
+    expect(cache.totalSize()).toBe(600)
+    expect(cache.setDefaultEstimate(200)).toBe(false)
+  })
+
+  it('does not clobber a learned median with the caller’s default', () => {
+    // The trap that made two fields necessary. The adapter passes the same `defaultEstimate`
+    // on every render; compared against a learned median it differs every time, so sharing one
+    // slot meant overwriting the better number and rebuilding the tree on each render.
+    const cache = new SizeCache({ keys: keysFor(100), defaultEstimate: 100 })
+    for (const index of [0, 1, 2, 3]) cache.setSize(index, 200)
+    expect(cache.refreshEstimate(0)).toBe(true)
+    expect(cache.estimate).toBe(200)
+
+    // A *different* default, so this is genuinely refused rather than short-circuited as
+    // unchanged: the median came from real measurements and is the better number.
+    expect(cache.setDefaultEstimate(150)).toBe(false)
+    expect(cache.estimate).toBe(200)
+  })
+
+  it('does not rebuild when the effective estimate would not move', () => {
+    // `clearAll` forgets the measurements and re-arms the estimator, but keeps the median it
+    // learned — a median from the old layout still beats the caller's opening guess. Setting a
+    // default equal to it is then a no-op rather than a rebuild.
+    const cache = new SizeCache({ keys: keysFor(100), defaultEstimate: 100 })
+    for (const index of [0, 1, 2, 3]) cache.setSize(index, 200)
+    cache.refreshEstimate(0)
+    cache.clearAll()
+    expect(cache.estimate).toBe(200)
+
+    expect(cache.setDefaultEstimate(200)).toBe(false)
+    expect(cache.estimate).toBe(200)
+  })
+})
+
 describe('SizeCache median estimator', () => {
   const cacheWith = (sizes: readonly number[]): SizeCache => {
     const cache = new SizeCache({ keys: keysFor(100), defaultEstimate: 100 })

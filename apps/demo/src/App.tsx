@@ -571,7 +571,10 @@ export function App(): ReactNode {
         <VirtualList<Comment>
           items={items}
           getItemKey={(comment) => comment.id}
-          estimateSize={(comment) => 90 + comment.body.length * 70}
+          // Fitted against measured heights — 100px for one paragraph, 796px for fourteen —
+          // rather than guessed. It was guessed, and wrong by 270px at the long end, which went
+          // unnoticed for as long as the option was being silently dropped.
+          estimateSize={(comment) => 56 + comment.body.length * 53}
           gap={12}
           scrollPaddingStart={CONFIG.paddingStart === 0 ? 0 : headerHeight}
           {...(restoredSnapshot === undefined ? {} : { sizeSnapshot: restoredSnapshot })}

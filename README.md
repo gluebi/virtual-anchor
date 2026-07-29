@@ -18,7 +18,7 @@ import { VirtualList } from 'virtual-anchor/react'     // React 19 adapter
 The React entry needs React 19; the core entry needs nothing. React is an *optional* peer
 dependency, so using the core alone pulls in no framework and warns about none.
 
-Minified and brotlied, including its one dependency: **8.39 kB** for the core entry, **10.31 kB**
+Minified and brotlied, including its one dependency: **8.49 kB** for the core entry, **10.39 kB**
 if you import the React adapter (which contains the core — they share a chunk rather than
 duplicating it). Both are enforced as budgets in CI, so this figure cannot drift from the
 truth.
@@ -77,7 +77,7 @@ function Thread({ comments, totalCount, firstLoadedPosition }) {
     <VirtualList
       items={comments}
       getItemKey={(comment) => comment.id}
-      estimateSize={(comment) => 90 + comment.paragraphs * 70}
+      estimateSize={(comment) => 56 + comment.paragraphs * 53}
       gap={12}
       scrollPaddingStart={64}              // clear a sticky header
       totalCount={totalCount}              // the whole thread, for aria-setsize
