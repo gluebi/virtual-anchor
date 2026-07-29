@@ -27,6 +27,13 @@ const EPS = 1e-6
  */
 const INVERSION_RUNS = { numRuns: 1000 }
 
+/** A 100-item cache with the given prefix measured, for the median estimator's gates. */
+const cacheWith = (sizes: readonly number[]): SizeCache => {
+  const cache = new SizeCache({ keys: keysFor(100), defaultEstimate: 100 })
+  sizes.forEach((s, i) => cache.setSize(i, s))
+  return cache
+}
+
 describe('SizeCache offsets', () => {
   it('starts the first item at zero', () => {
     fc.assert(
@@ -438,16 +445,12 @@ describe('SizeCache estimates set after construction', () => {
   })
 
   it('does not clobber a learned median with the caller’s default', () => {
-    // The trap that made two fields necessary. The adapter passes the same `defaultEstimate`
-    // on every render; compared against a learned median it differs every time, so sharing one
-    // slot meant overwriting the better number and rebuilding the tree on each render.
-    const cache = new SizeCache({ keys: keysFor(100), defaultEstimate: 100 })
-    for (const index of [0, 1, 2, 3]) cache.setSize(index, 200)
+    // A median measured from real items beats an opening guess that arrives later, so this is
+    // refused. A *different* value, so it is genuinely refused rather than merely unchanged.
+    const cache = cacheWith([200, 200, 200, 200])
     expect(cache.refreshEstimate(0)).toBe(true)
     expect(cache.estimate).toBe(200)
 
-    // A *different* default, so this is genuinely refused rather than short-circuited as
-    // unchanged: the median came from real measurements and is the better number.
     expect(cache.setDefaultEstimate(150)).toBe(false)
     expect(cache.estimate).toBe(200)
   })
@@ -456,8 +459,7 @@ describe('SizeCache estimates set after construction', () => {
     // `clearAll` forgets the measurements and re-arms the estimator, but keeps the median it
     // learned — a median from the old layout still beats the caller's opening guess. Setting a
     // default equal to it is then a no-op rather than a rebuild.
-    const cache = new SizeCache({ keys: keysFor(100), defaultEstimate: 100 })
-    for (const index of [0, 1, 2, 3]) cache.setSize(index, 200)
+    const cache = cacheWith([200, 200, 200, 200])
     cache.refreshEstimate(0)
     cache.clearAll()
     expect(cache.estimate).toBe(200)
@@ -468,12 +470,6 @@ describe('SizeCache estimates set after construction', () => {
 })
 
 describe('SizeCache median estimator', () => {
-  const cacheWith = (sizes: readonly number[]): SizeCache => {
-    const cache = new SizeCache({ keys: keysFor(100), defaultEstimate: 100 })
-    sizes.forEach((s, i) => cache.setSize(i, s))
-    return cache
-  }
-
   it('waits until measured content exceeds the viewport', () => {
     const cache = cacheWith([200, 200])
     // 400px measured against an 800px viewport: too early to trust.

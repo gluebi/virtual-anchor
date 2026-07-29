@@ -279,42 +279,40 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
   }, [])
 
   /**
-   * The consumer's `estimateSize`, read through a box.
+   * The consumer's `estimateSize` and the key→item map, read through boxes.
    *
    * Assigned during render because the wrapper below is called during render too — pushing
    * options into the engine rebuilds the offset tree, which asks for estimates immediately.
    */
   const latestEstimateSize = useRef(estimateSize)
   latestEstimateSize.current = estimateSize
+  const latestItemByKey = useRef(itemByKey)
+  latestItemByKey.current = itemByKey
 
   /**
    * The estimator handed to the engine: (item, index) translated to its (index, key).
    *
-   * Keyed on the data rather than on the consumer's function, which is the whole subtlety
-   * here. A call site naturally writes `estimateSize={(comment) => …}` — a fresh closure every
-   * render — and the cache compares this by reference to decide whether to rebuild. Depending
-   * on that identity meant rebuilding every slot, republishing, and re-aiming any in-flight
-   * scroll *on every render*, which is not merely slow: it makes a smooth `scrollToKey` chase a
-   * target that keeps moving, and the accuracy matrix failed by a pixel.
+   * Permanently stable, and every input read through a box, because the cache compares this by
+   * reference to decide whether to rebuild its offset tree. Depending on anything that changes
+   * per render meant rebuilding every slot, republishing, and re-aiming any in-flight scroll —
+   * which is not merely slow: it makes a smooth `scrollToKey` chase a target that keeps moving,
+   * and the accuracy matrix failed by a pixel.
    *
-   * `itemByKey` is the honest signal instead. An estimate is a pure function of the item, so it
-   * can only really change when the data does — and when the data does, `setKeys` rebuilds
-   * anyway, so the two coincide.
+   * A call site naturally writes `estimateSize={(comment) => …}`, a fresh closure each render,
+   * so that identity was never usable. `itemByKey` is no better: it changes exactly when `keys`
+   * does, and `setEstimateSize` runs *before* `setKeys` — so a data change rebuilt once against
+   * the outgoing key set and then again against the incoming one, the first pass wasted
+   * entirely. Whether the estimator is installed at all is decided at the call below, by
+   * omitting the option, which is what leaves the median estimator enabled for a list that
+   * supplies no estimate of its own.
    *
    * Returns `undefined` for a key it cannot resolve, rather than reproducing the cache's own
    * fallback here — the cache already prefers `defaultEstimate` and then its learned median.
    */
-  const hasEstimateSize = estimateSize !== undefined
-  const estimateForIndex = useMemo(
-    () =>
-      hasEstimateSize
-        ? (index: number, key: ItemKey): number | undefined => {
-            const item = itemByKey.get(key)
-            return item === undefined ? undefined : latestEstimateSize.current?.(item, index)
-          }
-        : undefined,
-    [hasEstimateSize, itemByKey],
-  )
+  const estimateForIndex = useCallback((index: number, key: ItemKey): number | undefined => {
+    const item = latestItemByKey.current.get(key)
+    return item === undefined ? undefined : latestEstimateSize.current?.(item, index)
+  }, [])
 
   // Push option changes into the engine during render rather than in an effect,
   // so a prepend is reflected in the very first commit that renders it — one
@@ -323,7 +321,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     engine.setOptions({
       keys,
       geometry,
-      ...(estimateForIndex === undefined ? {} : { estimateSize: estimateForIndex }),
+      ...(estimateSize === undefined ? {} : { estimateSize: estimateForIndex }),
       ...(defaultEstimate === undefined ? {} : { defaultEstimate }),
       ...(gap === undefined ? {} : { gap }),
       ...(buffer === undefined ? {} : { buffer }),
@@ -341,10 +339,11 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
    * behaviour: options are pushed into the engine *during render*, so a range has usually been
    * published before any effect runs. Seeding from the store would adopt that first range
    * silently and the consumer would never learn where the list started. Starting from the empty
-   * sentinel reports it — and because the memory outlives the subscription, resubscribing when
-   * the callback identity changes still reports nothing.
+   * sentinel reports it.
    */
   const reportedRange = useRef<readonly [number, number]>(EMPTY_STATE.visibleRange)
+  const latestRangeListener = useRef(onVisibleRangeChange)
+  latestRangeListener.current = onVisibleRangeChange
 
   /**
    * Report visible-range changes straight from the store.
@@ -353,21 +352,26 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
    *
    * Compared element-wise, never by identity: `computeRanges` allocates a fresh tuple on every
    * publish, so a reference check would fire on every scroll frame.
+   *
+   * Keyed on the engine alone, with the callback read through a box: a call site passing an
+   * inline arrow would otherwise unsubscribe and resubscribe on every render, re-reading the
+   * store and allocating two closures each time. The cost of that is small, but this file goes
+   * out of its way to avoid exactly this shape elsewhere.
    */
   useEffect(() => {
-    if (!engine || !onVisibleRangeChange) return
+    if (!engine) return
 
     const notify = (range: readonly [number, number]): void => {
       if (range[0] === reportedRange.current[0] && range[1] === reportedRange.current[1]) return
       reportedRange.current = range
-      onVisibleRangeChange(range)
+      latestRangeListener.current?.(range)
     }
 
     notify(engine.store.getState().visibleRange)
     return engine.store.subscribe((next) => {
       notify(next.visibleRange)
     })
-  }, [engine, onVisibleRangeChange])
+  }, [engine])
 
   useEffect(() => engine?.mount(), [engine])
 

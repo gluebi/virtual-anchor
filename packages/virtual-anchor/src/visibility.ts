@@ -423,16 +423,7 @@ export class VisibilityTracker {
 
       const passing =
         input.gated &&
-        satisfies(
-          rule,
-          item,
-          bandStart,
-          bandEnd,
-          overlap,
-          itemFraction,
-          viewportFraction,
-          item.measured,
-        )
+        satisfies(rule, item, bandStart, bandEnd, overlap, itemFraction, viewportFraction)
 
       if (passing) {
         state.leavePendingSince = null
@@ -607,11 +598,10 @@ function event(
  * and holding it back would delay every event on a fast scroll into new
  * territory.
  *
- * `edge` is allowed through unmeasured for the same reason, and because the
- * alternative is worse than approximate: gating it would mean an item never
- * reports until it has been measured, which for read tracking reads as "not
- * read yet" rather than "not sure yet". The event carries `measured` truthfully,
- * so a consumer that wants only confirmed geometry can filter on it.
+ * `edge` is allowed through unmeasured for the same reason, and because gating it
+ * would mean an item never reports until measured — which for read tracking reads
+ * as "not read yet" rather than "not sure yet". The event carries `measured`
+ * truthfully, so a consumer wanting only confirmed geometry can filter on it.
  *
  * Takes the raw geometry as well as the fractions, because an edge rule keys on
  * where one edge *is* rather than on how much of the item shows.
@@ -624,23 +614,25 @@ function satisfies(
   overlap: number,
   itemFraction: number,
   viewportFraction: number,
-  measured: boolean,
 ): boolean {
+  // Handled before the shared guard below, because it is the one rule that can be satisfied
+  // with no overlap at all: an edge resting exactly on the band boundary overlaps it by
+  // nothing, which is precisely the case the tolerance exists to admit.
+  if (rule.mode === 'edge') {
+    const tolerance = rule.tolerancePx ?? DEFAULT_EDGE_TOLERANCE_PX
+    const offset = rule.edge === 'end' ? item.start + item.size : item.start
+    return offset >= bandStart - tolerance && offset <= bandEnd + tolerance
+  }
+
+  if (overlap <= 0) return false
+
   switch (rule.mode) {
-    // Deliberately outside the overlap guard the other three share: an edge resting exactly on
-    // the band boundary overlaps it by nothing, and is precisely the case the tolerance exists
-    // to admit.
-    case 'edge': {
-      const tolerance = rule.tolerancePx ?? DEFAULT_EDGE_TOLERANCE_PX
-      const offset = rule.edge === 'end' ? item.start + item.size : item.start
-      return offset >= bandStart - tolerance && offset <= bandEnd + tolerance
-    }
     case 'any':
-      return overlap > 0
+      return true
     case 'full':
-      return overlap > 0 && measured && itemFraction >= 1 - FULL_EPSILON
+      return item.measured && itemFraction >= 1 - FULL_EPSILON
     case 'fraction': {
-      if (overlap <= 0 || !measured) return false
+      if (!item.measured) return false
       const value = rule.of === 'item' ? itemFraction : viewportFraction
       return value >= rule.fraction
     }

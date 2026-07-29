@@ -573,12 +573,15 @@ export function createEngine(initial: EngineOptions): Engine {
       // installing the estimator afterwards would rebuild a second time in the same call —
       // the first pass having used an estimate already known to be stale.
       //
-      // These were read at construction only, which made both options dead through the
-      // React adapter: it cannot supply them there, because the engine is derived from a
-      // scroll element that does not exist on the first render.
-      const estimateChanged =
-        (next.estimateSize !== undefined && cache.setEstimateSize(next.estimateSize)) ||
-        (next.defaultEstimate !== undefined && cache.setDefaultEstimate(next.defaultEstimate))
+      // Both evaluated, never short-circuited. `a || b` here would skip `setDefaultEstimate`
+      // on exactly the call that installs the estimator, which is the first one — the only
+      // call where the tree is still empty and applying it is free. The default would then
+      // land on some later render and pay a full rebuild plus an anchor-restoring publish.
+      const estimatorChanged =
+        next.estimateSize !== undefined && cache.setEstimateSize(next.estimateSize)
+      const defaultChanged =
+        next.defaultEstimate !== undefined && cache.setDefaultEstimate(next.defaultEstimate)
+      const estimateChanged = estimatorChanged || defaultChanged
 
       if (snapshot !== undefined && !snapshotRestored) {
         snapshotRestored = true

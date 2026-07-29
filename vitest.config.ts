@@ -64,24 +64,10 @@ export default defineConfig({
         // The uncovered branch is the production build, which by definition is not this build.
         'packages/virtual-anchor/src/trace.ts': { branches: 80, functions: 100, lines: 100 },
 
-        // The whole React adapter, with nothing left over. It reached 100% only once
-        // `estimateSize` genuinely worked: while the option was being silently dropped, the
-        // wrapper that translates it was unreachable, and no test could have covered it.
-        'packages/virtual-anchor/src/react/useItemVisibility.ts': {
-          branches: 100,
-          functions: 100,
-          lines: 100,
-        },
-        'packages/virtual-anchor/src/react/useVirtualList.ts': {
-          branches: 100,
-          functions: 100,
-          lines: 100,
-        },
-        'packages/virtual-anchor/src/react/VirtualList.tsx': {
-          branches: 100,
-          functions: 100,
-          lines: 100,
-        },
+        // The whole React adapter, with nothing left over.
+        'packages/virtual-anchor/src/react/useItemVisibility.ts': { branches: 100, functions: 100, lines: 100 },
+        'packages/virtual-anchor/src/react/useVirtualList.ts': { branches: 100, functions: 100, lines: 100 },
+        'packages/virtual-anchor/src/react/VirtualList.tsx': { branches: 100, functions: 100, lines: 100 },
       },
     },
   },

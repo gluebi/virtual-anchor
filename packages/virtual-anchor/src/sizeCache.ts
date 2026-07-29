@@ -111,19 +111,10 @@ export class SizeCache {
 
   #gap: number
   /**
-   * The estimate actually used for unmeasured items: the caller's default until the
-   * median estimator has learned better, and the median after that.
+   * The estimate used for unmeasured items: the caller's default until the median
+   * estimator has learned better, and the median after that.
    */
   #estimate: number
-  /**
-   * The caller's `defaultEstimate`, remembered separately from `#estimate`.
-   *
-   * Two fields rather than one because `setDefaultEstimate` has to tell "the caller
-   * changed their mind" from "the estimator has since learned a median". Sharing the
-   * slot meant a caller passing a constant every render compared it against a learned
-   * median, found them different, and overwrote it — rebuilding the tree each time.
-   */
-  #defaultEstimate: number
   #estimateSize: SizeCacheOptions['estimateSize']
   #layoutSignature: string
 
@@ -134,8 +125,7 @@ export class SizeCache {
 
   constructor(options: SizeCacheOptions = {}) {
     this.#gap = options.gap ?? 0
-    this.#defaultEstimate = options.defaultEstimate ?? DEFAULT_ESTIMATE
-    this.#estimate = this.#defaultEstimate
+    this.#estimate = options.defaultEstimate ?? DEFAULT_ESTIMATE
     this.#estimateSize = options.estimateSize
     this.#layoutSignature = options.layoutSignature ?? ''
 
@@ -373,17 +363,15 @@ export class SizeCache {
   /**
    * Change the fallback estimate, after construction.
    *
-   * Only takes effect while the median estimator has learned nothing — once it has, its
-   * median comes from real measurements and is strictly the better number, so the
-   * caller's default becomes bookkeeping. Recorded either way, so the comparison above
-   * stays answerable.
+   * Refused once the median estimator has learned something: its median comes from real
+   * measurements and is strictly the better number for unmeasured items, so a caller's
+   * opening guess arriving later does not get to replace it. `#lastEstimateAt` is that
+   * "has learned" signal, which is also why a caller re-passing the same constant on
+   * every render costs nothing here.
    *
    * @returns whether the estimate used for unmeasured items changed.
    */
   setDefaultEstimate(defaultEstimate: number): boolean {
-    if (defaultEstimate === this.#defaultEstimate) return false
-    this.#defaultEstimate = defaultEstimate
-
     if (this.#lastEstimateAt !== 0 || defaultEstimate === this.#estimate) return false
     this.#estimate = defaultEstimate
     this.#rebuild()

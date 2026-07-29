@@ -1227,13 +1227,21 @@ describe('VirtualList onEngineReady', () => {
 })
 
 describe('onVisibleRangeChange', () => {
-  const Harness = ({ onVisibleRangeChange }: { onVisibleRangeChange: (r: readonly [number, number]) => void }) => {
+  /** Captures the live getter, so a test can read it after a scroll that provoked no render. */
+  const captured: { read?: () => readonly [number, number] } = {}
+
+  const Harness = ({
+    onVisibleRangeChange,
+  }: {
+    onVisibleRangeChange?: (r: readonly [number, number]) => void
+  }) => {
     const list = useVirtualList({
       items: comments(500),
       getItemKey: (c) => c.id,
       estimateSize: () => 100,
-      onVisibleRangeChange,
+      ...(onVisibleRangeChange === undefined ? {} : { onVisibleRangeChange }),
     })
+    captured.read = list.getVisibleRange
     return (
       <div ref={list.scrollRef} data-testid="scroller">
         <div ref={list.containerRef}>
@@ -1241,7 +1249,8 @@ describe('onVisibleRangeChange', () => {
             <div key={rendered.key} ref={list.itemRef(rendered.key)} />
           ))}
         </div>
-        <span data-testid="live">{list.getVisibleRange().join(',')}</span>
+        {/* The value as React last saw it, for contrast with the live getter. */}
+        <span data-testid="rendered">{list.getVisibleRange().join(',')}</span>
       </div>
     )
   }
@@ -1306,29 +1315,7 @@ describe('onVisibleRangeChange', () => {
   })
 
   it('reads live through getVisibleRange, which the render snapshot cannot', () => {
-    const captured: { read?: () => readonly [number, number] } = {}
-
-    const Capture = () => {
-      const list = useVirtualList({
-        items: comments(500),
-        getItemKey: (c) => c.id,
-        estimateSize: () => 100,
-      })
-      captured.read = list.getVisibleRange
-      return (
-        <div ref={list.scrollRef} data-testid="scroller">
-          <div ref={list.containerRef}>
-            {list.items.map((rendered) => (
-              <div key={rendered.key} ref={list.itemRef(rendered.key)} />
-            ))}
-          </div>
-          {/* The same value as React last saw it, for contrast. */}
-          <span data-testid="rendered">{list.getVisibleRange().join(',')}</span>
-        </div>
-      )
-    }
-
-    render(<Capture />)
+    render(<Harness />)
     const rendered = screen.getByTestId('rendered').textContent
 
     scrollTo(3000)
