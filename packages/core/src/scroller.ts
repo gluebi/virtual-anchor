@@ -112,8 +112,14 @@ export interface Scroller {
   dispose(): void
 }
 
-/** One frame's worth of convergence decision, as the trace reports it. */
-type StepTrace = Record<string, unknown> & {
+/**
+ * One frame's worth of convergence decision, as the trace reports it.
+ *
+ * Extends the sink's payload type so the named fields survive while still satisfying it —
+ * an interface without that is not assignable to `Record<string, unknown>`, and a bare
+ * type alias trips `consistent-type-definitions`.
+ */
+interface StepTrace extends Record<string, unknown> {
   key: ItemKey
   index: number
   target: number
