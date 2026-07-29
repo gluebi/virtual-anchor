@@ -16,6 +16,23 @@ export type VisibilityRule =
   | { mode: 'fraction'; of: 'item' | 'viewport'; fraction: number }
   /** The whole item, top and bottom edges included. */
   | { mode: 'full' }
+  /**
+   * One named edge of the item is inside the visible band.
+   *
+   * `edge: 'end'` is "the reader scrolled to the end of this" — the trailing edge came into
+   * view. `edge: 'start'` is "they got to the beginning of it".
+   *
+   * This exists because it is the one rule satisfiable for an item of *any* height relative to
+   * the viewport. Every fraction rule has a hole: `of: 'item'` is unreachable above
+   * `viewport / fraction`, `of: 'viewport'` unreachable below `fraction × viewport`, and `full`
+   * unreachable for anything taller than the viewport at all. A list of forum comments has both
+   * shapes in it, so no single fraction is correct for the whole list — and an approximation
+   * either runs ahead of the truth or stalls on the tall ones.
+   *
+   * `tolerancePx` absorbs sub-pixel rounding at the band boundary, and defaults to 1. It stacks
+   * on `rootMargin`: the band is widened by the margin first, then by the tolerance.
+   */
+  | { mode: 'edge'; edge: 'start' | 'end'; tolerancePx?: number }
 
 export interface VisibilityOptions {
   /** Defaults to `{ mode: 'any' }`. */
@@ -148,6 +165,15 @@ interface ItemState {
 
 /** `full` compares against 1 with slack, since fractions are computed in float. */
 const FULL_EPSILON = 1e-6
+
+/**
+ * How far outside the band an `edge` rule still counts the edge as inside it.
+ *
+ * A whole pixel, not float slack: item offsets are exact float64 here, but the band comes from a
+ * scroll offset the platform may have snapped, and a boundary comparison that fails by 0.4px
+ * would silently never fire for the item resting exactly at the fold.
+ */
+const DEFAULT_EDGE_TOLERANCE_PX = 1
 
 const NOT_VISIBLE: ItemVisibility = {
   visible: false,
@@ -396,7 +422,17 @@ export class VisibilityTracker {
       state.measured = item.measured
 
       const passing =
-        input.gated && satisfies(rule, overlap, itemFraction, viewportFraction, item.measured)
+        input.gated &&
+        satisfies(
+          rule,
+          item,
+          bandStart,
+          bandEnd,
+          overlap,
+          itemFraction,
+          viewportFraction,
+          item.measured,
+        )
 
       if (passing) {
         state.leavePendingSince = null
@@ -437,9 +473,10 @@ export class VisibilityTracker {
       state.leavePendingSince = null
       this.#reported.delete(state)
       this.#active.delete(state)
-      if (!adoptSilently) {
-        events.push(event(state, 'leave', itemFraction, viewportFraction, input.now))
-      }
+      // Unconditional, unlike the enter above: `adoptSilently` is true only on the very first
+      // sample, and reaching here needs `state.reported`, which needs a sample before this one.
+      // A guard here would be a branch nothing can take.
+      events.push(event(state, 'leave', itemFraction, viewportFraction, input.now))
     }
 
     // Items that vanished from the candidate set — unmounted, or the window
@@ -569,23 +606,41 @@ function event(
  * because "some part of this overlaps the viewport" survives being approximate,
  * and holding it back would delay every event on a fast scroll into new
  * territory.
+ *
+ * `edge` is allowed through unmeasured for the same reason, and because the
+ * alternative is worse than approximate: gating it would mean an item never
+ * reports until it has been measured, which for read tracking reads as "not
+ * read yet" rather than "not sure yet". The event carries `measured` truthfully,
+ * so a consumer that wants only confirmed geometry can filter on it.
+ *
+ * Takes the raw geometry as well as the fractions, because an edge rule keys on
+ * where one edge *is* rather than on how much of the item shows.
  */
 function satisfies(
   rule: VisibilityRule,
+  item: VisibilityCandidate,
+  bandStart: number,
+  bandEnd: number,
   overlap: number,
   itemFraction: number,
   viewportFraction: number,
   measured: boolean,
 ): boolean {
-  if (overlap <= 0) return false
-
   switch (rule.mode) {
+    // Deliberately outside the overlap guard the other three share: an edge resting exactly on
+    // the band boundary overlaps it by nothing, and is precisely the case the tolerance exists
+    // to admit.
+    case 'edge': {
+      const tolerance = rule.tolerancePx ?? DEFAULT_EDGE_TOLERANCE_PX
+      const offset = rule.edge === 'end' ? item.start + item.size : item.start
+      return offset >= bandStart - tolerance && offset <= bandEnd + tolerance
+    }
     case 'any':
-      return true
+      return overlap > 0
     case 'full':
-      return measured && itemFraction >= 1 - FULL_EPSILON
+      return overlap > 0 && measured && itemFraction >= 1 - FULL_EPSILON
     case 'fraction': {
-      if (!measured) return false
+      if (overlap <= 0 || !measured) return false
       const value = rule.of === 'item' ? itemFraction : viewportFraction
       return value >= rule.fraction
     }

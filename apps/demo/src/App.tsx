@@ -597,7 +597,10 @@ export function App(): ReactNode {
           className="scroller"
           itemClassName="comment-slot"
           visibility={{
-            rule: { mode: 'fraction', of: 'item', fraction: 0.5 },
+            rule:
+              CONFIG.rule === 'edge'
+                ? { mode: 'edge', edge: 'end' }
+                : { mode: 'fraction', of: 'item', fraction: 0.5 },
             dwellMs: 600,
             dwell: 'continuous',
             once: CONFIG.once,

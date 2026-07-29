@@ -1,6 +1,11 @@
 export type {
   Anchor,
   AnchorGeometry,
+  /**
+   * Needed here because `useItemVisibility` takes one and `VirtualList` hands one out. Without
+   * this a consumer of the React entry could hold an engine but not name its type.
+   */
+  Engine,
   ItemKey,
   ItemVisibility,
   ScrollAlign,

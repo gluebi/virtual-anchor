@@ -43,16 +43,20 @@ export default defineConfig({
         'packages/virtual-anchor/src/env.ts': { branches: 100, functions: 100, lines: 100 },
 
         // Fully covered by line, with a handful of branch points left: the size cache's
-        // clamping edges, the tracker's leave-delay corners, and the surface's null-container
-        // guard.
+        // clamping edges and the surface's null-container guard.
         'packages/virtual-anchor/src/sizeCache.ts': { branches: 96, functions: 100, lines: 100 },
-        'packages/virtual-anchor/src/visibility.ts': { branches: 97, functions: 100, lines: 100 },
         'packages/virtual-anchor/src/surface.ts': { branches: 95, functions: 100, lines: 100 },
+
+        // The tracker is now whole. Its last two gaps were a `flushLeaves` corner reached only
+        // after `pauseDwell` had banked the clock, which is a test, and an `adoptSilently` guard
+        // on the leave path that nothing could take, which is now gone: a leave needs a prior
+        // sample, and that guard is only ever true on the first one.
+        'packages/virtual-anchor/src/visibility.ts': { branches: 100, functions: 100, lines: 100 },
 
         // The integration layer. What is left is mostly iOS momentum and platform fallbacks
         // that need a real device, and pretending otherwise would mean writing tests that
         // assert the mock rather than the behaviour.
-        'packages/virtual-anchor/src/engine.ts': { branches: 77, functions: 82, lines: 94 },
+        'packages/virtual-anchor/src/engine.ts': { branches: 78, functions: 82, lines: 94 },
         'packages/virtual-anchor/src/scroller.ts': { branches: 88, functions: 94, lines: 97 },
         'packages/virtual-anchor/src/viewport.ts': { branches: 62, functions: 93, lines: 97 },
         'packages/virtual-anchor/src/resizer.ts': { branches: 91, functions: 100, lines: 100 },
@@ -65,15 +69,19 @@ export default defineConfig({
           functions: 100,
           lines: 100,
         },
+        // Everything reachable. The remainder is the `estimateSize` wrapper, which nothing can
+        // call: the cache reads that option in its constructor only and `engine.setOptions` never
+        // forwards it, so the adapter's wrapper is dead code today. Tracked as
+        // https://github.com/gluebi/virtual-anchor/issues/8 — these three go to 100 with the fix.
         'packages/virtual-anchor/src/react/useVirtualList.ts': {
-          branches: 66,
-          functions: 86,
-          lines: 92,
+          branches: 94,
+          functions: 97,
+          lines: 97,
         },
         'packages/virtual-anchor/src/react/VirtualList.tsx': {
-          branches: 93,
-          functions: 92,
-          lines: 95,
+          branches: 100,
+          functions: 100,
+          lines: 100,
         },
       },
     },

@@ -66,6 +66,10 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  // Envs as well as globals: a leaked `NODE_ENV=production` makes react-dom load its production
+  // build against react's development one, and the mismatch surfaces as an unrelated crash in
+  // whichever test happens to run next.
+  vi.unstubAllEnvs()
   vi.restoreAllMocks()
 })
 
@@ -265,6 +269,36 @@ describe('VirtualList imperative handle', () => {
     expect(ref.current?.getAnchor()?.key).toBe('c0')
   })
 
+  it('reports whether a programmatic scroll is in flight', () => {
+    // The fetching contract's half of the handle: a consumer checks this in `onScroll` before
+    // loading a page, so it has to answer at rest as well as in motion.
+    const ref = setup()
+    expect(ref.current?.isScrolling()).toBe(false)
+  })
+
+  it('leaves focus alone when focusOnScrollEnd is off', async () => {
+    // The option exists so a permalink can move the view without stealing focus from whatever
+    // the reader was doing.
+    const ref = { current: null as VirtualListHandle | null }
+    render(
+      <VirtualList
+        items={comments(500)}
+        getItemKey={(c) => c.id}
+        estimateSize={() => 100}
+        focusOnScrollEnd={false}
+        ref={ref}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    const before = document.activeElement
+    await act(async () => {
+      await ref.current?.scrollToKey('c3')
+    })
+
+    expect(document.activeElement).toBe(before)
+  })
+
   it('round-trips a size snapshot', () => {
     const ref = setup()
     const snapshot = ref.current?.takeSizeSnapshot()
@@ -364,6 +398,59 @@ describe('VirtualList focus pinning', () => {
       inner.focus()
     })
     expect(document.activeElement).toBe(inner)
+  })
+
+  it('ignores focus landing inside the scroller but outside any row', () => {
+    // The `before` slot is inside the scrollport, so a filter input there takes focus without
+    // there being a row to pin — and pinning `undefined` would be worse than pinning nothing.
+    render(
+      <VirtualList
+        items={comments(500)}
+        getItemKey={(c) => c.id}
+        estimateSize={() => 100}
+        before={<input aria-label="filter" />}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    const filter = screen.getByLabelText('filter')
+    expect(() => {
+      act(() => {
+        filter.focus()
+      })
+    }).not.toThrow()
+    expect(document.activeElement).toBe(filter)
+  })
+
+  it('releases the pin when focus leaves the feed entirely', () => {
+    // Only then: moving between rows must keep the pin, or paging with the keyboard unmounts
+    // the row it just left.
+    render(
+      <>
+        <VirtualList
+          items={comments(500)}
+          getItemKey={(c) => c.id}
+          estimateSize={() => 100}
+          keepMounted={['c400']}
+          renderItem={(c) => <span>{c.text}</span>}
+        />
+        <button type="button">outside</button>
+      </>,
+    )
+
+    const row = screen.getAllByRole('article')[0]!
+    act(() => {
+      row.focus()
+    })
+
+    const outside = screen.getByRole('button', { name: 'outside' })
+    act(() => {
+      outside.focus()
+    })
+
+    // The consumer's own pin survives; only the focus pin was released.
+    expect(document.activeElement).toBe(outside)
+    expect(screen.getByText('body 400')).toBeInTheDocument()
   })
 })
 
@@ -692,6 +779,181 @@ describe('useVirtualList before a scroller exists', () => {
   })
 })
 
+describe('useVirtualList before an engine exists', () => {
+  /**
+   * Everything the hook returns has to work on the first render, when there is no engine yet.
+   *
+   * In element-scroller mode that render always happens — the scrollport ref has not fired, so
+   * the engine cannot have been derived. A consumer calling into the hook from an event handler
+   * that early is unusual but entirely legal, and the fallbacks are what keep it from throwing.
+   */
+  const capture = () => {
+    const first: { list?: ReturnType<typeof useVirtualList<Comment>> } = {}
+
+    const Harness = () => {
+      const list = useVirtualList({
+        items: comments(100),
+        getItemKey: (c) => c.id,
+      })
+      first.list ??= list
+      return <div ref={list.scrollRef} />
+    }
+
+    render(<Harness />)
+    return first
+  }
+
+  it('resolves scrollToKey with an empty result', async () => {
+    const first = capture()
+    await expect(first.list?.scrollToKey('c0')).resolves.toMatchObject({
+      settled: false,
+      reason: 'empty',
+    })
+  })
+
+  it('resolves scrollToIndex with an empty result', async () => {
+    const first = capture()
+    await expect(first.list?.scrollToIndex(0)).resolves.toMatchObject({
+      settled: false,
+      reason: 'empty',
+    })
+  })
+
+  it('hands out an inert item ref', () => {
+    const first = capture()
+    const ref = first.list?.itemRef('c0')
+    // Returns nothing at all, so React 19 reads no cleanup from it.
+    expect(ref?.(document.createElement('div'))).toBeUndefined()
+  })
+
+  it('reports an empty visible range', () => {
+    const first = capture()
+    expect(first.list?.getVisibleRange()).toEqual([0, -1])
+  })
+})
+
+describe('useVirtualList render-storm detector', () => {
+  /** A list whose mounted window shifts on every scroll, so every publish needs a render. */
+  const Harness = () => {
+    const list = useVirtualList({
+      items: comments(2000),
+      getItemKey: (c) => c.id,
+    })
+    return (
+      <div ref={list.scrollRef} data-testid="scroller">
+        <div ref={list.containerRef}>
+          {list.items.map((rendered) => (
+            <div key={rendered.key} ref={list.itemRef(rendered.key)} />
+          ))}
+        </div>
+      </div>
+    )
+  }
+
+  /** One publish per iteration, each moving the rendered range so `needsRerender` is true. */
+  const storm = (times: number) => {
+    const scroller = screen.getByTestId('scroller')
+    act(() => {
+      for (let i = 1; i <= times; i++) {
+        scroller.scrollTop = i * 200
+        scroller.dispatchEvent(new Event('scroll'))
+      }
+    })
+  }
+
+  it('complains once when publishes outpace any real scroll', () => {
+    // The microtask hop means React's own "Maximum update depth exceeded" cannot fire here, so
+    // a publish→render→publish cycle would spin in silence. This is the replacement, and it had
+    // no coverage: the threshold branch was never crossed.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    render(<Harness />)
+
+    storm(700)
+
+    const storms = error.mock.calls.filter((call) => String(call[0]).includes('store-driven renders'))
+    // Once, not seven hundred times — the warning is rate-limited to one per second.
+    expect(storms).toHaveLength(1)
+  })
+
+  it('says nothing in a production build', () => {
+    // The detector is development-only, and the guard around it is the branch a production
+    // bundle takes. Stubbed rather than trusted, since nothing else in the suite runs that way.
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.stubEnv('NODE_ENV', 'production')
+    render(<Harness />)
+
+    storm(700)
+
+    expect(
+      error.mock.calls.filter((call) => String(call[0]).includes('store-driven renders')),
+    ).toHaveLength(0)
+  })
+})
+
+describe('useVirtualList server rendering', () => {
+  it('renders without a DOM, from the server snapshot', async () => {
+    // `useSyncExternalStore` takes a third argument for exactly this, and it is a separate code
+    // path from the client snapshot — one that throws on the server if it touches the DOM.
+    const { renderToString } = await import('react-dom/server')
+
+    const Harness = () => {
+      const list = useVirtualList({
+        items: comments(10),
+        getItemKey: (c) => c.id,
+      })
+      return <div ref={list.scrollRef}>{list.items.length}</div>
+    }
+
+    expect(renderToString(<Harness />)).toContain('0')
+  })
+})
+
+describe('useVirtualList option plumbing', () => {
+  it('accepts the geometry options together', () => {
+    // Each is spread conditionally, so a list that sets none of them leaves three branches
+    // untaken — and `scrollMargin` in particular had no adapter-level coverage at all.
+    expect(() => {
+      render(
+        <VirtualList
+          items={comments(100)}
+          getItemKey={(c) => c.id}
+          scrollPaddingStart={64}
+          scrollPaddingEnd={32}
+          scrollMargin={120}
+          gap={8}
+          buffer={200}
+          defaultEstimate={100}
+          keepMounted={['c50']}
+          visibility={{ rule: { mode: 'any' } }}
+          sizeSnapshot={{ version: 1, layoutSignature: '', estimate: 100, sizes: [] }}
+          before={<p>above the list</p>}
+          renderItem={(c) => <span>{c.text}</span>}
+        />,
+      )
+    }).not.toThrow()
+
+    expect(screen.getByText('above the list')).toBeInTheDocument()
+  })
+
+  it('skips items the key function cannot resolve', () => {
+    // A hole in the collection: the key set still covers the index, so the engine may mount it,
+    // but there is no item to render — which must be skipped rather than rendered as `undefined`.
+    const withHole: (Comment | undefined)[] = [...comments(40)]
+    withHole[3] = undefined
+
+    render(
+      <VirtualList
+        items={withHole}
+        getItemKey={(c, index) => c?.id ?? `hole-${String(index)}`}
+        renderItem={(c) => <span>{c?.text ?? 'nothing'}</span>}
+      />,
+    )
+
+    expect(screen.queryByText('nothing')).not.toBeInTheDocument()
+    expect(screen.getByText('body 4')).toBeInTheDocument()
+  })
+})
+
 describe('windowScroller through the component', () => {
   it('builds an engine against the document rather than a scrollport', () => {
     // The host must not scroll as well — the DOM shape and the viewport choice used to be
@@ -711,5 +973,284 @@ describe('windowScroller through the component', () => {
     // The engine exists immediately: the window needs no ref, so items render on the
     // first commit rather than the second.
     expect(container.querySelectorAll('[data-virtual-key]').length).toBeGreaterThan(0)
+  })
+})
+
+describe('VirtualList scrollerRef', () => {
+  const list = (props: Partial<Parameters<typeof VirtualList<Comment>>[0]>) => (
+    <VirtualList
+      items={comments(100)}
+      getItemKey={(c) => c.id}
+      estimateSize={() => 100}
+      renderItem={(c) => <span>{c.text}</span>}
+      {...props}
+    />
+  )
+
+  it('hands over the scrollport node through an object ref', () => {
+    const scroller = { current: null as HTMLElement | null }
+    const { container } = render(list({ scrollerRef: scroller }))
+
+    expect(scroller.current).toBe(container.firstElementChild)
+    // And the list still works, so the composed ref did not displace `list.scrollRef`.
+    expect(container.querySelectorAll('[data-virtual-key]').length).toBeGreaterThan(0)
+  })
+
+  it('hands over the scrollport node through a callback ref', () => {
+    const seen: (HTMLElement | null)[] = []
+    const { container } = render(list({ scrollerRef: (element) => { seen.push(element) } }))
+
+    expect(seen).toContain(container.firstElementChild)
+  })
+
+  it('runs a callback ref’s own cleanup rather than discarding it', () => {
+    // React 19 lets a ref callback return its teardown. Ignoring that would silently leak
+    // whatever the consumer attached to the node.
+    const released: string[] = []
+    const { unmount } = render(
+      list({
+        scrollerRef: () => () => {
+          released.push('cleanup')
+        },
+      }),
+    )
+
+    expect(released).toEqual([])
+    unmount()
+    expect(released).toEqual(['cleanup'])
+  })
+
+  it('resolves the page scroller under windowScroller', () => {
+    // The host div is not a scrollport in this mode, so handing it over would be a lie. The
+    // page is what scrolls, and that is what a consumer needs to attach to.
+    const scroller = { current: null as HTMLElement | null }
+    const { container } = render(list({ windowScroller: true, scrollerRef: scroller }))
+
+    // `scrollingElement` is null on a document with no browsing context, which jsdom is; the
+    // fallback is what keeps the ref from being uselessly empty there.
+    expect(scroller.current).toBe(document.scrollingElement ?? document.documentElement)
+    expect(scroller.current).not.toBe(container.firstElementChild)
+  })
+
+  it('prefers the real scrollingElement where the document has one', () => {
+    // A browser reports one, and in quirks mode it is `body` rather than `documentElement` — so
+    // the fallback must not be the only path ever exercised. Defined rather than spied: jsdom
+    // does not expose this as a configurable accessor for `vi.spyOn` to wrap.
+    const original = Object.getOwnPropertyDescriptor(Document.prototype, 'scrollingElement')
+    Object.defineProperty(document, 'scrollingElement', {
+      configurable: true,
+      get: () => document.body,
+    })
+
+    try {
+      const scroller = { current: null as HTMLElement | null }
+      render(list({ windowScroller: true, scrollerRef: scroller }))
+      expect(scroller.current).toBe(document.body)
+    } finally {
+      delete (document as unknown as Record<string, unknown>).scrollingElement
+      if (original) Object.defineProperty(Document.prototype, 'scrollingElement', original)
+    }
+  })
+
+  it('does not rebuild the engine when the ref identity changes', () => {
+    // The regression this design exists to prevent. `list.scrollRef` sets the state the engine
+    // is derived from, so a composed ref whose identity changed would have React detach and
+    // reattach it — disposing and rebuilding the engine on every render.
+    const Capture = () => {
+      const [n, force] = useState(0)
+      return (
+        <>
+          <button type="button" onClick={() => { force((v) => v + 1); }}>
+            render
+          </button>
+          {/* A fresh arrow every render, which is what a call site will naturally write. */}
+          {list({ scrollerRef: (element) => void element, totalCount: 100 + n })}
+        </>
+      )
+    }
+
+    render(<Capture />)
+    const before = NoopResizeObserver.count
+
+    act(() => {
+      screen.getByRole('button').click()
+    })
+    act(() => {
+      screen.getByRole('button').click()
+    })
+
+    expect(NoopResizeObserver.count).toBe(before)
+  })
+
+  it('releases the node when the list unmounts', () => {
+    const scroller = { current: null as HTMLElement | null }
+    const { unmount } = render(list({ scrollerRef: scroller }))
+    expect(scroller.current).not.toBeNull()
+
+    unmount()
+    expect(scroller.current).toBeNull()
+  })
+})
+
+describe('VirtualList onEngineReady', () => {
+  it('hands over an engine and takes it back on unmount', () => {
+    const seen: (null | ReturnType<typeof useVirtualList<Comment>>['engine'])[] = []
+
+    const { unmount } = render(
+      <VirtualList
+        items={comments(100)}
+        getItemKey={(c) => c.id}
+        estimateSize={() => 100}
+        onEngineReady={(engine) => { seen.push(engine) }}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    expect(seen.some((engine) => engine !== null)).toBe(true)
+
+    unmount()
+    // `null` last, so a consumer holding it in state cannot keep subscribing to a disposed one.
+    expect(seen.at(-1)).toBeNull()
+  })
+
+  it('feeds useItemVisibility, which no component consumer could reach before', () => {
+    const Row = ({ engine }: { engine: Parameters<typeof useItemVisibility>[0] }) => {
+      const visibility = useItemVisibility(engine, 'c0')
+      return <span data-testid="v">{String(visibility.visible)}</span>
+    }
+
+    const Harness = () => {
+      const [engine, setEngine] = useState<Parameters<typeof useItemVisibility>[0]>(null)
+      return (
+        <>
+          <VirtualList
+            items={comments(100)}
+            getItemKey={(c) => c.id}
+            estimateSize={() => 100}
+            onEngineReady={setEngine}
+            renderItem={(c) => <span>{c.text}</span>}
+          />
+          <Row engine={engine} />
+        </>
+      )
+    }
+
+    render(<Harness />)
+    expect(screen.getByTestId('v')).toBeInTheDocument()
+  })
+})
+
+describe('onVisibleRangeChange', () => {
+  const Harness = ({ onVisibleRangeChange }: { onVisibleRangeChange: (r: readonly [number, number]) => void }) => {
+    const list = useVirtualList({
+      items: comments(500),
+      getItemKey: (c) => c.id,
+      estimateSize: () => 100,
+      onVisibleRangeChange,
+    })
+    return (
+      <div ref={list.scrollRef} data-testid="scroller">
+        <div ref={list.containerRef}>
+          {list.items.map((rendered) => (
+            <div key={rendered.key} ref={list.itemRef(rendered.key)} />
+          ))}
+        </div>
+        <span data-testid="live">{list.getVisibleRange().join(',')}</span>
+      </div>
+    )
+  }
+
+  /** jsdom keeps an assigned `scrollTop` given the stubbed metrics, and publishes are sync. */
+  const scrollTo = (top: number) => {
+    const scroller = screen.getByTestId('scroller')
+    act(() => {
+      scroller.scrollTop = top
+      scroller.dispatchEvent(new Event('scroll'))
+    })
+  }
+
+  it('reports the first range once the engine mounts', () => {
+    const seen: (readonly [number, number])[] = []
+    render(<Harness onVisibleRangeChange={(range) => { seen.push(range) }} />)
+
+    // Seeded from the empty sentinel, so the first real range arrives as a notification rather
+    // than being silently adopted.
+    expect(seen.length).toBeGreaterThan(0)
+    expect(seen.at(-1)?.[1]).toBeGreaterThan(0)
+  })
+
+  it('fires for a scroll that provokes no render at all', () => {
+    // The whole reason this is a callback: `needsRerender` omits `visibleRange`, so a scroll
+    // within the mounted set is invisible to React. An effect on a render snapshot would miss
+    // exactly this.
+    const seen: (readonly [number, number])[] = []
+    render(<Harness onVisibleRangeChange={(range) => { seen.push(range) }} />)
+    const count = seen.length
+
+    scrollTo(220)
+
+    expect(seen.length).toBeGreaterThan(count)
+    expect(seen.at(-1)?.[0]).toBeGreaterThan(0)
+  })
+
+  it('stays quiet when the range does not move', () => {
+    const seen: (readonly [number, number])[] = []
+    render(<Harness onVisibleRangeChange={(range) => { seen.push(range) }} />)
+
+    scrollTo(220)
+    const settled = seen.length
+    // A sub-item nudge: a fresh tuple is published, with the same two numbers in it.
+    scrollTo(221)
+
+    expect(seen.length).toBe(settled)
+  })
+
+  it('does not re-fire when only the callback identity changes', () => {
+    const seen: string[] = []
+    const { rerender } = render(
+      <Harness onVisibleRangeChange={(range) => { seen.push(`a:${range.join(',')}`) }} />,
+    )
+    scrollTo(220)
+    const before = seen.length
+
+    rerender(<Harness onVisibleRangeChange={(range) => { seen.push(`b:${range.join(',')}`) }} />)
+
+    // Resubscribing reseeds from the current state, so swapping callbacks reports nothing.
+    expect(seen.length).toBe(before)
+  })
+
+  it('reads live through getVisibleRange, which the render snapshot cannot', () => {
+    const captured: { read?: () => readonly [number, number] } = {}
+
+    const Capture = () => {
+      const list = useVirtualList({
+        items: comments(500),
+        getItemKey: (c) => c.id,
+        estimateSize: () => 100,
+      })
+      captured.read = list.getVisibleRange
+      return (
+        <div ref={list.scrollRef} data-testid="scroller">
+          <div ref={list.containerRef}>
+            {list.items.map((rendered) => (
+              <div key={rendered.key} ref={list.itemRef(rendered.key)} />
+            ))}
+          </div>
+          {/* The same value as React last saw it, for contrast. */}
+          <span data-testid="rendered">{list.getVisibleRange().join(',')}</span>
+        </div>
+      )
+    }
+
+    render(<Capture />)
+    const rendered = screen.getByTestId('rendered').textContent
+
+    scrollTo(3000)
+
+    // The scroll stayed inside the mounted set, so React never re-rendered and the text is
+    // exactly what it was. The getter went to the store instead.
+    expect(screen.getByTestId('rendered').textContent).toBe(rendered)
+    expect(captured.read?.()[0]).toBeGreaterThan(0)
+    expect(captured.read?.().join(',')).not.toBe(rendered)
   })
 })

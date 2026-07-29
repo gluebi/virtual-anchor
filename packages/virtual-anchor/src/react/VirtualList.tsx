@@ -1,4 +1,11 @@
-import type { Anchor, ItemKey, ScrollResult, ScrollToOptions, SizeSnapshot } from '../index.js'
+import type {
+  Anchor,
+  Engine,
+  ItemKey,
+  ScrollResult,
+  ScrollToOptions,
+  SizeSnapshot,
+} from '../index.js'
 import {
   type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -6,8 +13,10 @@ import {
   type Ref,
   type UIEvent as ReactUIEvent,
   useCallback,
+  useEffect,
   useImperativeHandle,
   useMemo,
+  useRef,
   useState,
 } from 'react'
 import { useVirtualList, type RenderedItem, type UseVirtualListOptions } from './useVirtualList.js'
@@ -80,7 +89,72 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
    * cannot move the view.
    */
   onScroll?: (event: ReactUIEvent<HTMLDivElement>) => void
+  /**
+   * Ref to the scrollport element.
+   *
+   * The handle is the scroll *API*; this is the *node*. A consumer sharing the scroller with
+   * another behaviour — pull-to-refresh, a scroll-linked gradient, a third-party scroll library
+   * — needs the element itself, and the alternatives are a `firstElementChild` off a wrapper or
+   * a marker class, both of which encode this component's DOM shape at the call site.
+   *
+   * Reach for the handle to *move* the scroller and this to *observe* it. Writing `scrollTop`
+   * through this ref means fighting the convergence loop, which is the one thing it is not for.
+   *
+   * With `windowScroller` there is no scrollport of ours — the page scrolls — so this resolves
+   * to `document.scrollingElement`. That is `documentElement` in standards mode, which is what
+   * the engine measures; in quirks mode the two can differ.
+   */
+  scrollerRef?: Ref<HTMLElement>
+  /**
+   * The engine, once one exists — and `null` when it is torn down.
+   *
+   * `useItemVisibility(engine, key)` is presented as a first-class API, but no `VirtualList`
+   * consumer could reach an `Engine` to call it with. A callback rather than a field on the
+   * handle because that hook *subscribes* through the engine, so it has to be reactive: in
+   * element-scroller mode the engine does not exist until the scrollport ref has attached, and
+   * a handle read during render would return `null` forever.
+   *
+   * Called with `null` on teardown, so a consumer holding it in state cannot keep subscribing
+   * to a disposed engine.
+   */
+  onEngineReady?: (engine: Engine | null) => void
   ref?: Ref<VirtualListHandle>
+}
+
+/**
+ * Publish a value to a consumer's ref, whichever of the two shapes it is, and return the undo.
+ *
+ * Written here because there is no merged-ref helper in this package and no dependency that
+ * provides one. React 19 lets a callback ref return its own cleanup, so that has to be honoured
+ * rather than discarded — a consumer whose ref tears something down would otherwise leak it.
+ */
+/** Nothing to undo — a ref that was never published to. */
+const NO_RELEASE = (): void => {}
+
+function applyRef<T>(ref: Ref<T> | undefined, value: T | null): () => void {
+  if (!ref) return NO_RELEASE
+
+  if (typeof ref === 'function') {
+    const cleanup = ref(value)
+    return typeof cleanup === 'function' ? cleanup : () => ref(null)
+  }
+
+  ref.current = value
+  return () => {
+    ref.current = null
+  }
+}
+
+/**
+ * The page scroller, for `windowScroller` mode.
+ *
+ * `scrollingElement` rather than `documentElement` because that is the element the platform
+ * actually scrolls, and narrowed by `instanceof` rather than asserted: the property is typed
+ * `Element | null`, and it really is null on a detached document.
+ */
+function pageScroller(): HTMLElement {
+  const scrolling = document.scrollingElement
+  return scrolling instanceof HTMLElement ? scrolling : document.documentElement
 }
 
 /**
@@ -171,6 +245,8 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
     itemClassName,
     focusOnScrollEnd = true,
     onScroll,
+    scrollerRef,
+    onEngineReady,
     ref,
     ...listOptions
   } = props
@@ -214,6 +290,77 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
     },
     [list],
   )
+
+  const windowScroller = listOptions.windowScroller === true
+
+  /**
+   * The scrollport, remembered so `scrollerRef` can be published from an effect.
+   *
+   * Recorded by the same callback that feeds `list.scrollRef` rather than by a second, composed
+   * ref: that callback's side effect is setting the state the engine is derived from, so a ref
+   * whose identity changed would have React detach and reattach it — `null`, then the element —
+   * disposing and rebuilding the engine. Keeping the consumer's ref out of this callback's
+   * dependencies is what makes an inline `scrollerRef` at the call site harmless.
+   */
+  /**
+   * The consumer's ref, in a box.
+   *
+   * Read from here rather than closed over, so `setScrollport` below can depend on nothing that
+   * changes. Seeded from the first render, which is before the ref callback can run, so the very
+   * first attach already publishes to the right place.
+   */
+  const consumerScrollerRef = useRef(scrollerRef)
+  /** Undo for whatever the consumer's ref did with the node. */
+  const releaseScroller = useRef(NO_RELEASE)
+
+  // Destructured, so the dependency is the callback rather than the result object: `list` is
+  // fresh every render, and depending on it would defeat the whole point of this indirection.
+  const { scrollRef } = list
+  const setScrollport = useCallback(
+    (element: HTMLElement | null) => {
+      scrollRef(element)
+
+      if (element === null) {
+        releaseScroller.current()
+        releaseScroller.current = NO_RELEASE
+        return
+      }
+      // In the commit's ref phase, not an effect: a consumer whose `useEffect(…, [])` reads
+      // `scrollerRef.current` once must not find it empty.
+      releaseScroller.current = applyRef(consumerScrollerRef.current, element)
+    },
+    // Permanently stable: `scrollRef` is a `useCallback` with no dependencies, and the consumer's
+    // ref is reached through a box rather than a dependency.
+    [scrollRef],
+  )
+
+  /**
+   * Track the consumer's ref, and cover the window-scrolled mode.
+   *
+   * There is no element of ours to attach to when the page is the scroller, so that mode has to
+   * be published from here — but `pageScroller()` always resolves, so this path has nothing to
+   * guard against.
+   */
+  useEffect(() => {
+    consumerScrollerRef.current = scrollerRef
+    if (!windowScroller) return
+    return applyRef(scrollerRef, pageScroller())
+  }, [scrollerRef, windowScroller])
+
+  /**
+   * Hand the engine out, and take it back when it goes.
+   *
+   * Depends on the callback's identity rather than reading it through a latest-value ref: a
+   * consumer swapping callbacks gets `null` from the old one and the engine from the new one in
+   * the same effect flush, so React batches the two into a single update and nothing flickers.
+   */
+  useEffect(() => {
+    if (!onEngineReady) return
+    onEngineReady(list.engine)
+    return () => {
+      onEngineReady(null)
+    }
+  }, [list.engine, onEngineReady])
 
   useImperativeHandle(
     ref,
@@ -265,8 +412,10 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
     (event: ReactKeyboardEvent<HTMLDivElement>) => {
       const focused =
         focusedKey === null ? undefined : list.items.find((item) => item.key === focusedKey)
-      // With nothing focused, paging starts from what the reader is looking at.
-      const from = focused?.index ?? list.visibleRange[0]
+      // With nothing focused, paging starts from what the reader is looking at — read live,
+      // because a scroll within the mounted set publishes no render, so the snapshot's range can
+      // be a whole buffer out of date by the time a key arrives.
+      const from = focused?.index ?? list.getVisibleRange()[0]
 
       const target = ((): readonly [number, 'start' | 'end'] | undefined => {
         if (event.ctrlKey) {
@@ -287,12 +436,11 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
   )
 
   const setSize = totalCount ?? list.count
-  const windowScroller = listOptions.windowScroller === true
 
   return (
     <div
       // A window-scrolled list has no scrollport of its own to attach to.
-      ref={windowScroller ? undefined : list.scrollRef}
+      ref={windowScroller ? undefined : setScrollport}
       className={className}
       style={{ ...(windowScroller ? WINDOW_HOST_STYLE : SCROLLER_STYLE), ...style }}
       onScroll={onScroll}
