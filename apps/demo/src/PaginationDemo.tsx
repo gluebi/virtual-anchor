@@ -7,7 +7,7 @@ import {
   useState,
 } from 'react'
 import { VirtualList, type VirtualListHandle } from 'virtual-anchor/react'
-import { buildThread, sleep, THREAD_SIZE, type Comment } from './thread.js'
+import { buildThread, estimateCommentSize, sleep, THREAD_SIZE, type Comment } from './thread.js'
 import './styles.css'
 
 /**
@@ -241,7 +241,7 @@ export function PaginationDemo(): ReactNode {
         <VirtualList<Comment>
           items={items}
           getItemKey={(comment) => comment.id}
-          estimateSize={(comment) => 90 + comment.body.length * 70}
+          estimateSize={estimateCommentSize}
           gap={12}
           scrollPaddingStart={headerHeight}
           // The whole collection either way, so a screen reader hears "comment 51 of 12,000"

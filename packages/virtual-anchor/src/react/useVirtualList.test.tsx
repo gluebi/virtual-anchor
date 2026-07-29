@@ -908,6 +908,92 @@ describe('useVirtualList server rendering', () => {
   })
 })
 
+describe('estimateSize through the component', () => {
+  const rowTops = (container: HTMLElement) =>
+    [...container.querySelectorAll<HTMLElement>('[data-virtual-key]')].map((row) => row.style.top)
+
+  it('positions rows by the estimate it was given', () => {
+    // Issue #8. The cache read this option in its constructor only and `setOptions` never
+    // forwarded it, while the adapter supplies options exclusively that way — so the estimate
+    // was accepted, never called, and every row was laid out at the 120px internal default.
+    const estimateSize = vi.fn(() => 250)
+    const { container } = render(
+      <VirtualList
+        items={comments(200)}
+        getItemKey={(c) => c.id}
+        estimateSize={estimateSize}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    expect(estimateSize).toHaveBeenCalled()
+    expect(rowTops(container).slice(0, 3)).toEqual(['0px', '250px', '500px'])
+  })
+
+  it('honours defaultEstimate for a key the estimator declines', () => {
+    // A hole in the collection: the estimator has no item to size, so the fallback applies —
+    // and it is the cache's fallback, not a second copy of the number in the adapter.
+    const withHole: (Comment | undefined)[] = [...comments(40)]
+    withHole[1] = undefined
+
+    const { container } = render(
+      <VirtualList
+        items={withHole}
+        getItemKey={(c, index) => c?.id ?? `hole-${String(index)}`}
+        estimateSize={(c) => (c === undefined ? 0 : 300)}
+        defaultEstimate={70}
+        renderItem={(c) => <span>{c?.text ?? 'nothing'}</span>}
+      />,
+    )
+
+    // Item 0 is 300 tall; the hole occupies 300..370 at the fallback estimate but renders no
+    // row of its own, so the next row present is item 2 at 370 and item 3 at 670.
+    expect(rowTops(container).slice(0, 3)).toEqual(['0px', '370px', '670px'])
+  })
+
+  it('does not re-estimate every row when the call site passes a fresh closure', () => {
+    // The cache compares the estimator by reference to decide whether to rebuild its offset
+    // tree — and a call site naturally writes an inline arrow, which is a new function every
+    // render. Keying the adapter's wrapper on that identity rebuilt every slot, republished and
+    // re-aimed any in-flight scroll on each render; the e2e accuracy matrix failed by a pixel.
+    // So the arrow here is deliberate, and a stable `vi.fn` would not catch the regression.
+    const counted = vi.fn(() => 250)
+    // Hoisted, so the reference is stable across renders. An `items` array rebuilt inline in
+    // JSX churns the key set too, and `setKeys` then rebuilds regardless of the estimator —
+    // which is pre-existing behaviour, and would make this test prove nothing.
+    const stable = comments(2000)
+
+    const Harness = () => {
+      const [n, force] = useState(0)
+      return (
+        <>
+          <button type="button" onClick={() => { force((v) => v + 1); }}>
+            render
+          </button>
+          <VirtualList
+            items={stable}
+            getItemKey={(c) => c.id}
+            estimateSize={() => counted()}
+            totalCount={2000 + n}
+            renderItem={(c) => <span>{c.text}</span>}
+          />
+        </>
+      )
+    }
+
+    render(<Harness />)
+    const afterMount = counted.mock.calls.length
+    expect(afterMount).toBeGreaterThan(0)
+
+    act(() => {
+      screen.getByRole('button').click()
+    })
+
+    // A rebuild would call the estimator once per item — two thousand of them.
+    expect(counted.mock.calls.length - afterMount).toBeLessThan(200)
+  })
+})
+
 describe('useVirtualList option plumbing', () => {
   it('accepts the geometry options together', () => {
     // Each is spread conditionally, so a list that sets none of them leaves three branches
@@ -1141,13 +1227,21 @@ describe('VirtualList onEngineReady', () => {
 })
 
 describe('onVisibleRangeChange', () => {
-  const Harness = ({ onVisibleRangeChange }: { onVisibleRangeChange: (r: readonly [number, number]) => void }) => {
+  /** Captures the live getter, so a test can read it after a scroll that provoked no render. */
+  const captured: { read?: () => readonly [number, number] } = {}
+
+  const Harness = ({
+    onVisibleRangeChange,
+  }: {
+    onVisibleRangeChange?: (r: readonly [number, number]) => void
+  }) => {
     const list = useVirtualList({
       items: comments(500),
       getItemKey: (c) => c.id,
       estimateSize: () => 100,
-      onVisibleRangeChange,
+      ...(onVisibleRangeChange === undefined ? {} : { onVisibleRangeChange }),
     })
+    captured.read = list.getVisibleRange
     return (
       <div ref={list.scrollRef} data-testid="scroller">
         <div ref={list.containerRef}>
@@ -1155,7 +1249,8 @@ describe('onVisibleRangeChange', () => {
             <div key={rendered.key} ref={list.itemRef(rendered.key)} />
           ))}
         </div>
-        <span data-testid="live">{list.getVisibleRange().join(',')}</span>
+        {/* The value as React last saw it, for contrast with the live getter. */}
+        <span data-testid="rendered">{list.getVisibleRange().join(',')}</span>
       </div>
     )
   }
@@ -1220,29 +1315,7 @@ describe('onVisibleRangeChange', () => {
   })
 
   it('reads live through getVisibleRange, which the render snapshot cannot', () => {
-    const captured: { read?: () => readonly [number, number] } = {}
-
-    const Capture = () => {
-      const list = useVirtualList({
-        items: comments(500),
-        getItemKey: (c) => c.id,
-        estimateSize: () => 100,
-      })
-      captured.read = list.getVisibleRange
-      return (
-        <div ref={list.scrollRef} data-testid="scroller">
-          <div ref={list.containerRef}>
-            {list.items.map((rendered) => (
-              <div key={rendered.key} ref={list.itemRef(rendered.key)} />
-            ))}
-          </div>
-          {/* The same value as React last saw it, for contrast. */}
-          <span data-testid="rendered">{list.getVisibleRange().join(',')}</span>
-        </div>
-      )
-    }
-
-    render(<Capture />)
+    render(<Harness />)
     const rendered = screen.getByTestId('rendered').textContent
 
     scrollTo(3000)

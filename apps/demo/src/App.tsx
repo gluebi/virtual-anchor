@@ -17,6 +17,7 @@ import {
 } from 'virtual-anchor/react'
 import {
   buildThread,
+  estimateCommentSize,
   extendDown,
   extendUp,
   FETCH_LATENCY,
@@ -571,7 +572,7 @@ export function App(): ReactNode {
         <VirtualList<Comment>
           items={items}
           getItemKey={(comment) => comment.id}
-          estimateSize={(comment) => 90 + comment.body.length * 70}
+          estimateSize={estimateCommentSize}
           gap={12}
           scrollPaddingStart={CONFIG.paddingStart === 0 ? 0 : headerHeight}
           {...(restoredSnapshot === undefined ? {} : { sizeSnapshot: restoredSnapshot })}

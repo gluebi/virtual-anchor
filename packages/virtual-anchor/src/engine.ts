@@ -25,7 +25,14 @@ export interface EngineOptions {
   viewport: Viewport
   /** The loaded window, in display order. A stable reference is a no-op. */
   keys: readonly ItemKey[]
-  estimateSize?: (index: number, key: ItemKey) => number
+  /**
+   * Size estimate for unmeasured items. May return `undefined` to fall through to
+   * `defaultEstimate`.
+   *
+   * Honoured when passed to `setOptions` as well as at construction, but only if the
+   * reference is stable: a fresh closure per call rebuilds the offset tree each time.
+   */
+  estimateSize?: (index: number, key: ItemKey) => number | undefined
   defaultEstimate?: number
   gap?: number
   /** Extra px of items mounted beyond the viewport, in each direction. */
@@ -562,6 +569,20 @@ export function createEngine(initial: EngineOptions): Engine {
       options = { ...options, ...next }
       if (next.visibility) tracker.setOptions(next.visibility)
 
+      // Before the restore below, not after: `restore` rebuilds the offset tree itself, so
+      // installing the estimator afterwards would rebuild a second time in the same call —
+      // the first pass having used an estimate already known to be stale.
+      //
+      // Both evaluated, never short-circuited. `a || b` here would skip `setDefaultEstimate`
+      // on exactly the call that installs the estimator, which is the first one — the only
+      // call where the tree is still empty and applying it is free. The default would then
+      // land on some later render and pay a full rebuild plus an anchor-restoring publish.
+      const estimatorChanged =
+        next.estimateSize !== undefined && cache.setEstimateSize(next.estimateSize)
+      const defaultChanged =
+        next.defaultEstimate !== undefined && cache.setDefaultEstimate(next.defaultEstimate)
+      const estimateChanged = estimatorChanged || defaultChanged
+
       if (snapshot !== undefined && !snapshotRestored) {
         snapshotRestored = true
         if (cache.restore(snapshot) > 0) publish(true)
@@ -573,7 +594,11 @@ export function createEngine(initial: EngineOptions): Engine {
       if (TRACING && keysChanged) {
         trace('model.keys', () => ({ count: cache.length, firstKey: cache.keyAt(0) }))
       }
-      if (keysChanged) {
+
+      // A changed estimate moves every unmeasured item, which is the same class of event as
+      // a prepend: both need the anchor re-applied and any in-flight scroll re-aimed.
+      const modelChanged = keysChanged || estimateChanged
+      if (modelChanged) {
         // A prepend moves the target of an in-flight scroll as surely as a measurement
         // does, and the newly inserted items are unmeasured, so more movement follows as
         // they measure. Without this the convergence loop could declare the model stable
@@ -584,7 +609,7 @@ export function createEngine(initial: EngineOptions): Engine {
       }
       // A key-set change moves every offset below the insertion point. Deriving
       // the offset from the anchor is the entirety of the prepend handling.
-      publish(keysChanged)
+      publish(modelChanged)
     },
 
     mount() {

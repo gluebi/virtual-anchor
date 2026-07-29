@@ -1,5 +1,5 @@
 import { expect, test, type Page } from '@playwright/test'
-import { open } from './helpers.js'
+import { headerHeight, open, scrollTo } from './helpers.js'
 
 /**
  * The trailing-edge visibility rule, against real layout.
@@ -20,21 +20,25 @@ import { open } from './helpers.js'
 const TALL = 1081
 
 /** Height of the tall comment, and of the area a reader can actually see. */
-async function geometry(page: Page) {
-  return page.evaluate((index) => {
+async function geometry(page: Page): Promise<{ item: number; visible: number } | null> {
+  const box = await page.evaluate((index) => {
     const article = document
       .querySelector(`[data-comment-index="${String(index)}"]`)
       ?.closest('[role="article"]')
     const scroller = document.querySelector('.scroller')
     if (!article || !scroller) return null
-
-    const header = document.querySelector('.header')?.getBoundingClientRect().height ?? 0
-    return {
-      item: article.getBoundingClientRect().height,
-      visible: scroller.clientHeight - header,
-    }
+    return { item: article.getBoundingClientRect().height, scrollport: scroller.clientHeight }
   }, TALL)
+  if (!box) return null
+
+  // Measured through the helper rather than in the page: this suite already broke once by
+  // assuming a header height, which is why that measurement lives in exactly one place.
+  return { item: box.item, visible: box.scrollport - (await headerHeight(page)) }
 }
+
+/** Read tracking for the tall comment, which is all these tests assert on. */
+const entersFor = (page: Page): Promise<number> =>
+  page.evaluate((index) => window.__list.enterCount(`comment-${String(index)}`), TALL)
 
 test.describe('the trailing-edge visibility rule', () => {
   /**
@@ -70,27 +74,27 @@ test.describe('the trailing-edge visibility rule', () => {
     // Parked at its top: the reader is at the beginning of a very long comment. Its leading
     // edge is on screen and several screens of its body are too, which is exactly what a
     // fraction rule cannot tell apart from having finished it.
-    await page.evaluate(async (index) => {
-      await window.__list.scrollToKey(`comment-${String(index)}`, { align: 'start' })
-    }, TALL)
+    await scrollTo(page, TALL, { align: 'start' })
     // Comfortably past the demo's 600ms dwell, so a rule that was going to fire has fired.
     await page.waitForTimeout(900)
 
     expect(
-      await page.evaluate((index) => window.__list.enterCount(`comment-${String(index)}`), TALL),
+      await entersFor(page),
       'reported as read while the reader was still in the middle of it',
     ).toBe(0)
 
-    // Now to its end.
-    await page.evaluate(async (index) => {
-      await window.__list.scrollToKey(`comment-${String(index)}`, { align: 'end' })
-    }, TALL)
-    await page.waitForTimeout(900)
+    // Now to its end. Polled rather than slept: the dwell clock completes on a timer, and a
+    // fixed wait that is ample on an idle machine is not ample under five parallel workers.
+    // The negative assertion above has to sleep — you cannot poll for something not happening —
+    // but this one does not.
+    await scrollTo(page, TALL, { align: 'end' })
 
-    expect(
-      await page.evaluate((index) => window.__list.enterCount(`comment-${String(index)}`), TALL),
-      'never reported, even with its trailing edge on screen',
-    ).toBeGreaterThan(0)
+    await expect
+      .poll(() => entersFor(page), {
+        timeout: 5_000,
+        message: 'never reported, even with its trailing edge on screen',
+      })
+      .toBeGreaterThan(0)
   })
 
   test('is reported early by the item-fraction rule, which is the drift it fixes', async ({
@@ -102,18 +106,13 @@ test.describe('the trailing-edge visibility rule', () => {
     // could be passing for some reason other than the rule it is testing.
     await open(page, QUERY.replace('rule=edge&', ''))
 
-    await page.evaluate(async (index) => {
-      await window.__list.scrollToKey(`comment-${String(index)}`, { align: 'start' })
-    }, TALL)
-    await page.waitForTimeout(900)
+    await scrollTo(page, TALL, { align: 'start' })
 
     const size = await geometry(page)
     // The premise, asserted rather than assumed: this only demonstrates drift while half the
     // item genuinely fits.
     expect((size?.visible ?? 0) / (size?.item ?? 1)).toBeGreaterThan(0.5)
 
-    expect(
-      await page.evaluate((index) => window.__list.enterCount(`comment-${String(index)}`), TALL),
-    ).toBeGreaterThan(0)
+    await expect.poll(() => entersFor(page), { timeout: 5_000 }).toBeGreaterThan(0)
   })
 })

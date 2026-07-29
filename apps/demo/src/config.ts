@@ -23,11 +23,9 @@ export interface DemoConfig {
   /** Report each comment at most once, rather than on every re-entry. */
   once: boolean
   /**
-   * Which visibility rule to run.
+   * Which visibility rule to run — see `VisibilityRule` for what `edge` is for.
    *
-   * `edge` is the trailing-edge rule — "the reader got to the end of this comment" — and the
-   * only one that works for the thread's 14-paragraph essays as well as its one-liners. The
-   * default stays `fraction` so every other scenario in the suite is unaffected.
+   * The default stays `fraction` so every other scenario in the suite is unaffected.
    */
   rule: 'fraction' | 'edge'
   /** Collect the library's trace events into a ring buffer readable from the console. */

@@ -121,6 +121,9 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
   ref?: Ref<VirtualListHandle>
 }
 
+/** Nothing to undo — a ref that was never published to. */
+const NO_RELEASE = (): void => {}
+
 /**
  * Publish a value to a consumer's ref, whichever of the two shapes it is, and return the undo.
  *
@@ -128,9 +131,6 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
  * provides one. React 19 lets a callback ref return its own cleanup, so that has to be honoured
  * rather than discarded — a consumer whose ref tears something down would otherwise leak it.
  */
-/** Nothing to undo — a ref that was never published to. */
-const NO_RELEASE = (): void => {}
-
 function applyRef<T>(ref: Ref<T> | undefined, value: T | null): () => void {
   if (!ref) return NO_RELEASE
 
@@ -294,22 +294,16 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
   const windowScroller = listOptions.windowScroller === true
 
   /**
-   * The scrollport, remembered so `scrollerRef` can be published from an effect.
+   * The consumer's ref, in a box, assigned during render.
    *
-   * Recorded by the same callback that feeds `list.scrollRef` rather than by a second, composed
-   * ref: that callback's side effect is setting the state the engine is derived from, so a ref
-   * whose identity changed would have React detach and reattach it — `null`, then the element —
-   * disposing and rebuilding the engine. Keeping the consumer's ref out of this callback's
-   * dependencies is what makes an inline `scrollerRef` at the call site harmless.
-   */
-  /**
-   * The consumer's ref, in a box.
-   *
-   * Read from here rather than closed over, so `setScrollport` below can depend on nothing that
-   * changes. Seeded from the first render, which is before the ref callback can run, so the very
-   * first attach already publishes to the right place.
+   * Read from here rather than closed over, so nothing below has to depend on an identity that
+   * changes: the ref that feeds `list.scrollRef` sets the state the engine is derived from, so a
+   * changed identity would have React detach and reattach it — `null`, then the element —
+   * disposing and rebuilding the engine. An inline `scrollerRef` at the call site is therefore
+   * harmless, which is what a call site will naturally write.
    */
   const consumerScrollerRef = useRef(scrollerRef)
+  consumerScrollerRef.current = scrollerRef
   /** Undo for whatever the consumer's ref did with the node. */
   const releaseScroller = useRef(NO_RELEASE)
 
@@ -335,32 +329,38 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
   )
 
   /**
-   * Track the consumer's ref, and cover the window-scrolled mode.
+   * Cover the window-scrolled mode, which has no element of ours to attach to.
    *
-   * There is no element of ours to attach to when the page is the scroller, so that mode has to
-   * be published from here — but `pageScroller()` always resolves, so this path has nothing to
-   * guard against.
+   * Keyed on the mode alone: depending on the consumer's ref would re-run this on every render
+   * for an inline arrow, publishing `null` and then the element again each time. `pageScroller()`
+   * always resolves, so there is nothing to guard against.
    */
   useEffect(() => {
-    consumerScrollerRef.current = scrollerRef
     if (!windowScroller) return
-    return applyRef(scrollerRef, pageScroller())
-  }, [scrollerRef, windowScroller])
+    return applyRef(consumerScrollerRef.current, pageScroller())
+  }, [windowScroller])
 
   /**
    * Hand the engine out, and take it back when it goes.
    *
-   * Depends on the callback's identity rather than reading it through a latest-value ref: a
-   * consumer swapping callbacks gets `null` from the old one and the engine from the new one in
-   * the same effect flush, so React batches the two into a single update and nothing flickers.
+   * The callback is read through a box for the same reason as the ref above: keyed on its
+   * identity, an inline arrow would tear this down and re-run it every render — handing the
+   * consumer `null` and then the engine again. Since the documented use is to hold it in state,
+   * that is a state update per render, whose render brings a fresh arrow, which re-runs the
+   * effect. Pass a stable callback if you need a *swap* to be noticed; the engine itself
+   * changing is what this reports.
    */
+  const latestEngineListener = useRef(onEngineReady)
+  latestEngineListener.current = onEngineReady
+
   useEffect(() => {
-    if (!onEngineReady) return
-    onEngineReady(list.engine)
+    const notify = latestEngineListener.current
+    if (!notify) return
+    notify(list.engine)
     return () => {
-      onEngineReady(null)
+      notify(null)
     }
-  }, [list.engine, onEngineReady])
+  }, [list.engine])
 
   useImperativeHandle(
     ref,

@@ -293,6 +293,39 @@ describe('engine option plumbing', () => {
     h.engine.setOptions({ buffer: 3000 })
     expect(h.engine.store.getState().renderedRange[1]).toBeGreaterThan(before + 20)
   })
+
+  it('accepts an estimator after construction', () => {
+    // The React adapter supplies options only this way, so an estimate read at construction
+    // alone is an estimate the component API can never set.
+    const h = setup({ count: 1000 })
+    // 100px estimates from the harness.
+    expect(h.engine.store.getState().totalSize).toBe(100_000)
+
+    h.engine.setOptions({ estimateSize: () => 250 })
+    expect(h.engine.store.getState().totalSize).toBe(250_000)
+  })
+
+  it('accepts a default estimate after construction', () => {
+    const h = setup({ count: 1000 })
+    h.engine.setOptions({ defaultEstimate: 40 })
+    expect(h.engine.store.getState().totalSize).toBe(40_000)
+  })
+
+  it('holds the view when the estimate changes under it', () => {
+    // A changed estimate moves every unmeasured item, which in an offset-addressed list drags
+    // the viewport with it — react-window's #863. Here the anchor names a key, so re-deriving
+    // the offset from it is what keeps the reader where they were.
+    const h = setup({ count: 1000 })
+    h.scroll(20_000)
+    const anchor = h.engine.getAnchor()
+    expect(anchor?.key).toBe('c200')
+
+    h.engine.setOptions({ estimateSize: () => 250 })
+
+    // Same comment under the same point of the viewport, at a wholly different offset.
+    expect(h.engine.getAnchor()?.key).toBe('c200')
+    expect(h.offset()).toBe(50_000)
+  })
 })
 
 describe('engine DOM write ordering', () => {

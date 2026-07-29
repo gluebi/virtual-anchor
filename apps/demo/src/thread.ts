@@ -22,6 +22,18 @@ export const THREAD_SIZE = 12_000
 export const PAGE_SIZE = 40
 
 /**
+ * What a comment of this shape is likely to measure, before it has been laid out.
+ *
+ * Lives here rather than at the two call sites because the constants are fitted against the
+ * heights `buildThread` below actually produces — 100px for one paragraph, 164 for two, 277 for
+ * four, 796 for fourteen — so the fit and the generator have to move together. It was previously
+ * copied into both demos as `90 + paragraphs * 70`, wrong by 270px at the long end, and nobody
+ * noticed because the library was dropping the option entirely.
+ */
+export const estimateCommentSize = (comment: Comment): number =>
+  56 + comment.body.length * 53
+
+/**
  * A deterministic thread, so a Playwright run and a manual look see the same
  * text and the same heights.
  *

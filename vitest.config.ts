@@ -56,7 +56,7 @@ export default defineConfig({
         // The integration layer. What is left is mostly iOS momentum and platform fallbacks
         // that need a real device, and pretending otherwise would mean writing tests that
         // assert the mock rather than the behaviour.
-        'packages/virtual-anchor/src/engine.ts': { branches: 78, functions: 82, lines: 94 },
+        'packages/virtual-anchor/src/engine.ts': { branches: 79, functions: 82, lines: 94 },
         'packages/virtual-anchor/src/scroller.ts': { branches: 88, functions: 94, lines: 97 },
         'packages/virtual-anchor/src/viewport.ts': { branches: 62, functions: 93, lines: 97 },
         'packages/virtual-anchor/src/resizer.ts': { branches: 91, functions: 100, lines: 100 },
@@ -64,25 +64,10 @@ export default defineConfig({
         // The uncovered branch is the production build, which by definition is not this build.
         'packages/virtual-anchor/src/trace.ts': { branches: 80, functions: 100, lines: 100 },
 
-        'packages/virtual-anchor/src/react/useItemVisibility.ts': {
-          branches: 100,
-          functions: 100,
-          lines: 100,
-        },
-        // Everything reachable. The remainder is the `estimateSize` wrapper, which nothing can
-        // call: the cache reads that option in its constructor only and `engine.setOptions` never
-        // forwards it, so the adapter's wrapper is dead code today. Tracked as
-        // https://github.com/gluebi/virtual-anchor/issues/8 — these three go to 100 with the fix.
-        'packages/virtual-anchor/src/react/useVirtualList.ts': {
-          branches: 94,
-          functions: 97,
-          lines: 97,
-        },
-        'packages/virtual-anchor/src/react/VirtualList.tsx': {
-          branches: 100,
-          functions: 100,
-          lines: 100,
-        },
+        // The whole React adapter, with nothing left over.
+        'packages/virtual-anchor/src/react/useItemVisibility.ts': { branches: 100, functions: 100, lines: 100 },
+        'packages/virtual-anchor/src/react/useVirtualList.ts': { branches: 100, functions: 100, lines: 100 },
+        'packages/virtual-anchor/src/react/VirtualList.tsx': { branches: 100, functions: 100, lines: 100 },
       },
     },
   },
