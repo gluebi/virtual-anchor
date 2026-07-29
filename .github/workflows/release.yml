@@ -12,9 +12,8 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-      # npm provenance: a verifiable link from the published tarball back to this commit and
-      # this workflow. It cannot be added to a version after the fact, which is why it is here
-      # before the first publish rather than after.
+      # Both the npm provenance attestation and — since this package has a trusted publisher
+      # configured — the credential the publish authenticates with. There is no npm token.
       id-token: write
     steps:
       - uses: actions/checkout@v7
@@ -24,6 +23,10 @@ jobs:
           node-version: 22
           cache: pnpm
           registry-url: https://registry.npmjs.org
+      # Trusted publishing needs npm 11.5.1+. changesets publishes through pnpm here, but
+      # pnpm's publish path still leans on the npm CLI underneath — the auth error from the
+      # tokenless run was in npm's voice — so this makes the requirement hold either way.
+      - run: npm install -g npm@latest
       - run: pnpm install --frozen-lockfile
 
       # Never publish something the suite has not passed. The release job repeats the gate
@@ -44,5 +47,7 @@ jobs:
           title: 'chore: version packages'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # No npm token: the package has a trusted publisher, so authentication is the OIDC
+          # token minted by `id-token: write` above. Nothing long-lived exists to leak, and
+          # provenance comes with it.
           NPM_CONFIG_PROVENANCE: 'true'

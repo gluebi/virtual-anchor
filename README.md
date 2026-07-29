@@ -18,6 +18,11 @@ import { VirtualList } from 'virtual-anchor/react'     // React 19 adapter
 The React entry needs React 19; the core entry needs nothing. React is an *optional* peer
 dependency, so using the core alone pulls in no framework and warns about none.
 
+Minified and brotlied, including its one dependency: **8.34 kB** for the core entry, **9.96 kB**
+if you import the React adapter (which contains the core — they share a chunk rather than
+duplicating it). Both are enforced as budgets in CI, so this figure cannot drift from the
+truth.
+
 ## Why another one
 
 Because of one design decision, from which everything else follows.
