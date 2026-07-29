@@ -256,6 +256,17 @@ reasoning about the code. This is that, made repeatable.
 | virtua `shift` | nothing; prepending is the default behaviour |
 | react-window `useDynamicRowHeight` | automatic |
 
+## Requirements
+
+React 19, and a bundler (or Node) that defines `process.env.NODE_ENV` — the same
+assumption React itself makes. Development warnings and tracing are keyed to it, and
+loading the ESM build straight from a CDN into a browser without substituting it will fail
+at module evaluation.
+
+Client-only: there is no SSR path. A virtual list cannot render meaningfully on a server
+that has no viewport, and pretending otherwise produces markup the client immediately
+throws away.
+
 ## Development
 
 ```bash
