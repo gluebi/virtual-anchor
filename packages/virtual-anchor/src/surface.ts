@@ -33,6 +33,17 @@ export interface Surface {
    */
   setContentSize(size: number): void
   /**
+   * Empty space held above the items, for `alignToBottom`.
+   *
+   * A margin on the item container rather than a spacer element, because the
+   * container is already a node this owns and its height is already written
+   * here — one more style on it costs nothing, where a spacer would need a node
+   * in every adapter and a ref to reach it. Margins are refused on *items*
+   * because no ResizeObserver box includes them; that argument does not apply to
+   * a box whose size this writes rather than measures.
+   */
+  setLeadingSpace(px: number): void
+  /**
    * Sub-pixel paint offset for the whole item container.
    *
    * Recovers the fraction of a pixel the platform refused to take on a scroll write.
@@ -77,6 +88,7 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
 
   let lastContentSize: number | null = null
   let lastCarry = 0
+  let lastLeadingSpace = 0
 
   const position = (element: HTMLElement, offset: number): void => {
     if (!styled.has(element)) {
@@ -107,6 +119,13 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
       lastContentSize = size
       const container = options.container.current
       if (container) container.style.height = `${String(size)}px`
+    },
+
+    setLeadingSpace(px) {
+      if (px === lastLeadingSpace) return
+      lastLeadingSpace = px
+      const container = options.container.current
+      if (container) container.style.marginTop = px === 0 ? '' : `${String(px)}px`
     },
 
     setCarry(px) {
@@ -145,6 +164,7 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
       elements.clear()
       lastContentSize = null
       lastCarry = 0
+      lastLeadingSpace = 0
     },
   }
 }
@@ -153,6 +173,7 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
 export function createNullSurface(): Surface {
   return {
     setContentSize: () => {},
+    setLeadingSpace: () => {},
     setCarry: () => {},
     setItemOffset: () => {},
     attachItem: () => () => {},

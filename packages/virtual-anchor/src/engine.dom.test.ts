@@ -22,8 +22,14 @@ interface Harness {
   /** Everything the surface was asked to draw, in order. */
   writes: string[]
   offset: () => number
+  /** The scroller's own maximum, for assertions about the end of the list. */
+  maxOffset: () => number
   setOffset: (value: number) => void
   scroll: (value: number) => void
+  /** Fire `scrollend`, as the platform does once scrolling has stopped. */
+  scrollSettled: () => void
+  /** Dispatch a wheel, as a reader reaching for the scroller would. */
+  userInput: () => void
   resize: (size: number) => void
   keys: (count: number, prefix?: string) => ItemKey[]
   /** Report a measured size for a key, as a ResizeObserver would. */
@@ -86,19 +92,43 @@ class FakeIntersectionObserver implements IntersectionObserver {
 }
 
 const setup = (
-  options: Partial<Parameters<typeof createEngine>[0]> & { count?: number } = {},
+  options: Partial<Parameters<typeof createEngine>[0]> & {
+    count?: number
+    /**
+     * Derive the maximum scroll offset from the content, as a browser does.
+     *
+     * Off by default so the existing tests keep their effectively-unbounded
+     * scroller. Anything about the *end* of the list needs it: following writes
+     * `getMaxScrollOffset()`, and a constant would have it write the same
+     * fictional offset whatever the content did.
+     */
+    trackContent?: boolean
+  } = {},
 ): Harness => {
-  const { count = 50, ...engineOptions } = options
+  const { count = 50, trackContent = false, ...engineOptions } = options
 
   const scroller = document.createElement('div')
   const container = document.createElement('div')
   scroller.appendChild(container)
   document.body.appendChild(scroller)
 
-  const state = { offset: 0, viewportSize: 800, contentWidth: 600 }
+  const state = {
+    offset: 0,
+    viewportSize: 800,
+    contentWidth: 600,
+    contentSize: 0,
+    leadingSpace: 0,
+  }
   const writes: string[] = []
   const elements = new Map<ItemKey, HTMLElement>()
   const scrollListeners: (() => void)[] = []
+  /**
+   * Kept apart from `scroll`, because the engine now treats them differently:
+   * following lets go on a scroll event and takes hold again only once the
+   * scrolling has settled. A harness that fired both together could not tell the
+   * two apart, and the race that motivated the split would pass unnoticed.
+   */
+  const scrollEndListeners: (() => void)[] = []
   const sizeListeners: ((size: number) => void)[] = []
 
   Object.defineProperty(scroller, 'clientWidth', {
@@ -107,7 +137,14 @@ const setup = (
   })
 
   const surface: Surface = {
-    setContentSize: (size) => writes.push(`content:${String(size)}`),
+    setContentSize: (size) => {
+      state.contentSize = size
+      writes.push(`content:${String(size)}`)
+    },
+    setLeadingSpace: (px) => {
+      state.leadingSpace = px
+      writes.push(`lead:${String(px)}`)
+    },
     setCarry: (px) => writes.push(`carry:${String(px)}`),
     setItemOffset: (key, offset) => writes.push(`item:${String(key)}@${String(offset)}`),
     attachItem: (key, element) => {
@@ -122,16 +159,24 @@ const setup = (
   const viewport: Viewport = {
     getScrollOffset: () => state.offset,
     getViewportSize: () => state.viewportSize,
-    getMaxScrollOffset: () => 1_000_000,
+    getMaxScrollOffset: () =>
+      trackContent
+        ? Math.max(0, state.contentSize + state.leadingSpace - state.viewportSize)
+        : 1_000_000,
     setScrollOffset: (next) => {
-      state.offset = next
+      // Clamped, as a real scroller clamps: following writes the maximum, and a
+      // fake that accepted anything would pass a test the browser would fail.
+      state.offset = trackContent
+        ? Math.min(Math.max(next, 0), Math.max(0, state.contentSize + state.leadingSpace - state.viewportSize))
+        : next
       writes.push(`scroll:${String(next)}`)
     },
-    addEventListener: (_type, listener) => {
-      scrollListeners.push(listener)
+    addEventListener: (type, listener) => {
+      const list = type === 'scrollend' ? scrollEndListeners : scrollListeners
+      list.push(listener)
       return () => {
-        const i = scrollListeners.indexOf(listener)
-        if (i >= 0) scrollListeners.splice(i, 1)
+        const i = list.indexOf(listener)
+        if (i >= 0) list.splice(i, 1)
       }
     },
     observeSize: (onResize) => {
@@ -165,12 +210,21 @@ const setup = (
     unmount,
     writes,
     offset: () => state.offset,
+    maxOffset: () => viewport.getMaxScrollOffset(),
     setOffset: (value) => {
       state.offset = value
     },
     scroll: (value) => {
       state.offset = value
       for (const listener of [...scrollListeners]) listener()
+    },
+    scrollSettled: () => {
+      for (const listener of [...scrollEndListeners]) listener()
+    },
+    // A real event on the real element, so this exercises the scroller's own
+    // listener rather than a stand-in for it.
+    userInput: () => {
+      scroller.dispatchEvent(new Event('wheel'))
     },
     resize: (size) => {
       state.viewportSize = size
@@ -886,5 +940,344 @@ describe('engine measured slots', () => {
 
     expect(h.engine.store.getState().totalSize).toBe(0)
     expect(h.engine.getAnchor()).toBeNull()
+  })
+})
+
+describe('engine follow-output', () => {
+  /** A follower: content-derived maximum, 50 items of 100px in an 800px port. */
+  const following = (extra: Partial<Parameters<typeof setup>[0]> = {}) =>
+    setup({ count: 50, trackContent: true, followOutput: true, ...extra })
+
+  it('opens pinned to the end', () => {
+    const h = following()
+    // 50 × 100px of content in an 800px scrollport: the bottom is 4200.
+    expect(h.offset()).toBe(4200)
+    expect(h.engine.store.getState().atBottom).toBe(true)
+  })
+
+  it('holds the bottom when comments are appended', () => {
+    const h = following()
+    h.engine.setOptions({ keys: h.keys(60) })
+
+    expect(h.offset()).toBe(5200)
+    expect(h.engine.store.getState().atBottom).toBe(true)
+  })
+
+  it('holds the bottom while the last comment is still growing', () => {
+    // The streaming case, and the one react-virtuoso #1245 is about: a message
+    // arrives short and grows as its content lands. `onItemResize` already
+    // publishes, so following needs no extra machinery to survive it.
+    const h = following()
+    mountItem(h, 'c49', 100)
+    const before = h.offset()
+
+    h.measure('c49', 900)
+
+    // Against the scroller's own maximum rather than a computed number: measuring
+    // one item also moves the *median* every unmeasured item is estimated from, so
+    // the total is not simply 800px larger. Staying at the end is the claim, and
+    // it is the claim whatever the rest of the list did.
+    expect(h.offset()).toBeGreaterThan(before)
+    expect(h.offset()).toBe(h.maxOffset())
+    expect(h.engine.store.getState().atBottom).toBe(true)
+  })
+
+  it('is not disturbed by a prepend', () => {
+    // Following pins the end; a prepend moves the start. Both are true at once,
+    // and the reader stays looking at the newest comment.
+    const h = following()
+    h.engine.setOptions({ keys: [...h.keys(10, 'older'), ...h.keys(50)] })
+
+    expect(h.offset()).toBe(5200)
+    expect(h.engine.store.getState().atBottom).toBe(true)
+  })
+
+  it('lets go when the reader scrolls away, and takes hold again when they come back', () => {
+    const h = following()
+
+    // Input first, then the scroll it caused: input is the gate, position is the
+    // test. The engine sees a wheel, then a scroll ending far from the bottom.
+    h.userInput()
+    h.scroll(1000)
+    expect(h.engine.store.getState().atBottom).toBe(false)
+
+    // An append no longer drags the reader down.
+    h.engine.setOptions({ keys: h.keys(60) })
+    expect(h.offset()).toBe(1000)
+
+    // Scrolling back to the bottom re-pins — once the scrolling has stopped.
+    h.userInput()
+    h.scroll(5200)
+    h.scrollSettled()
+    h.engine.setOptions({ keys: h.keys(70) })
+    expect(h.offset()).toBe(6200)
+  })
+
+  it('does not take hold again until the scrolling has settled', () => {
+    // The bug this split exists for. The first scroll event after a wheel can
+    // arrive while the scrolling is still in flight — momentum, an engine that
+    // scrolls asynchronously, a busy machine — so judging the position then
+    // reads "not at the bottom" and the pin never comes back, because the
+    // settle that follows carries no input to reconsider it.
+    const h = following()
+
+    // 50 × 100px in an 800px port: the bottom is 4200.
+    h.userInput()
+    h.scroll(1000)
+    // Mid-flight, on the way back down and not there yet.
+    h.scroll(3000)
+
+    // Still unpinned, because nothing has said the scrolling is over — so the
+    // append is held by the anchor rather than followed.
+    h.engine.setOptions({ keys: h.keys(60) })
+    expect(h.offset()).toBe(3000)
+
+    // Now it is over, at the bottom of the 60-item list.
+    h.scroll(5200)
+    h.scrollSettled()
+    h.engine.setOptions({ keys: h.keys(70) })
+    expect(h.offset()).toBe(6200)
+  })
+
+  it('takes hold again on the quiet timer when scrollend never comes', async () => {
+    // Not a belt-and-braces fallback: Firefox has `onscrollend` on `window` — so
+    // `supportsScrollEnd()` says yes — and fires nothing at all for a sequence of
+    // wheel deltas. Measured in the demo: zero events across a 700ms wait, on the
+    // exact gesture this feature exists for. Re-pinning on the event alone simply
+    // never happened there.
+    vi.useFakeTimers()
+    try {
+      const h = following()
+
+      // Away from the end, then back to it — 50 × 100px in an 800px port, so the
+      // bottom is 4200.
+      h.userInput()
+      h.scroll(1000)
+      h.scroll(4200)
+
+      // No `scrollSettled()` here, on purpose: this is the browser that does not
+      // send one. Until the window goes quiet the reader is still considered to
+      // be scrolling, so nothing is pinned yet.
+      await vi.advanceTimersByTimeAsync(200)
+
+      h.engine.setOptions({ keys: h.keys(60) })
+      expect(h.offset()).toBe(5200)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('ignores a settle that no input preceded', () => {
+    // The browser stops scrolling for its own reasons too — clamping after a
+    // shrink, a window of items being replaced. A settle with no wheel or touch
+    // behind it must not pin a reader who never asked to be.
+    const h = following()
+    h.userInput()
+    h.scroll(1000)
+    h.scrollSettled()
+    expect(h.offset()).toBe(1000)
+
+    // Second settle, no new input: nothing to reconsider.
+    h.scroll(4200)
+    h.scrollSettled()
+    h.engine.setOptions({ keys: h.keys(60) })
+    expect(h.offset()).toBe(4200)
+  })
+
+  it('drops a pending re-pin when the engine is disposed', async () => {
+    // The timer outlives the scroll that armed it, so teardown has to cancel it
+    // or it fires into a disposed engine.
+    vi.useFakeTimers()
+    try {
+      const h = following()
+      h.userInput()
+      h.scroll(1000)
+      h.engine.dispose()
+
+      await expect(vi.advanceTimersByTimeAsync(300)).resolves.not.toThrow()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('does not take hold again when the scrolling settles away from the end', () => {
+    const h = following()
+
+    h.userInput()
+    h.scroll(1000)
+    h.scrollSettled()
+
+    h.engine.setOptions({ keys: h.keys(60) })
+    expect(h.offset()).toBe(1000)
+  })
+
+  it('ignores a scroll the user did not cause', () => {
+    // The browser moves `scrollTop` on its own — clamping on a shrink, adjusting
+    // when a window of items is replaced. Reading that as intent would unpin a
+    // reader who never touched anything, which is why input is required.
+    const h = following()
+    h.scroll(1000)
+
+    h.engine.setOptions({ keys: h.keys(60) })
+    expect(h.offset()).toBe(5200)
+  })
+
+  it('does not follow when the option is off', () => {
+    const h = setup({ count: 50, trackContent: true })
+    h.scroll(1000)
+    h.engine.setOptions({ keys: h.keys(60) })
+
+    // The anchor holds the reader's position instead, which is the default.
+    expect(h.offset()).toBe(1000)
+  })
+
+  it('takes hold when the option is turned on, and lets go when turned off', () => {
+    const h = setup({ count: 50, trackContent: true })
+    h.scroll(1000)
+
+    h.engine.setOptions({ followOutput: true })
+    expect(h.offset()).toBe(4200)
+
+    h.engine.setOptions({ followOutput: false })
+    h.engine.setOptions({ keys: h.keys(60) })
+    expect(h.offset()).toBe(4200)
+  })
+
+  it('does not carry input from before following was switched on', () => {
+    // The flag is only set while following, so a wheel that happened when the
+    // list was not following cannot still be latched when it is — which would
+    // unpin the reader on their first scroll after the option came on, without
+    // them having touched anything since.
+    const h = setup({ count: 50, trackContent: true })
+    h.userInput()
+    h.scroll(1000)
+
+    h.engine.setOptions({ followOutput: true })
+    expect(h.offset()).toBe(4200)
+
+    h.engine.setOptions({ keys: h.keys(60) })
+    expect(h.offset()).toBe(5200)
+  })
+
+  it('does not re-pin a reader who scrolled away, on an unchanged option', () => {
+    // A consumer passing `followOutput` every render must not keep dragging the
+    // reader back to the bottom.
+    const h = following()
+    h.userInput()
+    h.scroll(1000)
+
+    h.engine.setOptions({ followOutput: true })
+    expect(h.offset()).toBe(1000)
+  })
+})
+
+describe('engine atBottom', () => {
+  it('reports a list too short to scroll as being at its end', () => {
+    // Its end is on screen, so it is. A predicate built from `visibleRange[1] ===
+    // count - 1` would say the same thing for the wrong reason — `indexAt` clamps,
+    // so that is true for a short list at any scroll position at all.
+    const h = setup({ count: 3, trackContent: true })
+    expect(h.engine.store.getState().atBottom).toBe(true)
+  })
+
+  it('honours the threshold', () => {
+    const h = setup({ count: 50, trackContent: true, atBottomThreshold: 50 })
+    h.scroll(4160)
+    expect(h.engine.store.getState().atBottom).toBe(true)
+
+    h.scroll(4100)
+    expect(h.engine.store.getState().atBottom).toBe(false)
+  })
+})
+
+describe('engine edge notifications', () => {
+  it('reports each edge once per crossing', () => {
+    const edges: string[] = []
+    const h = setup({
+      count: 50,
+      trackContent: true,
+      edgeReachedThreshold: 300,
+      onEdgeReached: (edge) => edges.push(edge),
+    })
+
+    // Starts at the top, so the start edge is reported immediately.
+    expect(edges).toEqual(['start'])
+
+    // Still near the top: not reported again.
+    h.scroll(100)
+    expect(edges).toEqual(['start'])
+
+    h.scroll(2000)
+    expect(edges).toEqual(['start'])
+
+    h.scroll(4200)
+    expect(edges).toEqual(['start', 'end'])
+
+    // Away and back reports it again, because the latch was released.
+    h.scroll(2000)
+    h.scroll(4200)
+    expect(edges).toEqual(['start', 'end', 'end'])
+  })
+
+  it('says nothing while a programmatic scroll is in flight', () => {
+    // The whole reason this belongs in the library rather than in an `onScroll`
+    // handler: a page fetched mid-animation moves the target the animation is
+    // chasing, and the README tells consumers not to do it. Owning the callback
+    // makes the mistake unavailable instead of merely documented.
+    const edges: string[] = []
+    const h = setup({
+      count: 50,
+      trackContent: true,
+      edgeReachedThreshold: 300,
+      onEdgeReached: (edge) => edges.push(edge),
+    })
+    edges.length = 0
+
+    void h.engine.scrollToIndex(49, { align: 'end' })
+    h.scroll(4200)
+
+    expect(edges).toEqual([])
+  })
+
+  it('costs nothing when no listener is installed', () => {
+    // The engine skips the whole computation, which is why the adapter spreads the
+    // option conditionally rather than always handing over a wrapper.
+    const h = setup({ count: 50, trackContent: true })
+    expect(() => {
+      h.scroll(4200)
+    }).not.toThrow()
+  })
+})
+
+describe('engine alignToBottom', () => {
+  it('holds short content against the bottom', () => {
+    // Three 100px comments in an 800px scrollport: 500px of space above them.
+    const h = setup({ count: 3, trackContent: true, alignToBottom: true })
+    expect(h.writes).toContain('lead:500')
+  })
+
+  it('adds nothing once the content fills the scrollport', () => {
+    const h = setup({ count: 50, trackContent: true, alignToBottom: true })
+    expect(h.writes.filter((w) => w.startsWith('lead:'))).toEqual(['lead:0'])
+  })
+
+  it('recomputes when the viewport changes', () => {
+    const h = setup({ count: 3, trackContent: true, alignToBottom: true })
+    h.resize(400)
+    expect(h.writes).toContain('lead:100')
+  })
+
+  it('shifts the list origin, so offsets stay consistent with it', () => {
+    // The spacer is space before the list, which is what `scrollMargin` means —
+    // so it composes into the same inset rather than being a mechanism of its own.
+    const h = setup({ count: 3, trackContent: true, alignToBottom: true })
+    // Item 0 sits at list coordinate 0, which is 500px down the scroller.
+    expect(h.engine.getAnchor()?.key).toBe('c0')
+    expect(h.engine.getAnchor()?.offsetWithinItem).toBe(-500)
+  })
+
+  it('is off by default', () => {
+    const h = setup({ count: 3, trackContent: true })
+    expect(h.writes.filter((w) => w.startsWith('lead:'))).toEqual(['lead:0'])
   })
 })

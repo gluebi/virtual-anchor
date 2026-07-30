@@ -7,7 +7,7 @@ import {
 import { composeInsets, ListGeometry, type ListInsets } from './listGeometry.js'
 import { createScrollerGate, type ScrollerGate } from './gate.js'
 import { createResizer, type Resizer } from './resizer.js'
-import { createScroller, type Scroller } from './scroller.js'
+import { createScroller, onScrollSettled, type Scroller } from './scroller.js'
 import { createNullSurface, type Surface } from './surface.js'
 import { TRACING, trace } from './trace.js'
 import { SizeCache, type SizeSnapshot } from './sizeCache.js'
@@ -44,6 +44,44 @@ export interface EngineOptions {
   /** Extra px of items mounted beyond the viewport, in each direction. */
   buffer?: number
   geometry?: ListInsets
+  /**
+   * Stay pinned to the end of the list as it grows. Off by default.
+   *
+   * Held with an instant write on every publish, which is what a streaming
+   * message or a busy chat wants — there is nothing to animate towards when the
+   * destination moves every frame, and an animation chasing it is the hazard the
+   * README's fetching contract already describes. It is also what keeps
+   * {@link onAtBottomChange} coherent: following goes to the scroller's true
+   * maximum, which is exactly where `atBottom` is measured from.
+   *
+   * Dropped when the reader scrolls away deliberately, restored when they come
+   * back to the bottom.
+   */
+  followOutput?: boolean
+  /** How close to the end still counts as being at it, in px. Default 4. */
+  atBottomThreshold?: number
+  /**
+   * Notified when either end of the *loaded* window comes within
+   * {@link edgeReachedThreshold} px, for bidirectional pagination.
+   *
+   * Suppressed while a programmatic scroll is in flight. That is the point of
+   * owning this rather than leaving it to an `onScroll` handler: the README
+   * tells consumers not to fetch during a programmatic scroll, because a
+   * prepend moves the target the animation is chasing — and a callback that
+   * cannot fire then makes the documented footgun unreachable instead of merely
+   * documented.
+   */
+  onEdgeReached?: (edge: 'start' | 'end') => void
+  /** How near an edge counts as reaching it, in px. Default 600. */
+  edgeReachedThreshold?: number
+  /**
+   * Hold short content against the bottom of the scroller rather than the top.
+   *
+   * What a chat looks like before it has a screenful in it. Implemented as space
+   * *above* the items, so anything in the `header` slot stays where a header
+   * belongs and the gap opens between it and the first message.
+   */
+  alignToBottom?: boolean
   /** Keys always kept mounted, e.g. whatever currently holds focus. */
   keepMounted?: readonly ItemKey[]
   visibility?: VisibilityOptions
@@ -113,6 +151,26 @@ export interface Engine {
 }
 
 const DEFAULT_BUFFER = 400
+/**
+ * How close to the end still counts as being at it.
+ *
+ * Small, because this is slack for rounding rather than a "near the bottom"
+ * region: `getMaxScrollOffset` is built from an integer `clientHeight` while the
+ * offset it is compared against is an exact float, and a sticky footer of 85.5px
+ * makes the disagreement routine. Four pixels absorbs that without ever calling
+ * a deliberately-scrolled-up reader pinned.
+ */
+const DEFAULT_AT_BOTTOM_THRESHOLD = 4
+/** How near an edge of the loaded window counts as reaching it. */
+const DEFAULT_EDGE_THRESHOLD = 600
+/**
+ * How long an input-driven scroll must be quiet before re-pinning is decided.
+ *
+ * The same 150ms the scroller uses to call a model still — and, as react-virtuoso
+ * and virtua arrived at independently, about the shortest window that reliably
+ * outlasts the gap between frames of a fling.
+ */
+const REPIN_QUIET_MS = 150
 
 /**
  * A shared empty inset set.
@@ -177,6 +235,23 @@ export function createEngine(initial: EngineOptions): Engine {
 
   /** The position of record. Everything else is derived from it. */
   let anchor: Anchor | null = null
+  /**
+   * Whether the view is currently pinned to the end of the list.
+   *
+   * Starts on whenever `followOutput` is set, so a chat opens at the newest
+   * message, and is dropped the moment the reader scrolls away deliberately.
+   */
+  let following = options.followOutput === true
+  /**
+   * Set by the scroller's input listener, cleared by the scroll event it precedes.
+   *
+   * Input is the *gate* and position is the *test*: a wheel says the reader
+   * reached for the scroller, and where they end up says whether they meant to
+   * leave the bottom. Neither alone is enough — the browser moves `scrollTop` by
+   * itself when content shrinks or a window of items is replaced, and reading
+   * that as intent would unpin a reader who never touched anything.
+   */
+  let sawUserInput = false
   /**
    * Offsets this module has written from the anchor, awaiting their scroll events.
    *
@@ -248,8 +323,17 @@ export function createEngine(initial: EngineOptions): Engine {
     footer: 0,
     stickyFooter: 0,
   }
-  /** Bumped on every slot change, so the composed insets can be memoised. */
-  let slotVersion = 0
+  /**
+   * Empty space held above the items so short content sits at the bottom.
+   *
+   * A fifth contribution to the same composition the slots feed, rather than a
+   * mechanism of its own — it is space before the list, which is what
+   * `scrollMargin` has always meant. Recomputed in `publish`, because it depends
+   * on the total size and the viewport and both move.
+   */
+  let leadingSpace = 0
+  /** Bumped whenever a contribution to the composed insets moves. */
+  let insetsVersion = 0
   let composedInsets: ListInsets = NO_INSETS
   let composedFrom: ListInsets | null = null
   let composedVersion = -1
@@ -273,12 +357,12 @@ export function createEngine(initial: EngineOptions): Engine {
     const base = options.geometry ?? NO_INSETS
     // Nothing has ever mounted a slot: hand back the consumer's own object, so
     // a list without slots allocates nothing and behaves exactly as before.
-    if (slotVersion === 0) return base
-    if (composedFrom === base && composedVersion === slotVersion) return composedInsets
+    if (insetsVersion === 0) return base
+    if (composedFrom === base && composedVersion === insetsVersion) return composedInsets
 
-    composedInsets = composeInsets(base, slotSizes)
+    composedInsets = composeInsets(base, { ...slotSizes, leadingSpace })
     composedFrom = base
-    composedVersion = slotVersion
+    composedVersion = insetsVersion
     return composedInsets
   }
 
@@ -286,8 +370,34 @@ export function createEngine(initial: EngineOptions): Engine {
   const setSlotSize = (slot: SlotName, size: number): boolean => {
     if (slotSizes[slot] === size) return false
     slotSizes[slot] = size
-    slotVersion++
+    insetsVersion++
     return true
+  }
+
+  /**
+   * Recompute the space that pushes short content to the bottom.
+   *
+   * Against the raw scrollport height rather than {@link ListGeometry.visibleSize}:
+   * the padding describes chrome *overlapping* the scrollport, which occupies no
+   * content, so the content still has the whole box to fill. The sticky slots are
+   * the exception and they are already in the sum, because they are in flow.
+   *
+   */
+  const syncLeadingSpace = (totalSize: number): void => {
+    const occupied =
+      slotSizes.header +
+      slotSizes.stickyHeader +
+      totalSize +
+      slotSizes.footer +
+      slotSizes.stickyFooter
+    const next =
+      options.alignToBottom === true
+        ? Math.max(0, viewport.getViewportSize() - occupied)
+        : 0
+
+    if (next === leadingSpace) return
+    leadingSpace = next
+    insetsVersion++
   }
 
   /**
@@ -308,6 +418,102 @@ export function createEngine(initial: EngineOptions): Engine {
   const syncGeometry = (): ListGeometry => {
     listGeometry.update(geometry(), viewport.getViewportSize())
     return listGeometry
+  }
+
+  /**
+   * Whether the scroller is at its end, within the configured slack.
+   *
+   * Both terms come from the viewport, deliberately. Mixing in
+   * `cache.totalSize()` would straddle two different roundings —
+   * `getMaxScrollOffset` derives from an integer `clientHeight` while
+   * `getViewportSize` uses the exact float content height — and the predicate
+   * would flicker on the sub-pixel difference. Nor is `visibleRange[1] === count
+   * - 1` usable: `indexAt` clamps, so that is true for any list shorter than the
+   * viewport at any scroll position.
+   *
+   * A list with no scroll range is at the bottom, because its end is on screen.
+   *
+   * Two entry points, one rule: `publish` has already paid for both reads and
+   * passes them in, everything else asks the viewport. Writing the comparison
+   * twice would let the store's `atBottom` — the value the consumer is told —
+   * drift from the one that decides whether to re-pin.
+   */
+  const atBottomWithin = (max: number, offset: number): boolean =>
+    max - offset <= (options.atBottomThreshold ?? DEFAULT_AT_BOTTOM_THRESHOLD)
+
+  const atBottomNow = (): boolean =>
+    atBottomWithin(viewport.getMaxScrollOffset(), viewport.getScrollOffset())
+
+  /** The pending re-pin decision, if input-driven scrolling is still in flight. */
+  let repinTimer: ReturnType<typeof setTimeout> | null = null
+
+  /**
+   * Decide whether the reader ended up back at the end, and pin them if so.
+   *
+   * Idempotent, and gated on `sawUserInput`, so the timer and `scrollend` can
+   * both call it and whichever arrives first wins.
+   */
+  const repin = (): void => {
+    if (repinTimer !== null) {
+      clearTimeout(repinTimer)
+      repinTimer = null
+    }
+    if (!sawUserInput) return
+    sawUserInput = false
+    // Re-read the option: it can have been switched off mid-scroll, in which
+    // case `setOptions` has already cleared `following`.
+    if (options.followOutput === true) following = atBottomNow()
+  }
+
+  /**
+   * Restart the quiet window after an input-driven scroll event.
+   *
+   * The same 150ms the scroller uses to call a model still, and for the same
+   * reason: it is long enough to outlast the gap between frames of a fling and
+   * short enough that a reader who has stopped does not notice the wait.
+   */
+  const armRepin = (): void => {
+    if (repinTimer !== null) clearTimeout(repinTimer)
+    repinTimer = setTimeout(repin, REPIN_QUIET_MS)
+  }
+
+  /**
+   * Which edges have already been reported since the view left them.
+   *
+   * A latch, not an identity check. `onVisibleRangeChange` can dedupe by handing
+   * back the previous tuple because a range is a *value*; reaching an edge is an
+   * *event*, and the honest way to fire it once per crossing is to remember that
+   * it fired and forget when the view moves back out of range.
+   */
+  const edgeLatched = { start: false, end: false }
+
+  /**
+   * Report either end of the loaded window coming into reach.
+   *
+   * Suppressed entirely while a programmatic scroll is in flight, which is the
+   * reason this belongs in the library rather than in an `onScroll` handler. A
+   * page fetched mid-animation moves every offset below the insertion point,
+   * including the target the animation is chasing, and the newly inserted items
+   * are unmeasured so it keeps moving as they measure. The README tells
+   * consumers not to do it and the pagination demo hand-rolls the guard; owning
+   * the callback makes the mistake unavailable instead of merely documented.
+   */
+  const notifyEdges = (scrollOffset: number, max: number): void => {
+    const report = options.onEdgeReached
+    if (!report) return
+    if (scroller.isScrolling()) return
+
+    const threshold = options.edgeReachedThreshold ?? DEFAULT_EDGE_THRESHOLD
+
+    const nearStart = scrollOffset <= threshold
+    const nearEnd = max - scrollOffset <= threshold
+
+    // An empty or short list is within reach of both ends at once, and that is
+    // not a contradiction — there is nothing between them.
+    if (nearStart && !edgeLatched.start) report('start')
+    if (nearEnd && !edgeLatched.end) report('end')
+    edgeLatched.start = nearStart
+    edgeLatched.end = nearEnd
   }
 
   /** Last applied carry, so an unchanged value is not re-written to the DOM. */
@@ -424,7 +630,20 @@ export function createEngine(initial: EngineOptions): Engine {
     // larger than the old maximum, and the browser silently clamps a write that
     // exceeds it.
     const totalSize = cache.totalSize()
+    // Before the content size and before any offset is derived: the spacer moves
+    // the list's origin, so an anchor resolved against a stale one is wrong by
+    // exactly the amount the spacer just changed by.
+    syncLeadingSpace(totalSize)
+    surface.setLeadingSpace(leadingSpace)
     surface.setContentSize(totalSize)
+
+    // Read once, after the content size is written and before anything reads an
+    // offset. `scrollHeight - clientHeight` is a layout read, and both the follow
+    // target below and the at-bottom predicate further down want the same answer
+    // from the same moment. Nothing between here and there changes it: the only
+    // writes are `scrollTop` and the sub-pixel carry, neither of which alters the
+    // scroller's extent by more than the threshold exists to absorb.
+    const maxOffset = viewport.getMaxScrollOffset()
 
     // The anchor keeps the *user's* position stable. While a programmatic scroll
     // is in flight the scroller is authoritative instead — restoring an anchor
@@ -438,7 +657,46 @@ export function createEngine(initial: EngineOptions): Engine {
       }))
     }
 
-    if (restoreScroll && anchor && !scroller.isScrolling()) {
+    // Following the output is a *mode*, not an anchor value, and the distinction is
+    // the whole reason this is a branch rather than a clever `setAnchor` call.
+    //
+    // Pinning by anchor looks like it should work: name the last key, give it an
+    // offset past its own end, let the restore below do the scrolling. It does not
+    // survive contact with the platform. The resolved offset exceeds the reachable
+    // maximum, the browser clamps the write, `carryFor` discards the excess as too
+    // large to carry, and the clamped read-back then fails `isSelfWrite`'s 1.5px
+    // tolerance — so the scroll listener re-derives the anchor from wherever it
+    // actually landed. The pin is destroyed on every publish while content grows,
+    // which is precisely when following matters.
+    //
+    // So the bottom is asked of the browser, the same way `align: 'end'` asks for
+    // the last item, and for the same reason: at the very end our own arithmetic is
+    // not what the scroller will accept. Note this goes to the *true* bottom rather
+    // than stopping short of `spaceAfter` — a reader pinned to a live thread wants
+    // the typing indicator in the footer on screen, which is the opposite of what
+    // `scrollToKey(last, { align: 'end' })` wants.
+    if (following && !scroller.isScrolling()) {
+      if (Math.abs(maxOffset - viewport.getScrollOffset()) > 0.01) {
+        // `markSelfWrite` but deliberately *not* `restoreIntents`, and the two
+        // queues mean different things. The scroller's says "this offset is mine,
+        // do not read it as the user grabbing the scrollbar". The engine's says
+        // "do not re-derive the anchor from this", which is right for a
+        // correction whose read-back may be pixel-snapped and wrong for a move.
+        //
+        // Following is a move. Suppressing the re-derivation leaves the anchor
+        // describing wherever the reader was before they were pinned, so the
+        // moment following stops — the option flipping off, the reader scrolling
+        // back — the next publish restores that stale position and the view jumps
+        // backwards. Caught by exactly that test.
+        scroller.markSelfWrite(maxOffset)
+        viewport.setScrollOffset(maxOffset)
+        applyCarry(0)
+        // Synchronously, rather than waiting for the scroll event: a publish later
+        // in the same tick would otherwise resolve the old anchor and fight this
+        // write. The event still arrives and derives the same value again.
+        anchor = deriveAnchor(viewport.getScrollOffset(), cache, geometry())
+      }
+    } else if (restoreScroll && anchor && !scroller.isScrolling()) {
       const restored = resolveAnchorOffset(anchor, cache, geometry())
       // A null restore means the anchored key left the window. For a grows-only
       // window that cannot happen; if it does, holding position beats jumping.
@@ -465,6 +723,7 @@ export function createEngine(initial: EngineOptions): Engine {
     const ranges = computeRanges(scrollOffset)
     const items = itemsFor(ranges.rendered)
     const previous = store.getState()
+    const atBottom = atBottomWithin(maxOffset, scrollOffset)
 
     store.setState({
       version: previous.version + 1,
@@ -475,7 +734,10 @@ export function createEngine(initial: EngineOptions): Engine {
       scrollOffset,
       viewportSize: viewport.getViewportSize(),
       scrolling: scroller.isScrolling(),
+      atBottom,
     })
+
+    notifyEdges(scrollOffset, maxOffset)
 
     // Positions are written here rather than by the consumer after commit, so the
     // content size, the scroll offset and the item positions all land in one pass.
@@ -700,6 +962,15 @@ export function createEngine(initial: EngineOptions): Engine {
           : [Math.max(0, startIndex - 1), Math.min(cache.length - 1, endIndex + 1)]
       publish(false)
     },
+    onUserInput() {
+      // Recorded, not acted on. The scroll event that follows is where the
+      // decision happens, because only then is there a position to judge.
+      //
+      // Only while following, so the flag cannot be set by a list that is not
+      // following and then still be latched when one is switched on — which
+      // would unpin the reader on the first scroll after enabling it.
+      sawUserInput = options.followOutput === true
+    },
     onScrollingChange(scrolling) {
       // The pin exists for the duration of one programmatic scroll; holding it after
       // would keep an arbitrary slice of the list mounted forever.
@@ -733,7 +1004,14 @@ export function createEngine(initial: EngineOptions): Engine {
         !sameInsets(next.geometry, options.geometry ?? NO_INSETS)
       const gapChanged = next.gap !== undefined && next.gap !== options.gap
 
+      // Turning following on re-pins; turning it off lets go. Only on a genuine
+      // change, so a consumer passing the same value every render does not keep
+      // re-pinning a reader who has scrolled away.
+      const followChanged =
+        next.followOutput !== undefined && next.followOutput !== options.followOutput
+
       options = { ...options, ...next }
+      if (followChanged) following = options.followOutput === true
       if (next.visibility) tracker.setOptions(next.visibility)
 
       // Before the restore below, not after: `restore` rebuilds the offset tree itself, so
@@ -855,9 +1133,48 @@ export function createEngine(initial: EngineOptions): Engine {
               skipped: restoreIndex === -1 ? null : 'self-write',
             }))
           }
+
+          // Letting go is immediate; taking hold again waits for the scrolling to
+          // stop. The asymmetry is the point.
+          //
+          // Immediate, because the alternative is fighting the reader: following
+          // writes the bottom on every publish, so staying pinned for even a few
+          // frames while they scroll away drags them back under their own hands.
+          //
+          // Re-pinning cannot use this event, though, and that was a real bug. The
+          // first scroll event after a wheel arrives while the scrolling is still
+          // in flight — momentum, an engine that scrolls asynchronously, or just a
+          // busy machine — so the position is not yet at the bottom and following
+          // stayed off for good, because the settle that followed carried no input
+          // to reconsider it. A reader who scrolled back to the end never got
+          // re-pinned. Seen first on WebKit and then on Chromium under load.
+          //
+          // `sawUserInput` is deliberately *not* cleared here: it is what tells the
+          // settle handler below that this scroll was the reader's doing.
+          if (sawUserInput && options.followOutput === true && !atBottomNow()) {
+            following = false
+          }
+          if (sawUserInput) armRepin()
+
           publish(false)
         }),
       )
+
+      /**
+       * `scrollend` corroborates the quiet timer; it does not replace it.
+       *
+       * The same relationship the scroller has with this event, and for a reason
+       * measured rather than assumed: `supportsScrollEnd()` only asks whether the
+       * property exists, and Firefox has the property while firing nothing at all
+       * for a sequence of wheel deltas — zero events across a 700ms wait, in the
+       * demo, on the exact gesture this feature is about. Re-pinning on
+       * `scrollend` alone therefore never happened there.
+       *
+       * What it buys where it does fire is latency: the reader is re-pinned as
+       * soon as the platform says the scrolling is over, rather than a further
+       * quiet window later.
+       */
+      cleanups.push(onScrollSettled(viewport, repin))
 
       const onPageHide = (): void => {
         // The only reliable unload hook: report anything visible but not yet
@@ -875,6 +1192,10 @@ export function createEngine(initial: EngineOptions): Engine {
         globalThis.removeEventListener('pagehide', onPageHide)
       })
 
+      // The spacer before the anchor, not after. `alignToBottom` moves the list's
+      // origin, and an anchor derived against an origin of zero and then resolved
+      // against the real one is wrong by the whole spacer.
+      syncLeadingSpace(cache.totalSize())
       anchor = deriveAnchor(viewport.getScrollOffset(), cache, geometry())
       publish(false)
 
@@ -1032,6 +1353,10 @@ export function createEngine(initial: EngineOptions): Engine {
       if (visibilityTimer !== null) {
         clearTimeout(visibilityTimer)
         visibilityTimer = null
+      }
+      if (repinTimer !== null) {
+        clearTimeout(repinTimer)
+        repinTimer = null
       }
       armedFor = null
       itemRefCallbacks.clear()

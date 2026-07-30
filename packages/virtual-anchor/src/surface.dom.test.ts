@@ -45,6 +45,62 @@ describe('createDomSurface content size', () => {
   })
 })
 
+describe('createDomSurface leading space', () => {
+  it('holds space above the items as a container margin', () => {
+    // A margin rather than a spacer element: the container is already owned here
+    // and its height is already written here, so one more style costs nothing —
+    // where a spacer would need a node in every adapter and a ref to reach it.
+    const { container, surface } = setup()
+    surface.setLeadingSpace(500)
+    expect(container.style.marginTop).toBe('500px')
+  })
+
+  it('clears the margin at zero rather than writing 0px', () => {
+    const { container, surface } = setup()
+    surface.setLeadingSpace(500)
+    surface.setLeadingSpace(0)
+    expect(container.style.marginTop).toBe('')
+  })
+
+  it('does not re-write an unchanged value', () => {
+    const { container, surface } = setup()
+    surface.setLeadingSpace(120)
+    const spy = vi.spyOn(container.style, 'marginTop', 'set')
+
+    surface.setLeadingSpace(120)
+    expect(spy).not.toHaveBeenCalled()
+
+    surface.setLeadingSpace(121)
+    expect(spy).toHaveBeenCalledOnce()
+  })
+
+  it('tolerates a container that has not attached yet', () => {
+    const surface = createDomSurface({ container: { current: null } })
+    expect(() => {
+      surface.setLeadingSpace(300)
+    }).not.toThrow()
+  })
+
+  it('is forgotten on dispose, so a reused surface writes it again', () => {
+    const { container, surface } = setup()
+    surface.setLeadingSpace(400)
+    surface.dispose()
+    container.style.marginTop = ''
+
+    surface.setLeadingSpace(400)
+    expect(container.style.marginTop).toBe('400px')
+  })
+})
+
+describe('createNullSurface', () => {
+  it('accepts every write and draws nothing', () => {
+    const surface = createNullSurface()
+    expect(() => {
+      surface.setLeadingSpace(100)
+    }).not.toThrow()
+  })
+})
+
 describe('createDomSurface carry', () => {
   it('shifts the container up by the residual', () => {
     // Positive carry means the browser stopped short of where we wanted, so content

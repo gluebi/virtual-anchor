@@ -35,6 +35,14 @@ export interface VirtualState {
   readonly viewportSize: number
   /** Whether a programmatic scroll is in flight. */
   readonly scrolling: boolean
+  /**
+   * Whether the scroller is at its end, within `atBottomThreshold`.
+   *
+   * Here rather than derived in a consumer because it has to be read from the
+   * viewport at publish time; `totalSize - scrollOffset - viewportSize` looks
+   * equivalent and is not, since those three do not share a rounding.
+   */
+  readonly atBottom: boolean
 }
 
 /**
@@ -55,6 +63,9 @@ export const EMPTY_STATE: VirtualState = {
   scrollOffset: 0,
   viewportSize: 0,
   scrolling: false,
+  // A list with no scroll range has its end on screen, so the honest starting
+  // value is `true` — and it is what an empty list keeps reporting.
+  atBottom: true,
 }
 
 export type VirtualStore = StoreApi<VirtualState>

@@ -1,6 +1,5 @@
 import {
   type ReactNode,
-  type UIEvent as ReactUIEvent,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -151,6 +150,15 @@ export function App(): ReactNode {
   const [headerSlotHeight, setHeaderSlotHeight] = useState(CONFIG.header)
 
   /**
+   * The library's latest at-bottom answer, for the test handle.
+   *
+   * A ref rather than state: reporting it is the point, and re-rendering the whole
+   * demo every time the reader reaches the end would be the demo doing the thing
+   * the library exists to avoid.
+   */
+  const atBottomRef = useRef(true)
+
+  /**
    * When the *page* is the scroller, everything the page renders above the list is part
    * of the scroll offset — so the list's own document offset is exactly what
    * `scrollMargin` means, and leaving it at zero puts every landing out by that much.
@@ -270,94 +278,24 @@ export function App(): ReactNode {
   }, [target])
 
   /**
-   * A handle for the Playwright suite.
+   * Fetch when either edge comes within a screenful.
    *
-   * The accuracy tests need to drive the *app's* behaviour — widen the loaded
-   * window, load a page at either end — not just the library's, because that is
-   * what the assertions are about: whether a prepend moves the view. Reaching in
-   * through a test handle keeps the assertions honest about what a real consumer
-   * does, rather than reimplementing the app inside the test.
+   * One callback for both scroller kinds. This used to be two implementations —
+   * an `onScroll` handler reading `scrollTop`/`clientHeight`/`scrollHeight` off
+   * the element, and a `window` scroll listener doing the same arithmetic against
+   * `scrollY`/`innerHeight`/`documentElement`, because the host's `onScroll` never
+   * fires when the page is what scrolls. The library knows which one it is, so it
+   * is the library's arithmetic to do.
+   *
+   * The defer-while-scrolling guard is gone with them: `onEdgeReached` does not
+   * fire while a programmatic scroll is in flight.
    */
-  useEffect(() => {
-    const handle = {
-      scrollToKey: (key: string, options?: Parameters<VirtualListHandle['scrollToKey']>[1]) =>
-        listRef.current?.scrollToKey(key, options),
-      setWindowAround: (index: number) => {
-        setWindow(initialWindow(index))
-      },
-      /**
-       * Prepend a page and report how many comments arrived.
-       *
-       * `force` skips the defer-while-scrolling protocol, for the test that deliberately
-       * breaks it — see `loadMore`.
-       */
-      loadOlder: async (force = false) => {
-        const before = window_.from
-        await loadMore('up', force)
-        // A forced load is measured mid-animation, so it must not wait for the settle
-        // that the unforced path uses to let the window state land.
-        if (!force) await sleep(FETCH_LATENCY * 2)
-        return before - windowRef.current.from
-      },
-      loadNewer: async () => {
-        const before = window_.to
-        await loadMore('down')
-        await sleep(FETCH_LATENCY * 2)
-        return windowRef.current.to - before
-      },
-      seenCount: () => entersRef.current.size,
-      /**
-       * Grow (or shrink) the measured header, and report the height it settled at.
-       *
-       * The assertion this exists for is that the view does not move by a pixel
-       * while it happens — the thing every other virtual list gets wrong when a
-       * header loads an image or swaps a font.
-       */
-      setHeaderHeight: (height: number) => {
-        setHeaderSlotHeight(height)
-        return height
-      },
-      /** The library's own idea of where the view is pinned. */
-      getAnchor: () => listRef.current?.getAnchor() ?? null,
-      takeSizeSnapshot: () => listRef.current?.takeSizeSnapshot() ?? null,
-      enterCount: (key: string) => entersRef.current.get(key) ?? 0,
-      maxEnterCount: () => Math.max(0, ...entersRef.current.values()),
-    }
-    Object.assign(window, { __list: handle })
-  }, [loadMore, window_.from, window_.to])
-
-  /** Fetch when either edge comes within a screenful. */
-  const pageAtEdges = useCallback(
-    (offset: number, viewport: number, content: number) => {
-      if (offset < 600) void loadMore('up')
-      else if (content - offset - viewport < 600) void loadMore('down')
+  const onEdgeReached = useCallback(
+    (edge: 'start' | 'end') => {
+      void loadMore(edge === 'start' ? 'up' : 'down')
     },
     [loadMore],
   )
-
-  const onScroll = useCallback(
-    (event: ReactUIEvent<HTMLDivElement>) => {
-      const element = event.currentTarget
-      pageAtEdges(element.scrollTop, element.clientHeight, element.scrollHeight)
-    },
-    [pageAtEdges],
-  )
-
-  /**
-   * The same thing for a window-scrolled list, where `onScroll` on the host never fires
-   * because the host does not scroll — the page does. Without this, window mode looked
-   * like a library limitation when it was only a missing listener in the demo.
-   */
-  useEffect(() => {
-    if (!CONFIG.windowScroller) return
-    const onWindowScroll = (): void => {
-      pageAtEdges(window.scrollY, window.innerHeight, document.documentElement.scrollHeight)
-    }
-    window.addEventListener('scroll', onWindowScroll, { passive: true })
-    return () => {
-      window.removeEventListener('scroll', onWindowScroll)
-    }
-  }, [pageAtEdges])
 
   /**
    * Insert freshly posted comments at the top or the bottom of what is loaded.
@@ -422,6 +360,67 @@ export function App(): ReactNode {
     },
     [],
   )
+
+  /**
+   * A handle for the Playwright suite.
+   *
+   * The accuracy tests need to drive the *app's* behaviour — widen the loaded
+   * window, load a page at either end — not just the library's, because that is
+   * what the assertions are about: whether a prepend moves the view. Reaching in
+   * through a test handle keeps the assertions honest about what a real consumer
+   * does, rather than reimplementing the app inside the test.
+   */
+  useEffect(() => {
+    const handle = {
+      scrollToKey: (key: string, options?: Parameters<VirtualListHandle['scrollToKey']>[1]) =>
+        listRef.current?.scrollToKey(key, options),
+      setWindowAround: (index: number) => {
+        setWindow(initialWindow(index))
+      },
+      /**
+       * Prepend a page and report how many comments arrived.
+       *
+       * `force` skips the defer-while-scrolling protocol, for the test that deliberately
+       * breaks it — see `loadMore`.
+       */
+      loadOlder: async (force = false) => {
+        const before = window_.from
+        await loadMore('up', force)
+        // A forced load is measured mid-animation, so it must not wait for the settle
+        // that the unforced path uses to let the window state land.
+        if (!force) await sleep(FETCH_LATENCY * 2)
+        return before - windowRef.current.from
+      },
+      loadNewer: async () => {
+        const before = window_.to
+        await loadMore('down')
+        await sleep(FETCH_LATENCY * 2)
+        return windowRef.current.to - before
+      },
+      seenCount: () => entersRef.current.size,
+      /**
+       * Grow (or shrink) the measured header, and report the height it settled at.
+       *
+       * The assertion this exists for is that the view does not move by a pixel
+       * while it happens — the thing every other virtual list gets wrong when a
+       * header loads an image or swaps a font.
+       */
+      setHeaderHeight: (height: number) => {
+        setHeaderSlotHeight(height)
+        return height
+      },
+      /** Post comments at either end of the loaded window; reports how far the view moved. */
+      insert: (where: 'above' | 'below', count: number) => insertComments(where, count),
+      /** Whether the library currently considers the view to be at the end. */
+      isAtBottom: () => atBottomRef.current,
+      /** The library's own idea of where the view is pinned. */
+      getAnchor: () => listRef.current?.getAnchor() ?? null,
+      takeSizeSnapshot: () => listRef.current?.takeSizeSnapshot() ?? null,
+      enterCount: (key: string) => entersRef.current.get(key) ?? 0,
+      maxEnterCount: () => Math.max(0, ...entersRef.current.values()),
+    }
+    Object.assign(window, { __list: handle })
+  }, [loadMore, insertComments, window_.from, window_.to])
 
   /**
    * Go to a comment by its position in the whole thread.
@@ -649,7 +648,12 @@ export function App(): ReactNode {
             once: CONFIG.once,
           }}
           onVisibilityChange={onVisibilityChange}
-          onScroll={onScroll}
+          onEdgeReached={onEdgeReached}
+          followOutput={CONFIG.follow}
+          alignToBottom={CONFIG.alignToBottom}
+          onAtBottomChange={(atBottom) => {
+            atBottomRef.current = atBottom
+          }}
           renderItem={(comment) => (
             <article
               className={[

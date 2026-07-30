@@ -1499,3 +1499,75 @@ describe('VirtualList measured slots', () => {
     expect(new Set(Object.values(second ?? {})).size).toBe(4)
   })
 })
+
+describe('VirtualList follow-output plumbing', () => {
+  it('reports whether the view is at the end, and only when it changes', () => {
+    // The stubbed scrollport is 600px tall over 100,000px of content, so the list
+    // starts far from its end.
+    const seen: boolean[] = []
+    render(
+      <VirtualList
+        items={comments(500)}
+        getItemKey={(c) => c.id}
+        estimateSize={() => 100}
+        onAtBottomChange={(atBottom) => { seen.push(atBottom) }}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    // Reported once, from a store subscription rather than a render — and the
+    // first report happens at all, which is what seeding the ref to `null` buys:
+    // `EMPTY_STATE.atBottom` is `true`, so seeding from it would swallow the
+    // opening state of every list that starts pinned.
+    expect(seen).toEqual([false])
+  })
+
+  it('accepts the follow options together', () => {
+    // Each is spread conditionally into `setOptions`, so a list that sets none of
+    // them leaves those branches untaken.
+    expect(() => {
+      render(
+        <VirtualList
+          items={comments(100)}
+          getItemKey={(c) => c.id}
+          followOutput
+          alignToBottom
+          atBottomThreshold={12}
+          edgeReachedThreshold={250}
+          onEdgeReached={() => {}}
+          onAtBottomChange={() => {}}
+          renderItem={(c) => <span>{c.text}</span>}
+        />,
+      )
+    }).not.toThrow()
+  })
+
+  it('exposes cancelScroll on the handle', () => {
+    // It existed on the engine and was reachable from neither the hook nor the
+    // component, so anything that started a smooth scroll could not stop it.
+    const ref = { current: null as VirtualListHandle | null }
+    render(
+      <VirtualList
+        items={comments(100)}
+        getItemKey={(c) => c.id}
+        ref={ref}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    expect(ref.current?.cancelScroll).toBeTypeOf('function')
+    expect(() => ref.current?.cancelScroll()).not.toThrow()
+  })
+
+  it('exposes cancelScroll on the headless hook too', () => {
+    const captured: { cancel?: () => void } = {}
+    function Headless(): ReactNode {
+      const list = useVirtualList({ items: comments(20), getItemKey: (c: Comment) => c.id })
+      captured.cancel = list.cancelScroll
+      return <div ref={list.scrollRef} />
+    }
+
+    render(<Headless />)
+    expect(() => captured.cancel?.()).not.toThrow()
+  })
+})
