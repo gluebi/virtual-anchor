@@ -13,6 +13,12 @@ export type {
   ScrollResult,
   ScrollToOptions,
   SizeSnapshot,
+  /**
+   * The component and the hook name their slots individually, so this is not
+   * needed for either — it is here for the `Engine` handed out by
+   * `onEngineReady`, whose `slotRef` and `observeSlot` do take one.
+   */
+  SlotName,
   TraceEvent,
   TraceSink,
   VirtualItem,

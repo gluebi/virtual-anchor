@@ -229,6 +229,60 @@ describe('scrollToIndex alignment', () => {
     expect(h.viewport.offset).toBe(99_999.5)
   })
 
+  it('stops at the last item rather than the footer below it', async () => {
+    // The end shortcut asks the browser for its maximum, which with a footer is past
+    // the last item by the footer's height — so taking it would leave the comment
+    // that far off the top of the screen. A non-zero `spaceAfter` says the trailing
+    // content has been measured, so the general case handles this item like any
+    // other: item 999 spans [99_900, 100_000), aligned to the bottom of a 600px
+    // viewport.
+    const viewport = fakeViewport({ max: 99_999.5 })
+    const h = harness({ viewport, geometry: { spaceAfter: 280 } })
+
+    await settle(h, h.scroller.scrollToIndex(999, { align: 'end' }))
+    expect(h.viewport.offset).toBe(99_400)
+  })
+
+  it('does not park the last item behind a sticky footer', async () => {
+    // A sticky footer is in-flow content *and* overlapping chrome, so it lands in
+    // `spaceAfter` and in `scrollPaddingEnd` both. An earlier attempt subtracted
+    // only `spaceAfter` from the browser's maximum, which counts the composer twice
+    // and puts the last comment exactly one composer-height too low — behind it.
+    // The Playwright suite caught that at 80.25px in all three engines.
+    const viewport = fakeViewport({ max: 99_999.5 })
+    const h = harness({
+      viewport,
+      // 200px footer plus an 80px composer below the list; the composer also covers
+      // the bottom 80px of the scrollport, leaving 520px of usable height.
+      geometry: { spaceAfter: 280, scrollPaddingEnd: 80 },
+    })
+
+    await settle(h, h.scroller.scrollToIndex(999, { align: 'end' }))
+    expect(h.viewport.offset).toBe(99_480)
+  })
+
+  it('does not scroll past the top when the footer is taller than the range', async () => {
+    // A short list with a tall footer: the whole scrollable range is footer. Nothing
+    // to align to, and negative is not an offset.
+    const viewport = fakeViewport({ max: 200 })
+    const h = harness({ viewport, count: 3, geometry: { spaceAfter: 900 } })
+
+    await settle(h, h.scroller.scrollToIndex(2, { align: 'end' }))
+    expect(h.viewport.offset).toBe(0)
+  })
+
+  it('leaves a footer out of the arithmetic for every other item', async () => {
+    // `spaceAfter` decides whether the last item may take the browser-maximum
+    // shortcut and nothing else. It is below every item, so it cannot move where any
+    // of them sits — including the last one, once the shortcut is off.
+    const withFooter = harness({ geometry: { spaceAfter: 400 } })
+    const without = harness()
+
+    await settle(withFooter, withFooter.scroller.scrollToIndex(42, { align: 'end' }))
+    await settle(without, without.scroller.scrollToIndex(42, { align: 'end' }))
+    expect(withFooter.viewport.offset).toBe(without.viewport.offset)
+  })
+
   it('clamps a target beyond the scrollable range', async () => {
     const viewport = fakeViewport({ max: 5000 })
     const h = harness({ viewport })

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createEngine, layoutSignatureFor, type Engine } from './engine.js'
 import { EMPTY_STATE } from './store.js'
 import type { Surface } from './surface.js'
-import type { ItemKey } from './types.js'
+import type { ItemKey, SlotName } from './types.js'
 import type { Viewport } from './viewport.js'
 
 /**
@@ -196,6 +196,35 @@ const setup = (
   }
 }
 
+/**
+ * Mount a slot element, as the React adapter's ref callback would.
+ *
+ * `resize` drives both halves of what a real resize is — the box the element
+ * reports and the observer callback announcing it — because the engine measures
+ * synchronously on attach and then trusts the observer for everything after.
+ */
+const mountSlot = (
+  h: Harness,
+  slot: SlotName,
+  height: number,
+): { element: HTMLElement; resize: (next: number) => void; detach: () => void } => {
+  const element = document.createElement('div')
+  const rect = vi
+    .spyOn(element, 'getBoundingClientRect')
+    .mockReturnValue(new DOMRect(0, 0, 600, height))
+  document.body.appendChild(element)
+
+  const stop = h.engine.observeSlot(element, slot)
+  return {
+    element,
+    resize: (next) => {
+      rect.mockReturnValue(new DOMRect(0, 0, 600, next))
+      FakeResizeObserver.deliverTo(element, next)
+    },
+    detach: stop,
+  }
+}
+
 /** Mount an element for a key, as the React adapter's ref callback would. */
 const mountItem = (h: Harness, key: ItemKey, height: number): HTMLElement => {
   const element = document.createElement('div')
@@ -358,6 +387,36 @@ describe('engine option plumbing', () => {
     // Same comment under the same point of the viewport, at a wholly different offset.
     expect(h.engine.getAnchor()?.key).toBe('c200')
     expect(h.offset()).toBe(50_000)
+  })
+
+  it('holds the view when the geometry changes under it', () => {
+    // The same class of event, and until the slots arrived `setOptions` did not treat
+    // it as one: a changed `geometry` fell through to a publish that re-derived
+    // nothing, so the reader was dragged by the difference.
+    const h = setup({ count: 1000 })
+    h.scroll(20_000)
+    const anchor = h.engine.getAnchor()
+
+    h.engine.setOptions({ geometry: { scrollMargin: 500 } })
+
+    expect(h.engine.getAnchor()).toEqual(anchor)
+    expect(h.offset()).toBe(20_500)
+  })
+
+  it('ignores a geometry object rebuilt with the same numbers', () => {
+    // Re-aiming pushes back the convergence loop's quiet window, and a consumer whose
+    // geometry object is rebuilt on an unrelated render would keep a smooth
+    // `scrollToKey` from ever going quiet — it runs to its 5s hard deadline and
+    // reports `deadline` with the scroll still in flight. Seen once per full
+    // Playwright run until this compared by value rather than by reference.
+    const h = setup({ count: 1000, geometry: { scrollMargin: 500 } })
+    h.scroll(20_000)
+    h.writes.length = 0
+
+    h.engine.setOptions({ geometry: { scrollMargin: 500 } })
+
+    expect(h.writes.filter((w) => w.startsWith('scroll:'))).toEqual([])
+    expect(h.offset()).toBe(20_000)
   })
 })
 
@@ -691,5 +750,141 @@ describe('engine item refs', () => {
   it('does nothing when handed null', () => {
     const h = setup({ count: 50 })
     expect(h.engine.itemRef('c3')(null)).toBeUndefined()
+  })
+})
+
+describe('engine measured slots', () => {
+  it('shifts the visible range by a measured header, as `scrollMargin` would', () => {
+    // The slot's whole promise: the consumer declares no number, and the list
+    // behaves exactly as if they had declared the right one.
+    const h = setup({ count: 1000 })
+    const header = mountSlot(h, 'header', 500)
+
+    expect(h.engine.store.getState().visibleRange[0]).toBe(0)
+    h.scroll(1500)
+    expect(h.engine.store.getState().visibleRange[0]).toBe(10)
+
+    header.detach()
+  })
+
+  it('composes a measured header with the consumer’s own `scrollMargin`', () => {
+    // They are different quantities: `scrollMargin` is the list's offset within the
+    // document, which is page chrome *outside* the component, and the header is
+    // inside it. Additive, not one replacing the other.
+    const h = setup({ count: 1000, geometry: { scrollMargin: 200 } })
+    mountSlot(h, 'header', 300)
+
+    h.scroll(1500)
+    expect(h.engine.store.getState().visibleRange[0]).toBe(10)
+  })
+
+  it('holds the view when the header grows', () => {
+    // The headline. Every other virtual list either refuses to measure this content
+    // (virtua's `startMargin`, TanStack's `scrollMargin`) or measures it and lets the
+    // view jump — virtua #458, react-virtuoso #1245. Here the anchor names an item, so
+    // the derived offset moves by exactly the header's delta and the reader does not
+    // notice anything happened.
+    const h = setup({ count: 1000 })
+    const header = mountSlot(h, 'header', 300)
+
+    h.scroll(1500)
+    const anchorBefore = h.engine.getAnchor()
+    const offsetBefore = h.offset()
+
+    header.resize(700)
+
+    expect(h.offset()).toBeCloseTo(offsetBefore + 400, 6)
+    // Not merely compensated back — never disturbed. The anchor is the position of
+    // record, and a geometry change is not a position change.
+    expect(h.engine.getAnchor()).toEqual(anchorBefore)
+  })
+
+  it('holds the view when the header shrinks', () => {
+    const h = setup({ count: 1000 })
+    const header = mountSlot(h, 'header', 700)
+
+    h.scroll(1500)
+    const anchorBefore = h.engine.getAnchor()
+    const offsetBefore = h.offset()
+
+    header.resize(300)
+
+    expect(h.offset()).toBeCloseTo(offsetBefore - 400, 6)
+    expect(h.engine.getAnchor()).toEqual(anchorBefore)
+  })
+
+  it('gives the space back when a slot unmounts', () => {
+    // react-virtuoso #1203: a header height cached past the header's own lifetime is
+    // phantom padding that nothing can account for and nothing can clear.
+    const h = setup({ count: 1000 })
+    const header = mountSlot(h, 'header', 500)
+
+    h.scroll(1500)
+    const anchorBefore = h.engine.getAnchor()
+    expect(h.engine.store.getState().visibleRange[0]).toBe(10)
+
+    header.detach()
+
+    // The space is returned by the offset shrinking, not by the reader being moved:
+    // the list now starts 500px higher up the scroller, so holding the same comment
+    // under the same pixel means scrolling 500px less far.
+    expect(h.offset()).toBeCloseTo(1000, 6)
+    expect(h.engine.getAnchor()).toEqual(anchorBefore)
+    expect(h.engine.store.getState().visibleRange[0]).toBe(10)
+  })
+
+  it('counts a sticky header against both the origin and the usable height', () => {
+    // It occupies in-flow space *and* covers the top of the scrollport, which is the
+    // distinction react-virtuoso needed `headerHeight` and `fixedHeaderHeight` for.
+    // At offset 500 a 500px sticky header puts list coordinate 0 at the scrollport
+    // top — but the visible area starts below the sticky slot, so the first item
+    // genuinely on screen is the one at list coordinate 500.
+    const h = setup({ count: 1000 })
+    mountSlot(h, 'stickyHeader', 500)
+
+    h.scroll(500)
+    expect(h.engine.store.getState().visibleRange[0]).toBe(5)
+  })
+
+  it('shrinks the visible range by a sticky footer', () => {
+    const without = setup({ count: 1000 })
+    const withComposer = setup({ count: 1000 })
+    mountSlot(withComposer, 'stickyFooter', 300)
+
+    expect(withComposer.engine.store.getState().visibleRange[1]).toBe(
+      without.engine.store.getState().visibleRange[1] - 3,
+    )
+  })
+
+  it('leaves the visible range alone for a footer that merely scrolls away', () => {
+    // A footer is below every item, so it changes what the *end* of the scroller
+    // means and nothing else. Only `align: 'end'` on the last item cares.
+    const without = setup({ count: 1000 })
+    const withFooter = setup({ count: 1000 })
+    mountSlot(withFooter, 'footer', 300)
+
+    expect(withFooter.engine.store.getState().visibleRange).toEqual(
+      without.engine.store.getState().visibleRange,
+    )
+  })
+
+  it('returns the same ref callback for a slot across calls', () => {
+    const h = setup({ count: 50 })
+    expect(h.engine.slotRef('header')).toBe(h.engine.slotRef('header'))
+    expect(h.engine.slotRef('header')).not.toBe(h.engine.slotRef('footer'))
+    expect(h.engine.slotRef('header')(null)).toBeUndefined()
+  })
+
+  it('survives an empty list with a header', () => {
+    // TanStack #827 is `getTotalSize()` going negative for an empty list with a
+    // margin set. Nothing can go negative here — the sizer covers items only and the
+    // slot is a sibling — but the case is cheap to hold onto.
+    const h = setup({ count: 0 })
+    expect(() => {
+      mountSlot(h, 'header', 300)
+    }).not.toThrow()
+
+    expect(h.engine.store.getState().totalSize).toBe(0)
+    expect(h.engine.getAnchor()).toBeNull()
   })
 })

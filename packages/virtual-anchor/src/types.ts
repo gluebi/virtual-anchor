@@ -22,6 +22,21 @@ export interface Anchor {
   readonly offsetWithinItem: number
 }
 
+/**
+ * Content that shares the scroller with the list, above or below the items.
+ *
+ * Measured rather than declared. Every other virtual list makes the height of
+ * such content your problem — virtua's `startMargin`, TanStack's `scrollMargin`
+ * — and a number that disagrees with the DOM puts every landing out by the
+ * difference, permanently and silently. Measuring it is only safe here because
+ * a changed height moves the anchor's derived `scrollTop` by exactly as much,
+ * so the view does not move: the same argument as prepending.
+ *
+ * The sticky variants occupy in-flow space *and* overlap the scrollport, so
+ * they count towards both the list's origin and the height available to items.
+ */
+export type SlotName = 'header' | 'stickyHeader' | 'footer' | 'stickyFooter'
+
 /** Where a scroll target should come to rest relative to the viewport. */
 export type ScrollAlign = 'start' | 'center' | 'end' | 'auto'
 

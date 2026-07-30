@@ -7,7 +7,7 @@
   {
     "name": "virtual-anchor/react \u2014 core and adapter, what a React consumer ships",
     "path": "packages/virtual-anchor/dist/react.js",
-    "limit": "11 kB",
+    "limit": "11.2 kB",
     "ignore": [
       "react",
       "react-dom"

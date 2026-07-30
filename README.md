@@ -18,7 +18,7 @@ import { VirtualList } from 'virtual-anchor/react'     // React 19 adapter
 The React entry needs React 19; the core entry needs nothing. React is an *optional* peer
 dependency, so using the core alone pulls in no framework and warns about none.
 
-Minified and brotlied, including its one dependency: **8.45 kB** for the core entry, **10.35 kB**
+Minified and brotlied, including its one dependency: **8.96 kB** for the core entry, **11.08 kB**
 if you import the React adapter (which contains the core — they share a chunk rather than
 duplicating it). Both are enforced as budgets in CI, so this figure cannot drift from the
 truth.
@@ -51,7 +51,15 @@ That inversion is the whole library:
   the anchor equals the target — so the scroller iterates to it instead of
   computing one offset and hoping the estimates held.
 
-And two things no other virtual list offers at all:
+And three things no other virtual list offers at all:
+
+- **Chrome that can resize without moving the view.** A `header` inside the
+  scroller is measured, not declared — and when it grows, because an image
+  decoded or a font swapped, the view does not move. Everywhere else this is
+  either your number to keep in sync (virtua's `startMargin`, TanStack's
+  `scrollMargin`) or measured without compensating, which is the jump behind
+  virtua #458 and react-virtuoso #1245. Here the anchor absorbs it for the same
+  reason it absorbs a prepend.
 
 - **Per-item viewport events.** react-virtuoso's `rangeChanged` reports the
   *rendered* range with overscan folded in, so it calls items 600px off-screen
@@ -79,7 +87,9 @@ function Thread({ comments, totalCount, firstLoadedPosition }) {
       getItemKey={(comment) => comment.id}
       estimateSize={(comment) => 56 + comment.paragraphs * 53}
       gap={12}
-      scrollPaddingStart={64}              // clear a sticky header
+      scrollPaddingStart={64}              // clear page chrome outside the list
+      header={<ThreadDescription />}       // measured; resizing it cannot move the view
+      stickyFooter={<Composer />}
       totalCount={totalCount}              // the whole thread, for aria-setsize
       firstItemPosition={firstLoadedPosition}
       ref={list}
@@ -103,7 +113,10 @@ if (result.settled) flash('comment-4211')
 else console.warn('could not land:', result.reason, result.deviation)
 ```
 
-The headless `useVirtualList` gives the same engine with your own markup.
+The headless `useVirtualList` gives the same engine with your own markup, including
+`headerRef`, `stickyHeaderRef`, `footerRef` and `stickyFooterRef` for the slots below —
+attach them in that order around `containerRef`, since that is the layout their measured
+heights are composed for.
 
 ## Four contracts worth reading before you start
 
@@ -212,14 +225,44 @@ adapter. Generated reference: `pnpm docs`.
 
 Key options: `items`, `getItemKey`, `estimateSize`, `gap`, `buffer`,
 `scrollPaddingStart`/`End`, `scrollMargin`, `keepMounted`, `visibility`,
-`sizeSnapshot`, `windowScroller`, `before`, `onVisibleRangeChange`, and on the
-component `scrollerRef` and `onEngineReady`.
+`sizeSnapshot`, `windowScroller`, `onVisibleRangeChange`, the four slots below, and on
+the component `scrollerRef` and `onEngineReady`.
 
-`scrollMargin` is how much content precedes the list *inside the same scroller*, and
-`before` is where you put that content — a description, a filter bar. Their heights
-have to agree. With `windowScroller`, the scroller is the page, so `scrollMargin` is
-the list's offset within the document: measure it rather than assuming, since page
-chrome and its borders count.
+### Content around the list
+
+Four slots hold content that shares the scroller with the items: `header` and
+`footer` scroll away with the list, `stickyHeader` and `stickyFooter` pin to an edge.
+They render in that order — header, stickyHeader, items, footer, stickyFooter — so a
+filter bar pins once the description has scrolled out from under it, and an "end of
+thread" note scrolls above a pinned composer.
+
+**All four are measured, and this is the part no other virtual list does.** Everywhere
+else the height of content above the list is a number you supply — virtua's
+`startMargin`, TanStack's `scrollMargin` — and a number that disagrees with the DOM
+puts every landing out by the difference, silently and permanently. react-virtuoso does
+measure its `Header`, but does not compensate the scroll position when it changes, so a
+header that loads an image shoves the view down mid-read.
+
+Measuring is safe here for the same reason prepending is: the anchor names a comment,
+not an offset. When a slot's height changes, the derived `scrollTop` changes by exactly
+as much, and the same pixel of the same comment stays under the same row of the screen.
+A header can decode an image, swap a font or take a late translation and the reader
+sees nothing happen.
+
+Style them through `[data-virtual-slot="header"]` and friends. Put no block margin on
+your own content's outermost element — the wrapper establishes a block formatting
+context so a margin cannot escape it, but a margin *on* the wrapper's child edge is the
+one thing ResizeObserver cannot see, the same contract items have.
+
+`scrollToKey(lastKey, { align: 'end' })` stops at the last comment rather than
+scrolling on to the footer, and an item aligned to the end comes to rest above a sticky
+footer rather than behind it.
+
+`scrollMargin` survives alongside them, and now means only what it always described:
+how far the list sits down the *document*, which matters for `windowScroller` where
+page chrome above the component is part of the scroll offset. Measure it rather than
+assuming, since borders count. It composes with a measured header rather than being
+replaced by it.
 
 Handle: `scrollToKey`, `scrollToIndex`, `cancelScroll`, `isScrolling` (see the
 fetching contract above), `focusItem`, `getAnchor`/`setAnchor` (persist a position
@@ -296,6 +339,11 @@ reasoning about the code. This is that, made repeatable.
 |---|---|
 | TanStack `scrollToIndex` + `scrollAdjustments` | `scrollToKey`; there is no adjustment concept to configure |
 | TanStack `getItemKey` | `getItemKey` — but keys are load-bearing here, not an optimisation |
+| TanStack `scrollMargin` for a header, plus your own ResizeObserver | `header`; it is measured for you |
+| Virtuoso `components={{ Header, Footer }}` | `header` / `footer` as elements — no component types, so no remount-on-inline footgun |
+| Virtuoso `headerFooterTag` | nothing; style the wrapper through `[data-virtual-slot]` |
+| Virtuoso `topItemCount` / `TopItemList` | `stickyHeader`, which is measured into the visible area rather than pinning *items* |
+| virtua `startMargin` | nothing; mount a `header` and it is measured |
 | Virtuoso `firstItemIndex` | nothing; just pass a longer array |
 | Virtuoso `rangeChanged` | `onVisibleRangeChange` (excludes buffer) or per-item `onVisibilityChange` |
 | Virtuoso `computeItemKey` | `getItemKey` |

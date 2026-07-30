@@ -142,6 +142,15 @@ export function App(): ReactNode {
   }, [])
 
   /**
+   * The measured header slot's height, which the suite can change at will.
+   *
+   * The point of the slot is that this number is the library's problem, not the
+   * consumer's — so the demo changes it and asserts the view did not move,
+   * rather than declaring it anywhere the library can read.
+   */
+  const [headerSlotHeight, setHeaderSlotHeight] = useState(CONFIG.header)
+
+  /**
    * When the *page* is the scroller, everything the page renders above the list is part
    * of the scroll offset — so the list's own document offset is exactly what
    * `scrollMargin` means, and leaving it at zero puts every landing out by that much.
@@ -297,6 +306,17 @@ export function App(): ReactNode {
         return windowRef.current.to - before
       },
       seenCount: () => entersRef.current.size,
+      /**
+       * Grow (or shrink) the measured header, and report the height it settled at.
+       *
+       * The assertion this exists for is that the view does not move by a pixel
+       * while it happens — the thing every other virtual list gets wrong when a
+       * header loads an image or swaps a font.
+       */
+      setHeaderHeight: (height: number) => {
+        setHeaderSlotHeight(height)
+        return height
+      },
       /** The library's own idea of where the view is pinned. */
       getAnchor: () => listRef.current?.getAnchor() ?? null,
       takeSizeSnapshot: () => listRef.current?.takeSizeSnapshot() ?? null,
@@ -576,18 +596,40 @@ export function App(): ReactNode {
           gap={12}
           scrollPaddingStart={CONFIG.paddingStart === 0 ? 0 : headerHeight}
           {...(restoredSnapshot === undefined ? {} : { sizeSnapshot: restoredSnapshot })}
-          scrollMargin={CONFIG.scrollMargin + documentOffset}
-          // Real content above the list inside the same scroller, which is the layout
-          // `scrollMargin` exists for. Its height has to match the option exactly.
-          before={
-            CONFIG.scrollMargin > 0 ? (
+          // Only the page chrome above the component now. Content *inside* the
+          // scroller goes in a slot and is measured, so there is no number here
+          // to keep in step with it.
+          scrollMargin={documentOffset}
+          header={
+            CONFIG.header === 0 ? undefined : (
               <div
                 data-testid="above-list"
-                style={{ height: CONFIG.scrollMargin, padding: 16, boxSizing: 'border-box' }}
+                style={{ height: headerSlotHeight, padding: 16, boxSizing: 'border-box' }}
               >
                 Thread description, rendered above the list inside the same scroller.
               </div>
-            ) : undefined
+            )
+          }
+          footer={
+            CONFIG.footer === 0 ? undefined : (
+              <div
+                data-testid="below-list"
+                style={{ height: CONFIG.footer, padding: 16, boxSizing: 'border-box' }}
+              >
+                You have reached the end of the thread.
+              </div>
+            )
+          }
+          stickyFooter={
+            CONFIG.stickyFooter === 0 ? undefined : (
+              <div
+                data-testid="sticky-composer"
+                className="sticky-composer"
+                style={{ height: CONFIG.stickyFooter, padding: 16, boxSizing: 'border-box' }}
+              >
+                Write a reply…
+              </div>
+            )
           }
           windowScroller={CONFIG.windowScroller}
           totalCount={thread.length}

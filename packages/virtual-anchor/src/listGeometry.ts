@@ -20,6 +20,97 @@ export interface ListInsets {
    * Non-zero when the page itself scrolls and there is content above the list.
    */
   scrollMargin?: number
+  /**
+   * In-flow content occupying scrollable space *after* the last item.
+   *
+   * **Read as a predicate, not as a quantity: do not subtract it.** The one
+   * production caller asks only whether it is zero. A sticky footer is in-flow
+   * content *and* overlapping chrome, so it is counted here *and* in
+   * {@link scrollPaddingEnd}, and subtracting this from the browser's maximum
+   * therefore takes it twice — which parks the last item one composer-height
+   * too low, behind the composer. Measured at 80.25px out in all three engines
+   * before the scroller stopped doing it.
+   *
+   * What it decides: the scroller's `align: 'end'` shortcut for the last item
+   * asks the browser for its maximum scroll offset rather than trusting our own
+   * arithmetic at the very end of the list. That is right when the trailing
+   * space is unmeasurable — a border, padding on the scroller — and wrong when
+   * it is a footer, because the maximum is then past the last item. Non-zero
+   * here means the trailing space is known, so the shortcut is skipped and the
+   * general alignment handles the item from exact offsets.
+   *
+   * Deliberately absent from {@link toList}, {@link toScroll} and
+   * {@link visibleSizeOf}: content below every item cannot move where any of
+   * them sits, and an anchor that shifted when a footer mounted would be a bug.
+   */
+  spaceAfter?: number
+}
+
+/**
+ * The height genuinely available to items, for insets that have no geometry.
+ *
+ * A free function because the scroller holds raw `ListInsets` and had written
+ * this subtraction out by hand — a second copy of the expression, in the file
+ * that decides where a scroll lands. Sticky slots made that a live hazard
+ * rather than a tidiness complaint: they feed `scrollPaddingStart`, and a copy
+ * that forgot them would land every `align: 'end'` under the sticky footer.
+ *
+ * Floored at zero; see {@link ListGeometry.visibleSize}.
+ */
+export function visibleSizeOf(insets: ListInsets, viewportSize: number): number {
+  return Math.max(
+    0,
+    viewportSize - (insets.scrollPaddingStart ?? 0) - (insets.scrollPaddingEnd ?? 0),
+  )
+}
+
+/**
+ * Measured chrome around the list, before it is mapped onto the insets.
+ *
+ * Every field is a height in px, and zero means "not present".
+ */
+export interface InsetContributions {
+  /** In-flow content above the items that scrolls away with them. */
+  header?: number
+  /** Content above the items that also covers the top of the scrollport. */
+  stickyHeader?: number
+  /** In-flow content below the items that scrolls away with them. */
+  footer?: number
+  /** Content below the items that also covers the bottom of the scrollport. */
+  stickyFooter?: number
+}
+
+/**
+ * Fold measured chrome into a consumer's own insets.
+ *
+ * Here rather than in the engine because this is a statement about what
+ * `ListInsets` *fields mean*, and `ListInsets` could not be read correctly from
+ * its own file without it. The engine owns the measurements; the mapping from a
+ * measurement to a channel belongs with the channels.
+ *
+ * The rule that is easy to get wrong: a `position: sticky` slot occupies in-flow
+ * space *and* covers part of the scrollport, so it counts **twice** — once
+ * towards where the list begins, once towards how much of the scrollport the
+ * items can use. react-virtuoso needed two separate measured values
+ * (`headerHeight` and `fixedHeaderHeight`) for exactly this; TanStack conflated
+ * them into `paddingStart` and had to add `scrollPaddingStart` afterwards.
+ *
+ * Returns `base` untouched when there is nothing to fold in, so a list with no
+ * chrome allocates nothing and behaves exactly as it did before slots existed.
+ */
+export function composeInsets(base: ListInsets, chrome: InsetContributions): ListInsets {
+  const header = chrome.header ?? 0
+  const stickyHeader = chrome.stickyHeader ?? 0
+  const footer = chrome.footer ?? 0
+  const stickyFooter = chrome.stickyFooter ?? 0
+  if (header === 0 && stickyHeader === 0 && footer === 0 && stickyFooter === 0) return base
+
+  return {
+    scrollMargin: (base.scrollMargin ?? 0) + header + stickyHeader,
+    scrollPaddingStart: (base.scrollPaddingStart ?? 0) + stickyHeader,
+    scrollPaddingEnd: (base.scrollPaddingEnd ?? 0) + stickyFooter,
+    spaceAfter: (base.spaceAfter ?? 0) + footer + stickyFooter,
+  }
 }
 
 /** A range of list coordinates. */
@@ -71,14 +162,24 @@ export class ListGeometry {
     return this.#insets.scrollMargin ?? 0
   }
 
+  // No `spaceAfter` getter on purpose. This class is the conversion, and
+  // `spaceAfter` is deliberately not part of it — the scroller reads the raw
+  // inset. A getter here would suggest the class owns a field it excludes from
+  // every method it has.
+
   /**
    * The height genuinely available to items, once overlapping chrome is removed.
    *
    * Alignment maths is all expressed against this rather than the raw scrollport
    * height, so padding never has to be reasoned about twice.
+   *
+   * Floored at zero. Chrome taller than the scrollport is a real configuration —
+   * a sticky composer on a short viewport, a phone in landscape — and a negative
+   * height would invert `visibleBand`, which silently stops every visibility
+   * event rather than reporting nothing visible. Nothing is visible; say so.
    */
   visibleSize(): number {
-    return this.#viewportSize - this.paddingStart - this.paddingEnd
+    return visibleSizeOf(this.#insets, this.#viewportSize)
   }
 
   /**

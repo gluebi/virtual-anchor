@@ -6,6 +6,8 @@ import {
   scrollTo,
   setWindowAround,
   TOLERANCE,
+  visibleRowTops,
+  worstMovement,
   type ScrollOptions,
   type View,
 } from './helpers.js'
@@ -35,6 +37,15 @@ interface Scenario {
    * copy of the harness.
    */
   paged?: boolean
+  /**
+   * Height of the scenario's sticky footer slot, which shrinks the visible area.
+   *
+   * Declared here rather than measured, unlike the sticky *header*: the demo's page
+   * header wraps as the window narrows, so its height genuinely has to be observed;
+   * the composer is a fixed box set from the same URL parameter the library measures,
+   * which makes this the independent check that the two agree.
+   */
+  stickyFooter?: number
 }
 
 const SCENARIOS: Scenario[] = [
@@ -42,10 +53,11 @@ const SCENARIOS: Scenario[] = [
     name: 'inner scroller, a sticky header',
     query: 'paddingStart=64',
   },
-  { name: 'inner scroller, no header', query: 'paddingStart=0', paddingStart: 0 },
+  { name: 'inner scroller, no header', query: 'paddingStart=0' },
   {
-    name: 'inner scroller, content above the list',
-    query: 'paddingStart=64&scrollMargin=300',
+    name: 'inner scroller, measured slots above and below the list',
+    query: 'paddingStart=64&header=300&footer=200&stickyFooter=80',
+    stickyFooter: 80,
   },
   {
     name: 'window scroller',
@@ -75,6 +87,7 @@ const openScenario = (page: Parameters<typeof open>[0], scenario: Scenario): Pro
  */
 const viewOf = async (page: Parameters<typeof open>[0], scenario: Scenario): Promise<View> => ({
   paddingStart: await headerHeight(page),
+  ...(scenario.stickyFooter === undefined ? {} : { paddingEnd: scenario.stickyFooter }),
   ...(scenario.windowScroller === true ? { windowScroller: true } : {}),
 })
 
@@ -191,5 +204,87 @@ test.describe('accuracy matrix — deep targets in a fully loaded thread', () =>
       }
     }
     expect(failures, failures.join('\n')).toEqual([])
+  })
+})
+
+test.describe('measured slots', () => {
+  const SLOTS = 'loadAll=1&paddingStart=64&header=300&footer=200&stickyFooter=80'
+
+  test('a header that grows does not move the view by a pixel', async ({ page }) => {
+    // The whole reason the slots can be measured at all. Every other virtual list
+    // either refuses to measure this content or measures it and lets the view jump —
+    // virtua #458, react-virtuoso #1245. Here the anchor names a comment, so a header
+    // growing by 400px moves `scrollTop` by 400px and the comment does not move.
+    await open(page, SLOTS)
+    await scrollTo(page, 4211, { align: 'start' })
+
+    const before = await visibleRowTops(page)
+    const anchorBefore = await page.evaluate(() => window.__list.getAnchor())
+
+    await page.evaluate(() => window.__list.setHeaderHeight(700))
+    // Two frames: one for React to commit the new height, one for the ResizeObserver
+    // callback and the corrective write it provokes to land.
+    await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(resolve)
+          })
+        }),
+    )
+
+    const after = await visibleRowTops(page)
+    const moved = worstMovement(before, after)
+    expect(moved, 'no shared rows — the view changed entirely').not.toBeNull()
+    expect(moved).toBeLessThanOrEqual(TOLERANCE)
+
+    // And the position of record is untouched, not merely compensated back.
+    expect(await page.evaluate(() => window.__list.getAnchor())).toEqual(anchorBefore)
+  })
+
+  test('a shrinking header holds the view too', async ({ page }) => {
+    // The other direction, which is the one an unmount takes: react-virtuoso #1203 is a
+    // header height that outlived its header as space nothing could account for.
+    await open(page, SLOTS)
+    await scrollTo(page, 4211, { align: 'start' })
+
+    const before = await visibleRowTops(page)
+    await page.evaluate(() => window.__list.setHeaderHeight(60))
+    await page.evaluate(
+      () =>
+        new Promise((resolve) => {
+          requestAnimationFrame(() => {
+            requestAnimationFrame(resolve)
+          })
+        }),
+    )
+
+    const moved = worstMovement(before, await visibleRowTops(page))
+    expect(moved, 'no shared rows — the view changed entirely').not.toBeNull()
+    expect(moved).toBeLessThanOrEqual(TOLERANCE)
+  })
+
+  test('align end on the last comment stops at the comment, not the footer', async ({ page }) => {
+    // Without `spaceAfter` the end shortcut returns the browser's maximum scroll offset,
+    // which with 200px of footer and an 80px composer below the list is 280px past where
+    // the last comment should come to rest — so the comment would be off the top of the
+    // screen by that much.
+    await open(page, SLOTS)
+
+    const result = await scrollTo(page, 11_999, { align: 'end' })
+    expect(result.settled).toBe(true)
+
+    const landing = await measure(page, 11_999, 'end', {
+      paddingStart: await headerHeight(page),
+      paddingEnd: 80,
+    })
+    expect(landing.found).toBe(true)
+    expect(Math.abs(landing.error)).toBeLessThanOrEqual(TOLERANCE)
+
+    // And it is genuinely short of the bottom, by the footer plus the composer.
+    const fromBottom = await page
+      .locator('.scroller')
+      .evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)
+    expect(fromBottom).toBeGreaterThan(100)
   })
 })

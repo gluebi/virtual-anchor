@@ -4,7 +4,7 @@ import {
   isSelfWrite,
   resolveAnchorOffset,
 } from './anchor.js'
-import { ListGeometry, type ListInsets } from './listGeometry.js'
+import { composeInsets, ListGeometry, type ListInsets } from './listGeometry.js'
 import { createScrollerGate, type ScrollerGate } from './gate.js'
 import { createResizer, type Resizer } from './resizer.js'
 import { createScroller, type Scroller } from './scroller.js'
@@ -18,7 +18,7 @@ import {
   type VirtualState,
   type VirtualStore,
 } from './store.js'
-import type { Anchor, ItemKey, ScrollResult, ScrollToOptions } from './types.js'
+import type { Anchor, ItemKey, ScrollResult, ScrollToOptions, SlotName } from './types.js'
 import type { Viewport } from './viewport.js'
 import {
   VisibilityTracker,
@@ -71,6 +71,16 @@ export interface Engine {
   mount(): () => void
   observeItem(element: Element, key: ItemKey): () => void
   /**
+   * Start measuring a slot. Returns its own cleanup, for a ref callback.
+   *
+   * Detaching gives the space back rather than merely forgetting it: a header
+   * that unmounts while its measured height lingers is phantom padding nothing
+   * can account for, which is react-virtuoso #1203.
+   */
+  observeSlot(element: Element, slot: SlotName): () => void
+  /** A stable ref callback for a slot, memoised the way {@link itemRef} is. */
+  slotRef(slot: SlotName): (element: HTMLElement | null) => (() => void) | undefined
+  /**
    * A stable ref callback for an item.
    *
    * Memoised per key *here*, because the identity has to survive every render and the
@@ -105,6 +115,32 @@ export interface Engine {
 const DEFAULT_BUFFER = 400
 
 /**
+ * A shared empty inset set.
+ *
+ * Shared so that "the consumer passed no geometry" is a stable reference, which
+ * is what lets the composed insets be memoised against it.
+ */
+const NO_INSETS: ListInsets = {}
+
+/**
+ * Whether two inset sets describe the same layout.
+ *
+ * By value, not by reference, and the difference is load-bearing. A geometry
+ * change now re-applies the anchor and re-aims any in-flight scroll — which is
+ * right, because the target really has moved — but re-aiming also pushes back
+ * the convergence loop's 150ms quiet window. A consumer whose `geometry` object
+ * is rebuilt on some unrelated render would therefore keep a smooth
+ * `scrollToKey` from ever going quiet, and it would run to its 5s hard deadline
+ * and report `deadline` with the scroll still in flight. Observed exactly once
+ * per full Playwright run before this comparison existed.
+ */
+const sameInsets = (a: ListInsets, b: ListInsets): boolean =>
+  a.scrollMargin === b.scrollMargin &&
+  a.scrollPaddingStart === b.scrollPaddingStart &&
+  a.scrollPaddingEnd === b.scrollPaddingEnd &&
+  a.spaceAfter === b.spaceAfter
+
+/**
  * Wires the cache, anchor, resizer, scroller, visibility tracker and gate into
  * one object, and owns the single rule that makes the whole thing work:
  * **`scrollTop` is derived from the anchor whenever the layout changes.**
@@ -136,6 +172,8 @@ export function createEngine(initial: EngineOptions): Engine {
    * Pruned to the rendered window on every publish, so it cannot outgrow the list.
    */
   const itemRefCallbacks = new Map<ItemKey, (element: HTMLElement | null) => (() => void) | undefined>()
+  /** The same, for the four slots. Fixed set, so nothing to prune. */
+  const slotRefCallbacks = new Map<SlotName, (element: HTMLElement | null) => (() => void) | undefined>()
 
   /** The position of record. Everything else is derived from it. */
   let anchor: Anchor | null = null
@@ -194,7 +232,79 @@ export function createEngine(initial: EngineOptions): Engine {
    * range and once for the visibility sample — and had to be kept in step by hand.
    */
   const listGeometry = new ListGeometry()
-  const geometry = (): ListInsets => options.geometry ?? {}
+
+  /**
+   * Measured heights of the four slots, all zero until one mounts.
+   *
+   * Engine state rather than an option, because they are facts about the DOM
+   * rather than a consumer's declaration — which is the whole point of the
+   * slots. virtua's `startMargin` and TanStack's `scrollMargin` are the same
+   * quantity left as a number for the consumer to keep in step by hand, and
+   * both have long-lived issues asking for it to be measured instead.
+   */
+  const slotSizes: Record<SlotName, number> = {
+    header: 0,
+    stickyHeader: 0,
+    footer: 0,
+    stickyFooter: 0,
+  }
+  /** Bumped on every slot change, so the composed insets can be memoised. */
+  let slotVersion = 0
+  let composedInsets: ListInsets = NO_INSETS
+  let composedFrom: ListInsets | null = null
+  let composedVersion = -1
+
+  /**
+   * The consumer's insets with the measured slots folded in.
+   *
+   * Composed into a plain `ListInsets` rather than held beside one, because
+   * `anchor.ts` builds a throwaway `ListGeometry` from whatever object it is
+   * handed — so a measurement kept anywhere else would simply not be seen by
+   * the conversion that matters.
+   *
+   * The mapping itself lives with `ListInsets` as {@link composeInsets} — which
+   * channel a measurement feeds is a fact about the channels, not about this
+   * file. What stays here is the state and the memo.
+   *
+   * Memoised on the source object and the slot version: this runs on every
+   * publish, and every scroll frame publishes.
+   */
+  const geometry = (): ListInsets => {
+    const base = options.geometry ?? NO_INSETS
+    // Nothing has ever mounted a slot: hand back the consumer's own object, so
+    // a list without slots allocates nothing and behaves exactly as before.
+    if (slotVersion === 0) return base
+    if (composedFrom === base && composedVersion === slotVersion) return composedInsets
+
+    composedInsets = composeInsets(base, slotSizes)
+    composedFrom = base
+    composedVersion = slotVersion
+    return composedInsets
+  }
+
+  /** Record a slot measurement. Returns whether it actually moved. */
+  const setSlotSize = (slot: SlotName, size: number): boolean => {
+    if (slotSizes[slot] === size) return false
+    slotSizes[slot] = size
+    slotVersion++
+    return true
+  }
+
+  /**
+   * A slot changed height, so the list's origin moved.
+   *
+   * The same treatment as a measurement landing, and for the same reason: the
+   * anchor names an item, `resolveAnchorOffset` re-derives `scrollTop` from it
+   * against the new geometry, and the two movements cancel exactly. This is the
+   * bug every other library has — a header that loads an image and shoves the
+   * view down — not being written here rather than being fixed here.
+   */
+  const onSlotGeometryChange = (): void => {
+    if (TRACING) trace('slot.resize', () => ({ ...slotSizes }))
+    publish(true)
+    scroller.notifyModelChanged()
+  }
+
   const syncGeometry = (): ListGeometry => {
     listGeometry.update(geometry(), viewport.getViewportSize())
     return listGeometry
@@ -526,6 +636,14 @@ export function createEngine(initial: EngineOptions): Engine {
       publish(true)
       scroller.notifyModelChanged()
     },
+
+    onSlotResize(batch) {
+      let changed = false
+      for (const [slot, size] of batch) {
+        if (setSlotSize(slot, size)) changed = true
+      }
+      if (changed) onSlotGeometryChange()
+    },
   })
 
   /**
@@ -607,6 +725,14 @@ export function createEngine(initial: EngineOptions): Engine {
       // 12,000-entry snapshot at a time.
       const snapshot = next.sizeSnapshot
 
+      // Captured before the merge: both move every offset below them, so both
+      // belong with the prepend case below rather than with the quiet options.
+      const geometryChanged =
+        next.geometry !== undefined &&
+        next.geometry !== options.geometry &&
+        !sameInsets(next.geometry, options.geometry ?? NO_INSETS)
+      const gapChanged = next.gap !== undefined && next.gap !== options.gap
+
       options = { ...options, ...next }
       if (next.visibility) tracker.setOptions(next.visibility)
 
@@ -638,7 +764,15 @@ export function createEngine(initial: EngineOptions): Engine {
 
       // A changed estimate moves every unmeasured item, which is the same class of event as
       // a prepend: both need the anchor re-applied and any in-flight scroll re-aimed.
-      const modelChanged = keysChanged || estimateChanged
+      //
+      // So do a changed `gap` and a changed `geometry`, and until the slots work
+      // neither said so: both fell through to `publish(false)`, which re-derives
+      // nothing and tells an in-flight scroll nothing. `gap` was latent — a
+      // consumer changing spacing mid-scroll is rare. `geometry` stopped being
+      // latent the moment a measured header started feeding `scrollMargin`,
+      // because that is a geometry change arriving on its own, mid-scroll, for
+      // every list that has one.
+      const modelChanged = keysChanged || estimateChanged || gapChanged || geometryChanged
       if (modelChanged) {
         // A prepend moves the target of an in-flight scroll as surely as a measurement
         // does, and the newly inserted items are unmeasured, so more movement follows as
@@ -782,6 +916,22 @@ export function createEngine(initial: EngineOptions): Engine {
       }
     },
 
+    observeSlot(element, slot) {
+      if (TRACING) trace('slot.attach', () => ({ slot }))
+
+      // Measured synchronously for the same reason an item is: ResizeObserver's
+      // first callback lands after the next rendering update, and a slot whose
+      // height is still zero at that point means every item below it is
+      // positioned against the wrong origin for one painted frame.
+      if (setSlotSize(slot, resizer.measure(element))) onSlotGeometryChange()
+
+      const stopObserving = resizer.observeSlot(element, slot)
+      return () => {
+        stopObserving()
+        if (setSlotSize(slot, 0)) onSlotGeometryChange()
+      }
+    },
+
     scrollToKey(key, scrollOptions) {
       if (cache.length === 0) {
         return Promise.resolve({ settled: false, deviation: 0, iterations: 0, reason: 'empty' as const })
@@ -828,6 +978,18 @@ export function createEngine(initial: EngineOptions): Engine {
         return this.observeItem(element, key)
       }
       itemRefCallbacks.set(key, callback)
+      return callback
+    },
+
+    slotRef(slot) {
+      const existing = slotRefCallbacks.get(slot)
+      if (existing) return existing
+
+      const callback = (element: HTMLElement | null): (() => void) | undefined => {
+        if (element === null || disposed) return undefined
+        return this.observeSlot(element, slot)
+      }
+      slotRefCallbacks.set(slot, callback)
       return callback
     },
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { createResizer, type ResizeBatch } from './resizer.js'
+import { createResizer, type ResizeBatch, type SlotResizeBatch } from './resizer.js'
 
 /**
  * A controllable stand-in for ResizeObserver.
@@ -318,5 +318,145 @@ describe('createResizer margin warnings', () => {
 
     resizer.observeItem(item, 'a')
     expect(warn).not.toHaveBeenCalled()
+  })
+})
+
+describe('createResizer slots', () => {
+  /** jsdom lays nothing out, so a slot has to be told it has a box. */
+  const addSlot = (laidOut = true): HTMLElement => {
+    const el = addItem()
+    vi.spyOn(el, 'getClientRects').mockReturnValue(
+      (laidOut ? [new DOMRect(0, 0, 600, 0)] : []) as unknown as DOMRectList,
+    )
+    return el
+  }
+
+  it('reports slot sizes on their own channel, in one batch', () => {
+    const onSlotResize = vi.fn<(batch: SlotResizeBatch) => void>()
+    const resizer = createResizer({ onItemResize: vi.fn(), onSlotResize })
+
+    const header = addSlot()
+    const footer = addSlot()
+    resizer.observeSlot(header, 'header')
+    resizer.observeSlot(footer, 'footer')
+
+    FakeResizeObserver.latest().deliver([
+      [header, 300],
+      [footer, 120],
+    ])
+
+    expect(onSlotResize).toHaveBeenCalledTimes(1)
+    expect(onSlotResize.mock.calls[0]?.[0]).toEqual([
+      ['header', 300],
+      ['footer', 120],
+    ])
+  })
+
+  it('keeps slots and items apart in a mixed callback', () => {
+    // Slots first, deliberately: a header that grew in the same frame as an item
+    // measured moves the list's origin, and applying that before the sizes means
+    // the anchor is restored once against final geometry rather than twice.
+    const order: string[] = []
+    const resizer = createResizer({
+      onItemResize: () => order.push('items'),
+      onSlotResize: () => order.push('slots'),
+    })
+
+    const item = addItem()
+    const header = addSlot()
+    resizer.observeItem(item, 'a')
+    resizer.observeSlot(header, 'header')
+
+    FakeResizeObserver.latest().deliver([
+      [item, 90],
+      [header, 300],
+    ])
+
+    expect(order).toEqual(['slots', 'items'])
+  })
+
+  it('reports a slot that measures zero, unlike an item', () => {
+    // An empty footer is a real height. Refusing it — as the item channel must,
+    // because a zero slot collapses the prefix sum — would leave the space it used
+    // to occupy behind forever, which is react-virtuoso #1203.
+    const onSlotResize = vi.fn<(batch: SlotResizeBatch) => void>()
+    const resizer = createResizer({ onItemResize: vi.fn(), onSlotResize })
+
+    const footer = addSlot()
+    resizer.observeSlot(footer, 'footer')
+    FakeResizeObserver.latest().deliver([[footer, 200]])
+    FakeResizeObserver.latest().deliver([[footer, 0]])
+
+    expect(onSlotResize).toHaveBeenCalledTimes(2)
+    expect(onSlotResize.mock.calls[1]?.[0]).toEqual([['footer', 0]])
+  })
+
+  it('refuses a zero from an element with no box at all', () => {
+    // `display: none`, a hidden tab, a collapsed `<details>`. Reading that as "the
+    // header went away" would restore the anchor against a scroller that cannot
+    // scroll, the write would clamp to zero, and the position would be lost for real.
+    const onSlotResize = vi.fn<(batch: SlotResizeBatch) => void>()
+    const resizer = createResizer({ onItemResize: vi.fn(), onSlotResize })
+
+    const header = addSlot(false)
+    resizer.observeSlot(header, 'header')
+    FakeResizeObserver.latest().deliver([[header, 0]])
+
+    expect(onSlotResize).not.toHaveBeenCalled()
+  })
+
+  it('ignores a detached slot', () => {
+    const onSlotResize = vi.fn<(batch: SlotResizeBatch) => void>()
+    const resizer = createResizer({ onItemResize: vi.fn(), onSlotResize })
+
+    const header = addSlot()
+    resizer.observeSlot(header, 'header')
+    header.remove()
+    FakeResizeObserver.latest().deliver([[header, 300]])
+
+    expect(onSlotResize).not.toHaveBeenCalled()
+  })
+
+  it('reports a remount at the height it had before', () => {
+    // The dedup cache is keyed by slot, not by element, so dropping the entry on
+    // detach is what stops a header remounting at its old height from being read as
+    // "unchanged" — and therefore silently never restored.
+    const onSlotResize = vi.fn<(batch: SlotResizeBatch) => void>()
+    const resizer = createResizer({ onItemResize: vi.fn(), onSlotResize })
+
+    const first = addSlot()
+    const stop = resizer.observeSlot(first, 'header')
+    FakeResizeObserver.latest().deliver([[first, 300]])
+    stop()
+
+    const second = addSlot()
+    resizer.observeSlot(second, 'header')
+    FakeResizeObserver.latest().deliver([[second, 300]])
+
+    expect(onSlotResize).toHaveBeenCalledTimes(2)
+    expect(onSlotResize.mock.calls[1]?.[0]).toEqual([['header', 300]])
+  })
+
+  it('warns about a margin on a slot, naming which one', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const resizer = createResizer({ onItemResize: vi.fn() })
+
+    const header = addSlot()
+    header.style.marginBottom = '16px'
+    resizer.observeSlot(header, 'header')
+
+    expect(warn).toHaveBeenCalledOnce()
+    expect(warn.mock.calls[0]?.[0]).toContain('the header slot')
+  })
+
+  it('does nothing once disposed', () => {
+    const onSlotResize = vi.fn<(batch: SlotResizeBatch) => void>()
+    const resizer = createResizer({ onItemResize: vi.fn(), onSlotResize })
+    resizer.dispose()
+
+    expect(() => {
+      resizer.observeSlot(addSlot(), 'header')()
+    }).not.toThrow()
+    expect(onSlotResize).not.toHaveBeenCalled()
   })
 })

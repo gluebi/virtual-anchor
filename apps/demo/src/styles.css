@@ -113,6 +113,21 @@ body {
   background: #f6f7f9;
 }
 
+/* The slots are reachable by attribute, which is the whole styling API for them —
+   no wrapper class to guess at, no per-slot className prop. */
+[data-virtual-slot='header'],
+[data-virtual-slot='footer'] {
+  color: #4b5563;
+}
+
+/* Opaque, because a sticky slot sits over the comments rather than beside them. */
+.sticky-composer {
+  background: #fff;
+  border: 1px solid #e2e4e8;
+  border-radius: 8px;
+  box-sizing: border-box;
+}
+
 .comment-slot:focus-visible {
   outline: 2px solid #3b6ef5;
   outline-offset: 2px;
@@ -247,9 +262,15 @@ code.leave {
 
   .header,
   .panel,
-  .comment {
+  .comment,
+  .sticky-composer {
     background: #1e2126;
     border-color: #2c3138;
+  }
+
+  [data-virtual-slot='header'],
+  [data-virtual-slot='footer'] {
+    color: #9aa1ab;
   }
 
   @media (max-width: 900px) {

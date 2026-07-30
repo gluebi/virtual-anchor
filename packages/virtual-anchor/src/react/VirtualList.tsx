@@ -6,6 +6,7 @@ import {
   type ScrollResult,
   type ScrollToOptions,
   type SizeSnapshot,
+  type SlotName,
 } from '../index.js'
 import {
   type CSSProperties,
@@ -61,16 +62,52 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
    */
   firstItemPosition?: number
   /**
-   * Content rendered inside the scroller, above the list.
+   * Content inside the scroller, above the list, that scrolls away with it.
    *
-   * This is what `scrollMargin` describes — a list sharing a scroller with content
-   * above it. Without a slot for that content the option was reachable only from the
-   * headless hook, so the component could describe a layout it could not produce.
+   * A thread description, a filter summary, a cover image. Measured, so there is
+   * no height to declare and nothing to keep in sync — which is the difference
+   * between this and the `before` slot it replaces, whose height had to equal
+   * `scrollMargin` exactly or every landing was out by the difference, silently
+   * and forever.
    *
-   * Its height must equal `scrollMargin`: the library treats it as static, because
-   * measuring it would mean the list's own origin moved and every offset with it.
+   * Measuring it is only safe because the anchor names an item rather than an
+   * offset: when the header grows — a font swaps, an image decodes, a
+   * translation arrives — the derived `scrollTop` grows by exactly as much and
+   * the view does not move. Every other virtual list either declines to measure
+   * (virtua's `startMargin`, TanStack's `scrollMargin`) or measures without
+   * compensating, which is the jump behind react-virtuoso #1245.
    */
-  before?: ReactNode
+  header?: ReactNode
+  /**
+   * Content inside the scroller, above the list, pinned to the top edge.
+   *
+   * A filter bar, a "jump to unread" button. Rendered below `header`, so the
+   * header scrolls out from under it.
+   *
+   * It occupies in-flow space *and* covers the top of the scrollport, so it
+   * counts towards both where the list starts and how much room the items have
+   * — which is why it is a different slot rather than a styling choice on
+   * `header`. Declaring both separately is the distinction react-virtuoso needed
+   * `headerHeight` and `fixedHeaderHeight` for, and the one TanStack had to add
+   * `scrollPaddingStart` to recover.
+   */
+  stickyHeader?: ReactNode
+  /**
+   * Content inside the scroller, below the list, that scrolls away with it.
+   *
+   * An "end of thread" note, a loading spinner for older comments. Measured, and
+   * excluded from `align: 'end'` — scrolling the last comment to the bottom of
+   * the screen stops at the comment, not at whatever follows it.
+   */
+  footer?: ReactNode
+  /**
+   * Content inside the scroller, below the list, pinned to the bottom edge.
+   *
+   * A composer, a "N new comments" pill. Rendered after `footer`, so the footer
+   * scrolls above it. Counts against the height available to items, so an item
+   * aligned to the end comes to rest above it rather than behind it.
+   */
+  stickyFooter?: ReactNode
 
   /** Whether a page is currently loading, for `aria-busy`. */
   loading?: boolean
@@ -203,6 +240,52 @@ const CONTAINER_STYLE: CSSProperties = {
   overflowAnchor: 'none',
 }
 
+/**
+ * A measured slot wrapper.
+ *
+ * `flow-root` for the same reason an item gets it, and it matters more here: a
+ * margin on the consumer's own content would escape the wrapper, and no
+ * ResizeObserver box includes margins — so the height we measure would be short
+ * by it and every item below would sit that much too high. Establishing a block
+ * formatting context makes that unrepresentable rather than merely warned about.
+ *
+ * Deliberately no `contain: size`: unlike the item container, whose height we
+ * write, a slot's height is whatever its content makes it. That is the whole
+ * point of measuring it.
+ *
+ * Styling is left to the consumer through `[data-virtual-slot]` rather than a
+ * className prop per slot. react-virtuoso wraps header content in a div nobody
+ * can reach and had to add a `headerFooterTag` string prop to let people change
+ * even the tag name; a data attribute costs no API and no bytes.
+ */
+const SLOT_STYLE: CSSProperties = {
+  display: 'flow-root',
+}
+
+/**
+ * A slot pinned to an edge of the scrollport.
+ *
+ * `z-index` because the items are absolutely positioned inside a container that
+ * comes later in the DOM, so a sticky sibling without one paints underneath
+ * them. The containing block is the scrollport's content box, which spans the
+ * whole scroll length — so unlike react-virtuoso, where the viewport is
+ * absolutely positioned and a sticky header only sticks for one viewport of
+ * scrolling (#1237), these stick for the length of the list.
+ */
+const STICKY_HEADER_STYLE: CSSProperties = {
+  ...SLOT_STYLE,
+  position: 'sticky',
+  top: 0,
+  zIndex: 1,
+}
+
+const STICKY_FOOTER_STYLE: CSSProperties = {
+  ...SLOT_STYLE,
+  position: 'sticky',
+  bottom: 0,
+  zIndex: 1,
+}
+
 const ITEM_STYLE: CSSProperties = {
   // `flow-root` establishes a block formatting context so a consumer's margins
   // cannot escape and silently corrupt offsets, and `contain` stops an item's
@@ -210,6 +293,37 @@ const ITEM_STYLE: CSSProperties = {
   display: 'flow-root',
   contain: 'layout style',
   boxSizing: 'border-box',
+}
+
+/**
+ * One measured slot, or nothing when the consumer supplied none.
+ *
+ * Written once rather than four times so that `data-virtual-slot` — which is the
+ * entire documented styling API for these wrappers — is spelled in one place and
+ * typed as {@link SlotName}, rather than hand-written four times with nothing
+ * tying the strings to the type.
+ *
+ * Absent rather than empty when there is no content: four always-present
+ * wrappers would be four boxes to reason about, and four ResizeObserver
+ * registrations, for the overwhelmingly common list that has none.
+ */
+function Slot({
+  name,
+  node,
+  slotRef,
+  style,
+}: {
+  name: SlotName
+  node: ReactNode
+  slotRef: (element: HTMLElement | null) => void
+  style: CSSProperties
+}): ReactNode {
+  if (node === undefined) return null
+  return (
+    <div ref={slotRef} data-virtual-slot={name} style={style}>
+      {node}
+    </div>
+  )
 }
 
 /**
@@ -227,7 +341,10 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
     renderItem,
     totalCount,
     firstItemPosition = 1,
-    before,
+    header,
+    stickyHeader,
+    footer,
+    stickyFooter,
     loading = false,
     label,
     className,
@@ -453,19 +570,25 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
         }
       }}
     >
-      {before}
+      <Slot name="header" node={header} slotRef={list.headerRef} style={SLOT_STYLE} />
+      <Slot
+        name="stickyHeader"
+        node={stickyHeader}
+        slotRef={list.stickyHeaderRef}
+        style={STICKY_HEADER_STYLE}
+      />
       {/* `role="feed"` sits here rather than on the scrollport because this is the
-          element whose children are the articles — and with a `before` slot the
-          scrollport now has a non-article child. */}
+          element whose children are the articles — and with the slots around it the
+          scrollport now has non-article children. */}
       <div
         ref={list.containerRef}
         style={CONTAINER_STYLE}
         role="feed"
         aria-busy={loading}
         aria-label={label}
-        // On the feed rather than the scrollport: with a `before` slot the scrollport also
-        // contains whatever the consumer put there, and a filter input or a nested
-        // scrollable region inside it would have its page keys swallowed. Events from the
+        // On the feed rather than the scrollport: the scrollport also contains whatever
+        // the consumer put in the slots, and a filter input or a nested scrollable
+        // region inside one would have its page keys swallowed. Events from the
         // articles still bubble to here.
         onKeyDown={onKeyDown}
       >
@@ -488,6 +611,13 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
           </div>
         ))}
       </div>
+      <Slot name="footer" node={footer} slotRef={list.footerRef} style={SLOT_STYLE} />
+      <Slot
+        name="stickyFooter"
+        node={stickyFooter}
+        slotRef={list.stickyFooterRef}
+        style={STICKY_FOOTER_STYLE}
+      />
     </div>
   )
 }

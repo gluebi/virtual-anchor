@@ -56,13 +56,17 @@ export default defineConfig({
         // The integration layer. What is left is mostly iOS momentum and platform fallbacks
         // that need a real device, and pretending otherwise would mean writing tests that
         // assert the mock rather than the behaviour.
-        'packages/virtual-anchor/src/engine.ts': { branches: 79, functions: 82, lines: 94 },
+        //
+        // Raised with the measured slots, which arrived covered: leaving the floors where
+        // they were would have banked the gain as slack a later change could spend without
+        // anyone noticing, which is the exact failure this table exists to prevent.
+        'packages/virtual-anchor/src/engine.ts': { branches: 81, functions: 83, lines: 95 },
         'packages/virtual-anchor/src/scroller.ts': { branches: 88, functions: 94, lines: 97 },
         // Both scroller kinds now answer for their scrollport as well as their measurement
         // scope, and the quirks-mode path is exercised — so this is no longer the file with the
         // thinnest coverage in the integration layer.
         'packages/virtual-anchor/src/viewport.ts': { branches: 70, functions: 96, lines: 100 },
-        'packages/virtual-anchor/src/resizer.ts': { branches: 91, functions: 100, lines: 100 },
+        'packages/virtual-anchor/src/resizer.ts': { branches: 92, functions: 100, lines: 100 },
         'packages/virtual-anchor/src/gate.ts': { branches: 78, functions: 100, lines: 100 },
         // The uncovered branch is the production build, which by definition is not this build.
         'packages/virtual-anchor/src/trace.ts': { branches: 80, functions: 100, lines: 100 },
