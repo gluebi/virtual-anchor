@@ -84,6 +84,20 @@ export interface ScrollerOptions {
   requestRange?: (startIndex: number, endIndex: number) => void
   /** Notified when a programmatic scroll starts and stops. */
   onScrollingChange?: (scrolling: boolean) => void
+  /**
+   * The user reached for the scroller: a wheel, a touch, a pointer or a key.
+   *
+   * The same signal that cancels an in-flight programmatic scroll, surfaced
+   * because "the reader deliberately scrolled" has a second consumer — deciding
+   * that they no longer want to be pinned to the newest comment. It is
+   * deliberately an *input* event and not an offset comparison, for the reason
+   * spelled out on {@link cancelOnInput}: the browser moves `scrollTop` by
+   * itself often enough that an offset alone cannot tell intent from clamping.
+   *
+   * Says only that input happened. Whether it means anything is the caller's to
+   * decide from where the scroller then ends up.
+   */
+  onUserInput?: () => void
   now?: () => number
   requestFrame?: (callback: () => void) => number
   cancelFrame?: (handle: number) => void
@@ -261,6 +275,9 @@ export function createScroller(options: ScrollerOptions): Scroller {
    */
   const cancelOnInput = (): void => {
     if (pending) finish(false, 'input')
+    // After the cancel, not before: a listener that throws must not leave a
+    // programmatic scroll running with nothing left to stop it.
+    options.onUserInput?.()
   }
 
   /**

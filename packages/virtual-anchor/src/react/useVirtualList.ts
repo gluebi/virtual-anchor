@@ -12,6 +12,7 @@ import {
   type ScrollToOptions,
   type SizeSnapshot,
   type VirtualItem,
+  type VirtualState,
   type VisibilityEvent,
   type VisibilityOptions,
   EMPTY_STATE,
@@ -84,6 +85,46 @@ export interface UseVirtualListOptions<T> {
   scrollPaddingEnd?: number
   /** Content above the list inside the scroller, for a window scroller. */
   scrollMargin?: number
+  /**
+   * Stay pinned to the end of the list as it grows. Off by default.
+   *
+   * For a chat, a log tail, a thread with a live reply arriving. Held with an
+   * instant write rather than an animation: the destination moves on every
+   * append and on every measurement of a message still streaming in, and an
+   * animation chasing that is the hazard the README's fetching contract
+   * describes. The pin survives a prepend and a late measurement for free, since
+   * both go through the same publish.
+   *
+   * Dropped the moment the reader scrolls away deliberately, and restored when
+   * they scroll back to the bottom. "Deliberately" means a wheel, a touch, a
+   * pointer or a key — never an offset the browser moved on its own.
+   */
+  followOutput?: boolean
+  /** How close to the end still counts as being at it, in px. Default 4. */
+  atBottomThreshold?: number
+  /** Hold short content against the bottom of the scroller rather than the top. */
+  alignToBottom?: boolean
+  /**
+   * Fires when the view arrives at, or leaves, the end of the list.
+   *
+   * A notification for the same reason `onVisibleRangeChange` is one: it is fed
+   * from a store subscription rather than a render, so it costs no renders and
+   * cannot be stale.
+   */
+  onAtBottomChange?: (atBottom: boolean) => void
+  /**
+   * Fires when either end of the loaded window comes within
+   * {@link edgeReachedThreshold} px — where you load the next page.
+   *
+   * Suppressed while a programmatic scroll is in flight, which is the reason to
+   * use this rather than an `onScroll` handler: fetching mid-animation moves the
+   * target the animation is chasing, and the newly inserted items are unmeasured
+   * so it keeps moving. The library cannot decide *whether* to fetch, but it can
+   * refuse to ask at the one moment the answer must be no.
+   */
+  onEdgeReached?: (edge: 'start' | 'end') => void
+  /** How near an edge counts as reaching it, in px. Default 600. */
+  edgeReachedThreshold?: number
   /** Keys always kept mounted, beyond the rendered range. */
   keepMounted?: readonly ItemKey[]
   visibility?: VisibilityOptions
@@ -153,6 +194,8 @@ export interface UseVirtualListResult<T> {
   scrolling: boolean
   scrollToKey: (key: ItemKey, options?: ScrollToOptions) => Promise<ScrollResult>
   scrollToIndex: (index: number, options?: ScrollToOptions) => Promise<ScrollResult>
+  /** Abandon any in-flight programmatic scroll, resolving it as unsettled. */
+  cancelScroll: () => void
   getAnchor: () => Anchor | null
   setAnchor: (anchor: Anchor) => void
   takeSizeSnapshot: () => SizeSnapshot
@@ -206,6 +249,12 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     visibility,
     onVisibilityChange,
     onVisibleRangeChange,
+    followOutput,
+    atBottomThreshold,
+    alignToBottom,
+    onAtBottomChange,
+    onEdgeReached,
+    edgeReachedThreshold,
     sizeSnapshot,
     windowScroller = false,
   } = options
@@ -352,6 +401,14 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
       ...(keepMounted === undefined ? {} : { keepMounted }),
       ...(visibility === undefined ? {} : { visibility }),
       ...(sizeSnapshot === undefined ? {} : { sizeSnapshot }),
+      ...(followOutput === undefined ? {} : { followOutput }),
+      ...(atBottomThreshold === undefined ? {} : { atBottomThreshold }),
+      ...(alignToBottom === undefined ? {} : { alignToBottom }),
+      ...(edgeReachedThreshold === undefined ? {} : { edgeReachedThreshold }),
+      // Spread conditionally rather than always wrapped, unlike the visibility
+      // callback: the engine skips the whole edge computation when no listener is
+      // installed, and a wrapper would defeat that for every list that has none.
+      ...(onEdgeReached === undefined ? {} : { onEdgeReached }),
       onVisibilityChange: (events) => onVisibilityChange?.(events),
     })
   }
@@ -370,31 +427,51 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
   latestRangeListener.current = onVisibleRangeChange
 
   /**
-   * Report visible-range changes straight from the store.
+   * The same, for `atBottom`.
+   *
+   * Seeded to `null` rather than to `EMPTY_STATE.atBottom`, which is `true`: an
+   * empty list *is* at its bottom, so seeding from it would swallow the first
+   * report for every list that starts there — including a chat opened with
+   * `followOutput`, whose whole first fact is that it is pinned.
+   */
+  const reportedAtBottom = useRef<boolean | null>(null)
+  const latestAtBottomListener = useRef(onAtBottomChange)
+  latestAtBottomListener.current = onAtBottomChange
+
+  /**
+   * Report visible-range and at-bottom changes straight from the store.
+   *
+   * One subscription for both, not one each: the store notifies on every publish —
+   * every scroll frame — so a second listener is a second callback per frame for
+   * two fields out of one snapshot. Neither is in `needsRerender`, which is what
+   * makes both free of React work.
    *
    * Declared *before* the mount effect below, so any publish `mount()` provokes is observed too.
    *
-   * A reference check is enough: the engine hands back the *same* tuple while the range is
-   * unchanged, so identity means "this range moved" rather than "something published".
+   * For the range a reference check is enough: the engine hands back the *same* tuple while it
+   * is unchanged, so identity means "this range moved" rather than "something published".
    *
-   * Keyed on the engine alone, with the callback read through a box: a call site passing an
+   * Keyed on the engine alone, with the callbacks read through boxes: a call site passing an
    * inline arrow would otherwise unsubscribe and resubscribe on every render, re-reading the
-   * store and allocating two closures each time. The cost of that is small, but this file goes
+   * store and allocating closures each time. The cost of that is small, but this file goes
    * out of its way to avoid exactly this shape elsewhere.
    */
   useEffect(() => {
     if (!engine) return
 
-    const notify = (range: readonly [number, number]): void => {
-      if (range === reportedRange.current) return
-      reportedRange.current = range
-      latestRangeListener.current?.(range)
+    const notify = (state: VirtualState): void => {
+      if (state.visibleRange !== reportedRange.current) {
+        reportedRange.current = state.visibleRange
+        latestRangeListener.current?.(state.visibleRange)
+      }
+      if (state.atBottom !== reportedAtBottom.current) {
+        reportedAtBottom.current = state.atBottom
+        latestAtBottomListener.current?.(state.atBottom)
+      }
     }
 
-    notify(engine.store.getState().visibleRange)
-    return engine.store.subscribe((next) => {
-      notify(next.visibleRange)
-    })
+    notify(engine.store.getState())
+    return engine.store.subscribe(notify)
   }, [engine])
 
   useEffect(() => engine?.mount(), [engine])
@@ -528,6 +605,9 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     scrolling: state.scrolling,
     scrollToKey,
     scrollToIndex,
+    cancelScroll: useCallback(() => {
+      engine?.cancelScroll()
+    }, [engine]),
     getAnchor: useCallback(() => engine?.getAnchor() ?? null, [engine]),
     setAnchor: useCallback(
       (anchor: Anchor) => {

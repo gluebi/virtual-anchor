@@ -18,7 +18,7 @@ import { VirtualList } from 'virtual-anchor/react'     // React 19 adapter
 The React entry needs React 19; the core entry needs nothing. React is an *optional* peer
 dependency, so using the core alone pulls in no framework and warns about none.
 
-Minified and brotlied, including its one dependency: **8.96 kB** for the core entry, **11.08 kB**
+Minified and brotlied, including its one dependency: **9.38 kB** for the core entry, **11.65 kB**
 if you import the React adapter (which contains the core — they share a chunk rather than
 duplicating it). Both are enforced as budgets in CI, so this figure cannot drift from the
 truth.
@@ -139,17 +139,21 @@ every offset below it, so a page arriving mid-animation moves the target the
 animation is chasing — and the newly inserted items are unmeasured, so it keeps
 moving as they measure. The scroll still lands on the right *item* (the target is
 tracked by key and re-resolved every frame), but convergence takes longer, and a
-fetch on every scroll event can outrun it indefinitely. Ask before you fetch:
+fetch on every scroll event can outrun it indefinitely.
+
+Use `onEdgeReached`, which will not fire while one is:
 
 ```tsx
-const onScroll = () => {
-  if (listRef.current?.isScrolling() === true) return
-  if (nearTop()) void loadOlder()
-}
+<VirtualList
+  onEdgeReached={(edge) => { if (edge === 'start') void loadOlder() }}
+  edgeReachedThreshold={600}
+/>
 ```
 
-The library cannot make this decision — when to fetch is a product question — but it
-will tell you when not to.
+The library still cannot decide *whether* to fetch — that is a product question — but it
+can refuse to ask at the one moment the answer must be no, which is the half of this
+contract that used to be yours to remember. If you are watching `onScroll` yourself
+instead, `listRef.current?.isScrolling()` is the same guard by hand.
 
 **The first aim at an unmeasured target is always a guess.** You cannot know the
 height of something that has never been laid out. Error scales with
@@ -225,8 +229,10 @@ adapter. Generated reference: `pnpm docs`.
 
 Key options: `items`, `getItemKey`, `estimateSize`, `gap`, `buffer`,
 `scrollPaddingStart`/`End`, `scrollMargin`, `keepMounted`, `visibility`,
-`sizeSnapshot`, `windowScroller`, `onVisibleRangeChange`, the four slots below, and on
-the component `scrollerRef` and `onEngineReady`.
+`sizeSnapshot`, `windowScroller`, `onVisibleRangeChange`, `followOutput`,
+`alignToBottom`, `atBottomThreshold`, `onAtBottomChange`, `onEdgeReached`,
+`edgeReachedThreshold`, the four slots below, and on the component `scrollerRef` and
+`onEngineReady`.
 
 ### Content around the list
 
@@ -258,6 +264,43 @@ one thing ResizeObserver cannot see, the same contract items have.
 scrolling on to the footer, and an item aligned to the end comes to rest above a sticky
 footer rather than behind it.
 
+### Following a list that is still growing
+
+`followOutput` keeps the view pinned to the newest comment as the thread grows, and lets
+go the moment the reader scrolls away — a chat, a log tail, a thread with a live reply
+arriving. It comes back when they scroll back to the end.
+
+```tsx
+<VirtualList
+  followOutput
+  alignToBottom                                 // short threads sit at the bottom
+  onAtBottomChange={(atBottom) => setShowJumpButton(!atBottom)}
+  onEdgeReached={(edge) => { if (edge === 'start') void loadOlder() }}
+/>
+```
+
+Pinning is an instant write rather than an animation, deliberately. The destination moves
+on every append *and* on every measurement of a message still streaming in, and an
+animation chasing that is the hazard the fetching contract above describes. It is also
+what keeps `atBottom` honest: following goes to the scroller's true maximum, which is
+exactly where being at the bottom is measured from.
+
+"Scrolled away" means a wheel, a touch, a pointer or a key — never an offset the browser
+moved on its own. The browser adjusts `scrollTop` more often than it looks, clamping it
+when content shrinks and again when a window of items is replaced, and reading that as
+intent would unpin a reader who touched nothing.
+
+Letting go happens immediately, so the list never fights a reader trying to leave the
+bottom. Taking hold again waits until their scrolling has actually stopped — a fling is
+still in flight when its first scroll event arrives, and judging the position then would
+decide "not at the end" and never revisit it.
+
+**`onEdgeReached` does not fire while a programmatic scroll is in flight.** That is the
+reason to prefer it over an `onScroll` handler: it is the one moment the contract above
+says not to fetch, so the callback simply does not ask. What remains yours is the part
+that is genuinely a product decision — whether there is more to load, and whether a fetch
+is already running.
+
 `scrollMargin` survives alongside them, and now means only what it always described:
 how far the list sits down the *document*, which matters for `windowScroller` where
 page chrome above the component is part of the scroll offset. Measure it rather than
@@ -265,7 +308,8 @@ assuming, since borders count. It composes with a measured header rather than be
 replaced by it.
 
 Handle: `scrollToKey`, `scrollToIndex`, `cancelScroll`, `isScrolling` (see the
-fetching contract above), `focusItem`, `getAnchor`/`setAnchor` (persist a position
+fetching contract above — though `onEdgeReached` now answers it for you), `focusItem`,
+`getAnchor`/`setAnchor` (persist a position
 across navigation), `takeSizeSnapshot` (persist measurements; keyed to a layout
 signature so a width or zoom change discards them rather than restoring lies).
 
@@ -344,6 +388,11 @@ reasoning about the code. This is that, made repeatable.
 | Virtuoso `headerFooterTag` | nothing; style the wrapper through `[data-virtual-slot]` |
 | Virtuoso `topItemCount` / `TopItemList` | `stickyHeader`, which is measured into the visible area rather than pinning *items* |
 | virtua `startMargin` | nothing; mount a `header` and it is measured |
+| Virtuoso `followOutput` | `followOutput`, but boolean — pinning is always instant, because the destination moves every frame |
+| Virtuoso `atBottomStateChange` / `atBottomThreshold` | `onAtBottomChange` / `atBottomThreshold` |
+| Virtuoso `endReached` / `startReached` | `onEdgeReached('end' \| 'start')`, suppressed during a programmatic scroll |
+| Virtuoso `alignToBottom` | `alignToBottom` |
+| virtua `reverse` | `followOutput` with `alignToBottom` |
 | Virtuoso `firstItemIndex` | nothing; just pass a longer array |
 | Virtuoso `rangeChanged` | `onVisibleRangeChange` (excludes buffer) or per-item `onVisibilityChange` |
 | Virtuoso `computeItemKey` | `getItemKey` |

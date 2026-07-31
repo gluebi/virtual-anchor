@@ -48,6 +48,10 @@ export interface DemoHandle {
   takeSizeSnapshot: () => SizeSnapshot | null
   /** Resize the measured header slot. Returns the height asked for. */
   setHeaderHeight: (height: number) => number
+  /** Post comments at either end of the loaded window. */
+  insert: (where: 'above' | 'below', count: number) => Promise<void>
+  /** Whether the library currently considers the view to be at the end. */
+  isAtBottom: () => boolean
 }
 
 declare global {

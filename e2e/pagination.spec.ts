@@ -104,19 +104,26 @@ test.describe('infinite scrolling', () => {
   test('defers a fetch while a programmatic scroll is in flight', async ({ page }) => {
     // The protocol, demonstrated: animating to the end crosses the fetch margin while the
     // scroll is still running. Fetching there would move the target the animation is chasing.
+    //
+    // The demo no longer *narrates* the deferral, and that is the change worth
+    // recording: it used to check `isScrolling()` itself and report "deferred",
+    // and now `onEdgeReached` simply does not fire while a programmatic scroll is
+    // in flight. So this asserts the outcome rather than the commentary — the
+    // page count must not move while the animation runs, and the landing must
+    // still be exact.
     await openPagination(page)
     await press(page, 'Infinite')
 
     await press(page, 'Jump to end')
-    await expect(page.locator('[data-testid="status"]')).toContainText('deferred', {
-      timeout: 5000,
-    })
 
-    // And the deferred-around scroll still lands exactly.
-    await expect(page.locator('[data-testid="status"]')).toContainText('settled=true', {
+    // The landing is reported on its own line, because arriving at the end now
+    // triggers the next page immediately — `onEdgeReached` fires the moment the
+    // animation settles, which is what infinite scrolling is for and which would
+    // otherwise overwrite this before it could be read.
+    await expect(page.locator('[data-testid="landing"]')).toContainText('settled=true', {
       timeout: 10_000,
     })
-    expect(await status(page)).toContain('deviation=0.000px')
+    await expect(page.locator('[data-testid="landing"]')).toContainText('deviation=0.000px')
   })
 })
 

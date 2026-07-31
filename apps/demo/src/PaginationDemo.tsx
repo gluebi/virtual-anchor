@@ -1,6 +1,5 @@
 import {
   type ReactNode,
-  type UIEvent as ReactUIEvent,
   useCallback,
   useLayoutEffect,
   useRef,
@@ -43,6 +42,8 @@ export function PaginationDemo(): ReactNode {
   const [loadedPages, setLoadedPages] = useState(1)
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState(`page 1 of ${PAGES.toLocaleString()}`)
+  /** How the last programmatic jump landed, kept apart from the fetch commentary. */
+  const [landing, setLanding] = useState('')
 
   const listRef = useRef<VirtualListHandle>(null)
   const loadingRef = useRef(false)
@@ -100,17 +101,14 @@ export function PaginationDemo(): ReactNode {
   /**
    * Infinite mode: append the next page as the end approaches.
    *
-   * `isScrolling()` is the protocol. A page arriving mid-animation moves every offset below
-   * it, so the target of a programmatic scroll keeps moving and convergence takes longer —
-   * the library still lands on the right *comment*, but a fetch on every scroll event can
-   * outrun it. When to fetch is a product question; whether one is already in flight is not.
+   * The defer-while-scrolling half of the protocol is gone from here, because
+   * `onEdgeReached` does not fire while a programmatic scroll is in flight — the
+   * library refuses to ask at the one moment the answer must be no. What remains
+   * is the half that is genuinely a product question: whether a fetch is already
+   * running, and whether there is anything left to fetch.
    */
   const loadNextPage = useCallback(async () => {
     if (loadingRef.current) return
-    if (listRef.current?.isScrolling() === true) {
-      setStatus('deferred: a programmatic scroll is in flight')
-      return
-    }
     if (loadedPages >= PAGES) {
       setStatus(`all ${PAGES.toLocaleString()} pages loaded`)
       return
@@ -127,27 +125,32 @@ export function PaginationDemo(): ReactNode {
     setStatus(`${((loadedPages + 1) * PER_PAGE).toLocaleString()} comments loaded, nothing moved`)
   }, [loadedPages])
 
-  /** Animate to the last loaded comment, which collides with the fetch margin on the way. */
+  /**
+   * Animate to the last loaded comment, which collides with the fetch margin on the way.
+   *
+   * Reported separately from `status`, because arriving at the end is now
+   * immediately followed by a page load — `onEdgeReached` fires the moment the
+   * animation settles, which is exactly what infinite scrolling should do and
+   * which used to overwrite this line before anyone could read it.
+   */
   const jumpToEnd = useCallback(async () => {
+    setLanding('jumping…')
     const result = await listRef.current?.scrollToIndex(items.length - 1, {
       align: 'end',
       behavior: 'smooth',
     })
     if (result) {
-      setStatus(
+      setLanding(
         `jumped to the end — settled=${String(result.settled)} ` +
           `deviation=${result.deviation.toFixed(3)}px after ${String(result.iterations)} frames`,
       )
     }
   }, [items.length])
 
-  const onScroll = useCallback(
-    (event: ReactUIEvent<HTMLDivElement>) => {
-      if (mode !== 'infinite') return
-      const element = event.currentTarget
-      if (element.scrollHeight - element.scrollTop - element.clientHeight < FETCH_MARGIN) {
-        void loadNextPage()
-      }
+  const onEdgeReached = useCallback(
+    (edge: 'start' | 'end') => {
+      if (mode !== 'infinite' || edge !== 'end') return
+      void loadNextPage()
     },
     [mode, loadNextPage],
   )
@@ -253,7 +256,8 @@ export function PaginationDemo(): ReactNode {
           ref={listRef}
           className="scroller"
           itemClassName="comment-slot"
-          onScroll={onScroll}
+          onEdgeReached={onEdgeReached}
+          edgeReachedThreshold={FETCH_MARGIN}
           renderItem={(comment) => (
             <article className="comment">
               <div className="meta">
@@ -274,6 +278,11 @@ export function PaginationDemo(): ReactNode {
           <p className="small" data-testid="status">
             {status}
           </p>
+          {landing !== '' && (
+            <p className="small" data-testid="landing">
+              {landing}
+            </p>
+          )}
           <p className="small muted">
             {mode === 'pages'
               ? 'Every item is replaced on a page change. There is no position to preserve — ' +

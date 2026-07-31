@@ -45,7 +45,7 @@ export default defineConfig({
         // Fully covered by line, with a handful of branch points left: the size cache's
         // clamping edges and the surface's null-container guard.
         'packages/virtual-anchor/src/sizeCache.ts': { branches: 96, functions: 100, lines: 100 },
-        'packages/virtual-anchor/src/surface.ts': { branches: 95, functions: 100, lines: 100 },
+        'packages/virtual-anchor/src/surface.ts': { branches: 96, functions: 100, lines: 100 },
 
         // The tracker is now whole. Its last two gaps were a `flushLeaves` corner reached only
         // after `pauseDwell` had banked the clock, which is a test, and an `adoptSilently` guard
@@ -60,8 +60,12 @@ export default defineConfig({
         // Raised with the measured slots, which arrived covered: leaving the floors where
         // they were would have banked the gain as slack a later change could spend without
         // anyone noticing, which is the exact failure this table exists to prevent.
-        'packages/virtual-anchor/src/engine.ts': { branches: 81, functions: 83, lines: 95 },
-        'packages/virtual-anchor/src/scroller.ts': { branches: 88, functions: 94, lines: 97 },
+        // The branch floor went 85 → 84 when the inset composition moved to
+        // `listGeometry.ts`. Nothing became less tested — the `?? 0` branches that
+        // left were all covered, and they are covered there now (that file is held
+        // at 100). Moving covered code out of a file lowers its ratio.
+        'packages/virtual-anchor/src/engine.ts': { branches: 84, functions: 84, lines: 97 },
+        'packages/virtual-anchor/src/scroller.ts': { branches: 89, functions: 94, lines: 97 },
         // Both scroller kinds now answer for their scrollport as well as their measurement
         // scope, and the quirks-mode path is exercised — so this is no longer the file with the
         // thinnest coverage in the integration layer.

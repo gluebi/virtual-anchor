@@ -78,6 +78,14 @@ export interface InsetContributions {
   footer?: number
   /** Content below the items that also covers the bottom of the scrollport. */
   stickyFooter?: number
+  /**
+   * Empty space held above the items, for `alignToBottom`.
+   *
+   * Not chrome — nothing is rendered in it — but it occupies the same channel
+   * for the same reason: it is distance between the top of the scrollable
+   * content and the start of the list, which is what `scrollMargin` means.
+   */
+  leadingSpace?: number
 }
 
 /**
@@ -103,10 +111,11 @@ export function composeInsets(base: ListInsets, chrome: InsetContributions): Lis
   const stickyHeader = chrome.stickyHeader ?? 0
   const footer = chrome.footer ?? 0
   const stickyFooter = chrome.stickyFooter ?? 0
-  if (header === 0 && stickyHeader === 0 && footer === 0 && stickyFooter === 0) return base
+  const leadingSpace = chrome.leadingSpace ?? 0
+  if (header + stickyHeader + footer + stickyFooter + leadingSpace === 0) return base
 
   return {
-    scrollMargin: (base.scrollMargin ?? 0) + header + stickyHeader,
+    scrollMargin: (base.scrollMargin ?? 0) + leadingSpace + header + stickyHeader,
     scrollPaddingStart: (base.scrollPaddingStart ?? 0) + stickyHeader,
     scrollPaddingEnd: (base.scrollPaddingEnd ?? 0) + stickyFooter,
     spaceAfter: (base.spaceAfter ?? 0) + footer + stickyFooter,

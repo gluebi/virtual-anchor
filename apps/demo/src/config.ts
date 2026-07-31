@@ -30,6 +30,10 @@ export interface DemoConfig {
   footer: number
   /** Height of the measured `stickyFooter` slot, in px. */
   stickyFooter: number
+  /** Stay pinned to the newest comment as the thread grows. */
+  follow: boolean
+  /** Hold a thread too short to scroll against the bottom of the scroller. */
+  alignToBottom: boolean
   windowScroller: boolean
   /** Load the entire thread, so targets sit deep in a large window. */
   loadAll: boolean
@@ -66,6 +70,8 @@ export const CONFIG: DemoConfig = {
   header: number('header', 0),
   footer: number('footer', 0),
   stickyFooter: number('stickyFooter', 0),
+  follow: params.get('follow') === '1',
+  alignToBottom: params.get('alignToBottom') === '1',
   windowScroller: params.get('windowScroller') === '1',
   loadAll: params.get('loadAll') === '1',
   once: params.get('once') === '1',

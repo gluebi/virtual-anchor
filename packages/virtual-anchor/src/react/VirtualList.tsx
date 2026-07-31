@@ -37,6 +37,14 @@ export interface VirtualListHandle {
   isScrolling: () => boolean
   scrollToKey: (key: ItemKey, options?: ScrollToOptions) => Promise<ScrollResult>
   scrollToIndex: (index: number, options?: ScrollToOptions) => Promise<ScrollResult>
+  /**
+   * Abandon any in-flight programmatic scroll, resolving it as unsettled.
+   *
+   * On the engine since it existed, but reachable from neither the hook nor the
+   * component — so every consumer that did not build its own engine could start
+   * a smooth scroll and had no way to stop it.
+   */
+  cancelScroll: () => void
   getAnchor: () => Anchor | null
   setAnchor: (anchor: Anchor) => void
   takeSizeSnapshot: () => SizeSnapshot
@@ -478,6 +486,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
       scrollToKey: (key, options) => scrollAndFocus(key, options ?? {}, focusOnScrollEnd),
       isScrolling: () => list.scrolling,
       scrollToIndex: list.scrollToIndex,
+      cancelScroll: list.cancelScroll,
       getAnchor: list.getAnchor,
       setAnchor: list.setAnchor,
       takeSizeSnapshot: list.takeSizeSnapshot,
