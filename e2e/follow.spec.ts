@@ -1,5 +1,12 @@
 import { expect, test } from '@playwright/test'
-import { open, TOLERANCE, visibleRowTops, worstMovement } from './helpers.js'
+import {
+  distanceFromBottom,
+  open,
+  settle,
+  TOLERANCE,
+  visibleRowTops,
+  worstMovement,
+} from './helpers.js'
 
 /**
  * Following the output of a list that is still growing.
@@ -10,23 +17,6 @@ import { open, TOLERANCE, visibleRowTops, worstMovement } from './helpers.js'
  * the half every other library struggles with — this suite exists to check that
  * adding the first half did not cost it.
  */
-
-/** How far the scroller is from its own maximum. */
-const distanceFromBottom = (page: Parameters<typeof open>[0]): Promise<number> =>
-  page
-    .locator('.scroller')
-    .evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)
-
-/** Two frames: one for React to commit, one for the corrective write to land. */
-const settle = (page: Parameters<typeof open>[0]): Promise<unknown> =>
-  page.evaluate(
-    () =>
-      new Promise((resolve) => {
-        requestAnimationFrame(() => {
-          requestAnimationFrame(resolve)
-        })
-      }),
-  )
 
 /**
  * A following list with the whole thread already loaded.

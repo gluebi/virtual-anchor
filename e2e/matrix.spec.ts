@@ -1,9 +1,11 @@
 import { expect, test } from '@playwright/test'
 import {
+  distanceFromBottom,
   headerHeight,
   measure,
   open,
   scrollTo,
+  settle,
   setWindowAround,
   TOLERANCE,
   visibleRowTops,
@@ -222,16 +224,7 @@ test.describe('measured slots', () => {
     const anchorBefore = await page.evaluate(() => window.__list.getAnchor())
 
     await page.evaluate(() => window.__list.setHeaderHeight(700))
-    // Two frames: one for React to commit the new height, one for the ResizeObserver
-    // callback and the corrective write it provokes to land.
-    await page.evaluate(
-      () =>
-        new Promise((resolve) => {
-          requestAnimationFrame(() => {
-            requestAnimationFrame(resolve)
-          })
-        }),
-    )
+    await settle(page)
 
     const after = await visibleRowTops(page)
     const moved = worstMovement(before, after)
@@ -250,14 +243,7 @@ test.describe('measured slots', () => {
 
     const before = await visibleRowTops(page)
     await page.evaluate(() => window.__list.setHeaderHeight(60))
-    await page.evaluate(
-      () =>
-        new Promise((resolve) => {
-          requestAnimationFrame(() => {
-            requestAnimationFrame(resolve)
-          })
-        }),
-    )
+    await settle(page)
 
     const moved = worstMovement(before, await visibleRowTops(page))
     expect(moved, 'no shared rows — the view changed entirely').not.toBeNull()
@@ -282,9 +268,6 @@ test.describe('measured slots', () => {
     expect(Math.abs(landing.error)).toBeLessThanOrEqual(TOLERANCE)
 
     // And it is genuinely short of the bottom, by the footer plus the composer.
-    const fromBottom = await page
-      .locator('.scroller')
-      .evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)
-    expect(fromBottom).toBeGreaterThan(100)
+    expect(await distanceFromBottom(page)).toBeGreaterThan(100)
   })
 })

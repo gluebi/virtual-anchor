@@ -9,7 +9,7 @@ import {
   visibleRowTops,
   worstMovement,
 } from './helpers.js'
-import type { Anchor } from '../packages/virtual-anchor/src/index.js'
+import type { Anchor, ItemKey } from '../packages/virtual-anchor/src/index.js'
 
 /**
  * The cases the plan promised and the suite did not cover.
@@ -25,7 +25,16 @@ const anchorOf = (page: Page): Promise<Anchor | null> =>
   page.evaluate(() => window.__list.getAnchor())
 
 /** The index encoded in a `comment-N` key. */
-const indexOfKey = (key: string): number => Number.parseInt(key.slice('comment-'.length), 10)
+/**
+ * The comment number inside a `comment-N` key.
+ *
+ * Takes an `ItemKey` rather than a `string` because that is what an anchor
+ * actually carries — keys are `string | number`, and every call site here comes
+ * from `getAnchor()`. The narrower signature typechecked only because nothing
+ * ran `tsc` over this directory.
+ */
+const indexOfKey = (key: ItemKey): number =>
+  Number.parseInt(String(key).slice('comment-'.length), 10)
 
 test.describe('late measurement changes do not drift the view', () => {
   test('a font swap after mount leaves the anchored comment where it was', async ({
@@ -110,8 +119,8 @@ test.describe('a prepend during an in-flight smooth scroll', () => {
       return scroll
     })
 
-    expect(result.settled, `reason=${result.reason}`).toBe(true)
-
+    // Where it landed is the promise, and it is asserted strictly — before
+    // anything is said about how long getting there took.
     const top = await topOfKey(page, 'comment-5988')
     // Below the sticky header, which is what `scrollPaddingStart` accounts for — measured,
     // because the header wraps onto more rows as the window narrows.
@@ -119,6 +128,21 @@ test.describe('a prepend during an in-flight smooth scroll', () => {
     expect(Math.abs(top - inset), `landed at ${String(top)}, header is ${String(inset)}`).toBeLessThan(
       TOLERANCE,
     )
+
+    // Whether it converged *within its time budget* is not, and asserting it
+    // unconditionally was asserting the speed of the machine. The convergence loop
+    // is bounded by wall clock on purpose — 2s soft, 5s hard — so it cannot hang;
+    // a box slow enough to spend that budget re-measuring two forced prepends will
+    // legitimately report `deadline`. Reproduced by oversubscribing Playwright's
+    // workers, which starves frames the same way a loaded CI runner does.
+    //
+    // The same allowance, for the same reason, as the smooth case in
+    // `matrix.spec.ts`. A `deadline` is only tolerable *because* the landing above
+    // was exact: if the scroll had genuinely failed to arrive, this test would
+    // already have failed one assertion earlier.
+    if (!result.settled && result.reason !== 'deadline') {
+      expect(result.settled, `reason=${result.reason}`).toBe(true)
+    }
   })
 })
 
