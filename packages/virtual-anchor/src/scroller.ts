@@ -4,7 +4,7 @@ import {
   isSelfWrite,
   offsetForIndex,
 } from './anchor.js'
-import { type ListInsets } from './listGeometry.js'
+import { visibleSizeOf, type ListInsets } from './listGeometry.js'
 import { isIOSWebKit, prefersReducedMotion, supportsScrollEnd } from './env.js'
 import { isTracing, TRACING, trace } from './trace.js'
 import type { SizeCache } from './sizeCache.js'
@@ -366,7 +366,22 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // The last item aligned to the end is the one case where our measurements
     // cannot be trusted: borders and padding outside the list still occupy
     // scrollable space, so ask the browser instead of arriving a pixel short.
-    if (align === 'end' && index === cache.length - 1) return maxOffset
+    //
+    // Unless we have measured what is down there. `spaceAfter` is non-zero
+    // exactly when a footer or a sticky composer occupies that space and its
+    // height is known — and once it is known, our own offsets are the better
+    // answer, because they are exact floats while `getMaxScrollOffset` is built
+    // from an integer `clientHeight`. Both halves of that were observed: taking
+    // the shortcut and subtracting `spaceAfter` parks the last comment behind
+    // the composer (80.25px out in all three engines, a composer-height,
+    // because a sticky footer counts in `spaceAfter` and in `paddingEnd` both);
+    // correcting for that lands Chromium and WebKit exactly and Firefox
+    // 0.55px short, which is the integer `clientHeight` and nothing else.
+    // Falling through to the general case has neither problem, and expresses
+    // the alignment once rather than twice.
+    if (align === 'end' && index === cache.length - 1 && (geometry.spaceAfter ?? 0) === 0) {
+      return maxOffset
+    }
 
     // `start` is the offset that puts the item's top edge at the top of the
     // *visible* area — below any sticky header — so every other alignment is
@@ -374,10 +389,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // twice.
     const start = offsetForIndex(index, cache, geometry)
     const size = cache.sizeOf(index)
-    const visibleSize =
-      viewport.getViewportSize() -
-      (geometry.scrollPaddingStart ?? 0) -
-      (geometry.scrollPaddingEnd ?? 0)
+    const visibleSize = visibleSizeOf(geometry, viewport.getViewportSize())
 
     let target: number
     switch (align) {

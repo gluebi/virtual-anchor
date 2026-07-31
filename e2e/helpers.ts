@@ -46,6 +46,8 @@ export interface DemoHandle {
   maxEnterCount: () => number
   getAnchor: () => Anchor | null
   takeSizeSnapshot: () => SizeSnapshot | null
+  /** Resize the measured header slot. Returns the height asked for. */
+  setHeaderHeight: (height: number) => number
 }
 
 declare global {
@@ -144,6 +146,8 @@ export function topOfKey(page: Page, key: string): Promise<number> {
 export interface View {
   /** Height of chrome overlapping the top, which a target must land below. */
   paddingStart: number
+  /** Height of chrome overlapping the bottom — a sticky footer slot. */
+  paddingEnd?: number
   windowScroller?: boolean
 }
 
@@ -175,7 +179,7 @@ export function measure(
   view: View,
 ): Promise<Landing> {
   return page.evaluate(
-    ({ index: i, align: alignment, paddingStart, windowScroller }) => {
+    ({ index: i, align: alignment, paddingStart, paddingEnd, windowScroller }) => {
       const miss = { found: false, error: Number.NaN, clamped: false }
       const item = document
         .querySelector(`[data-comment-index="${String(i)}"]`)
@@ -206,7 +210,7 @@ export function measure(
 
       const rect = item.getBoundingClientRect()
       const visibleTop = view.top + paddingStart
-      const visibleBottom = view.top + view.height
+      const visibleBottom = view.top + view.height - paddingEnd
       const visibleSize = visibleBottom - visibleTop
 
       const expected =
@@ -225,7 +229,13 @@ export function measure(
           rect.height > visibleSize,
       }
     },
-    { index, align, paddingStart: view.paddingStart, windowScroller: view.windowScroller === true },
+    {
+      index,
+      align,
+      paddingStart: view.paddingStart,
+      paddingEnd: view.paddingEnd ?? 0,
+      windowScroller: view.windowScroller === true,
+    },
   )
 }
 

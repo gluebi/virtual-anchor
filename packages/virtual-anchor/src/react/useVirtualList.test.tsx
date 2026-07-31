@@ -401,14 +401,14 @@ describe('VirtualList focus pinning', () => {
   })
 
   it('ignores focus landing inside the scroller but outside any row', () => {
-    // The `before` slot is inside the scrollport, so a filter input there takes focus without
+    // A slot is inside the scrollport, so a filter input there takes focus without
     // there being a row to pin — and pinning `undefined` would be worse than pinning nothing.
     render(
       <VirtualList
         items={comments(500)}
         getItemKey={(c) => c.id}
         estimateSize={() => 100}
-        before={<input aria-label="filter" />}
+        stickyHeader={<input aria-label="filter" />}
         renderItem={(c) => <span>{c.text}</span>}
       />,
     )
@@ -1012,7 +1012,7 @@ describe('useVirtualList option plumbing', () => {
           keepMounted={['c50']}
           visibility={{ rule: { mode: 'any' } }}
           sizeSnapshot={{ version: 1, layoutSignature: '', estimate: 100, sizes: [] }}
-          before={<p>above the list</p>}
+          header={<p>above the list</p>}
           renderItem={(c) => <span>{c.text}</span>}
         />,
       )
@@ -1361,5 +1361,141 @@ describe('onVisibleRangeChange', () => {
     expect(screen.getByTestId('rendered').textContent).toBe(rendered)
     expect(captured.read?.()[0]).toBeGreaterThan(0)
     expect(captured.read?.().join(',')).not.toBe(rendered)
+  })
+})
+
+describe('VirtualList measured slots', () => {
+  it('renders each slot with its own reachable data attribute', () => {
+    // The whole styling API for the wrappers. react-virtuoso wraps header content in a
+    // div nobody can reach and had to add a `headerFooterTag` string prop so people
+    // could at least change the tag name; an attribute costs no API and no bytes.
+    const { container } = render(
+      <VirtualList
+        items={comments(200)}
+        getItemKey={(c) => c.id}
+        header={<p>description</p>}
+        stickyHeader={<p>filters</p>}
+        footer={<p>end of thread</p>}
+        stickyFooter={<p>composer</p>}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    for (const slot of ['header', 'stickyHeader', 'footer', 'stickyFooter']) {
+      expect(container.querySelector(`[data-virtual-slot="${slot}"]`)).toBeInTheDocument()
+    }
+  })
+
+  it('renders no wrapper for a slot that was not supplied', () => {
+    // Four always-present wrappers would be four boxes to reason about — and four
+    // ResizeObserver registrations — for the overwhelmingly common list that has none.
+    const { container } = render(
+      <VirtualList
+        items={comments(200)}
+        getItemKey={(c) => c.id}
+        header={<p>description</p>}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    expect(container.querySelectorAll('[data-virtual-slot]')).toHaveLength(1)
+  })
+
+  it('keeps the slots outside the feed', () => {
+    // `role="feed"` promises its children are articles. A description or a composer
+    // among them is a lie to a screen reader, which is why the feed role sits on the
+    // inner container rather than on the scrollport.
+    render(
+      <VirtualList
+        items={comments(200)}
+        getItemKey={(c) => c.id}
+        header={<p>description</p>}
+        stickyFooter={<p>composer</p>}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    const feed = screen.getByRole('feed')
+    expect(feed).not.toContainElement(screen.getByText('description'))
+    expect(feed).not.toContainElement(screen.getByText('composer'))
+  })
+
+  it('orders the slots so each sticky one pins over what scrolls past it', () => {
+    // header, stickyHeader, items, footer, stickyFooter. The order is load-bearing
+    // twice over: a sticky header below the items would be measured as space *above*
+    // them, and a footer after the composer could only ever be read by scrolling
+    // underneath it.
+    const { container } = render(
+      <VirtualList
+        items={comments(200)}
+        getItemKey={(c) => c.id}
+        header={<p>description</p>}
+        stickyHeader={<p>filters</p>}
+        footer={<p>end of thread</p>}
+        stickyFooter={<p>composer</p>}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    const scrollport = container.firstElementChild
+    const order = [...(scrollport?.children ?? [])].map(
+      (child) => child.getAttribute('data-virtual-slot') ?? child.getAttribute('role'),
+    )
+    expect(order).toEqual(['header', 'stickyHeader', 'feed', 'footer', 'stickyFooter'])
+  })
+
+  it('hands the headless hook the same measurement path', () => {
+    // The hook is presented as a first-class path, so a consumer writing their own
+    // markup must not be left with the manual contract the slots exist to remove.
+    const seen: (string | null)[] = []
+    function Headless(): ReactNode {
+      const list = useVirtualList({
+        items: comments(50),
+        getItemKey: (c: Comment) => c.id,
+      })
+      return (
+        <div ref={list.scrollRef}>
+          <div ref={list.headerRef} data-testid="slot">
+            description
+          </div>
+          <div ref={list.containerRef} />
+        </div>
+      )
+    }
+
+    render(<Headless />)
+    seen.push(screen.getByTestId('slot').textContent)
+    expect(seen).toEqual(['description'])
+  })
+
+  it('returns a stable ref per slot, and a different one for each', () => {
+    // An identity that changed per render would detach and reattach the observer every
+    // time — and a slot detaching is not free: it zeroes the measured height and
+    // republishes, so the churn would be visible as the list twitching.
+    const passes: Record<string, unknown>[] = []
+    function Probe(): ReactNode {
+      const list = useVirtualList({ items: comments(20), getItemKey: (c: Comment) => c.id })
+      passes.push({
+        header: list.headerRef,
+        stickyHeader: list.stickyHeaderRef,
+        footer: list.footerRef,
+        stickyFooter: list.stickyFooterRef,
+      })
+      return <div ref={list.scrollRef} />
+    }
+
+    const { rerender } = render(<Probe />)
+    rerender(<Probe />)
+
+    // The last two passes, not the first two: in element-scroller mode there is no
+    // engine until the scrollport ref has attached, so the opening render legitimately
+    // hands back the no-op. Stability is a claim about the engine's lifetime.
+    const [first, second] = passes.slice(-2)
+    expect(passes.length).toBeGreaterThanOrEqual(2)
+    expect(second).toEqual(first)
+
+    // And four distinct callbacks rather than one shared between the slots, which
+    // would register every slot under whichever name attached last.
+    expect(new Set(Object.values(second ?? {})).size).toBe(4)
   })
 })

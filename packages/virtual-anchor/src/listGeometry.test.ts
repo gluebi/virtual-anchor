@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import fc from 'fast-check'
-import { ListGeometry, type ListInsets } from './listGeometry.js'
+import { composeInsets, ListGeometry, visibleSizeOf, type ListInsets } from './listGeometry.js'
 
 const geometry = (insets: ListInsets = {}, viewportSize = 800): ListGeometry =>
   new ListGeometry(insets, viewportSize)
@@ -54,6 +54,96 @@ describe('ListGeometry conversion', () => {
     expect(g.paddingEnd).toBe(0)
     expect(g.margin).toBe(0)
   })
+
+  it('round-trips whatever the measured slots compose into', () => {
+    // The slots reach the conversion as ordinary insets — a sticky header counted
+    // into both `scrollMargin` and `scrollPaddingStart`, a footer into `spaceAfter`.
+    // The invariant that has to survive that is the only one there is: the two
+    // conversions remain exact inverses.
+    fc.assert(
+      fc.property(
+        insetsArb(),
+        fc.double({ min: 0, max: 2000, noNaN: true }),
+        fc.double({ min: 0, max: 2000, noNaN: true }),
+        fc.double({ min: 0, max: 2000, noNaN: true }),
+        fc.double({ min: -1000, max: 500_000, noNaN: true }),
+        (base, header, stickyStart, footer, scrollOffset) => {
+          const g = geometry({
+            scrollMargin: base.scrollMargin + header + stickyStart,
+            scrollPaddingStart: base.scrollPaddingStart + stickyStart,
+            scrollPaddingEnd: base.scrollPaddingEnd,
+            spaceAfter: footer,
+          })
+          expect(g.toScroll(g.toList(scrollOffset))).toBeCloseTo(scrollOffset, 6)
+        },
+      ),
+      { numRuns: 1000 },
+    )
+  })
+
+  it('keeps space after the list out of the conversion entirely', () => {
+    // `spaceAfter` exists for the scroller's end shortcut alone. If it ever started
+    // shifting the probe point, every anchor in a list with a footer would be wrong.
+    const withFooter = geometry({ spaceAfter: 400 })
+    expect(withFooter.toList(1000)).toBe(geometry().toList(1000))
+    expect(withFooter.toScroll(1000)).toBe(geometry().toScroll(1000))
+    expect(withFooter.visibleSize()).toBe(geometry().visibleSize())
+  })
+})
+
+describe('composeInsets', () => {
+  it('returns the consumer’s own object when there is no chrome', () => {
+    // Identity, not equality: a list with no slots must allocate nothing on a path
+    // that runs once per publish.
+    const base: ListInsets = { scrollMargin: 120 }
+    expect(composeInsets(base, {})).toBe(base)
+    expect(composeInsets(base, { header: 0, stickyHeader: 0, footer: 0, stickyFooter: 0 })).toBe(
+      base,
+    )
+  })
+
+  it('counts a scroll-away header only towards where the list begins', () => {
+    expect(composeInsets({}, { header: 300 })).toEqual({
+      scrollMargin: 300,
+      scrollPaddingStart: 0,
+      scrollPaddingEnd: 0,
+      spaceAfter: 0,
+    })
+  })
+
+  it('counts a sticky slot in both of its channels', () => {
+    // The rule that is easy to get wrong, and the one react-virtuoso needed two
+    // measured values for: in-flow space *and* overlapping chrome.
+    expect(composeInsets({}, { stickyHeader: 80 })).toEqual({
+      scrollMargin: 80,
+      scrollPaddingStart: 80,
+      scrollPaddingEnd: 0,
+      spaceAfter: 0,
+    })
+    expect(composeInsets({}, { stickyFooter: 60 })).toEqual({
+      scrollMargin: 0,
+      scrollPaddingStart: 0,
+      scrollPaddingEnd: 60,
+      spaceAfter: 60,
+    })
+  })
+
+  it('adds to the consumer’s own insets rather than replacing them', () => {
+    // `scrollMargin` still means the list's offset within the document, which is
+    // page chrome *outside* the component — a different quantity from a header
+    // inside it, and they compose.
+    expect(
+      composeInsets(
+        { scrollMargin: 200, scrollPaddingStart: 64, scrollPaddingEnd: 10 },
+        { header: 300, stickyHeader: 80, footer: 40, stickyFooter: 60 },
+      ),
+    ).toEqual({
+      scrollMargin: 580,
+      scrollPaddingStart: 144,
+      scrollPaddingEnd: 70,
+      spaceAfter: 100,
+    })
+  })
 })
 
 describe('ListGeometry visible area', () => {
@@ -87,6 +177,29 @@ describe('ListGeometry visible area', () => {
           expect(buffered.end).toBeGreaterThanOrEqual(visible.end)
         },
       ),
+    )
+  })
+
+  it('never reports a negative usable height', () => {
+    // Reachable now that sticky slots feed the padding: a composer and a filter bar
+    // taller than the scrollport is a phone in landscape, not a misconfiguration. A
+    // negative height would invert `visibleBand`, which does not report "nothing is
+    // visible" — it silently stops every visibility event, which is the bug
+    // `clampToOnScreen` was written to kill once already.
+    const g = geometry({ scrollPaddingStart: 500, scrollPaddingEnd: 500 }, 600)
+    expect(g.visibleSize()).toBe(0)
+
+    const band = g.visibleBand(1000)
+    expect(band.end).toBeGreaterThanOrEqual(band.start)
+  })
+
+  it('agrees with the free function the scroller uses', () => {
+    // Two callers, one expression. The scroller holds raw insets and used to subtract
+    // the padding itself, which is exactly the duplication this class exists to end.
+    fc.assert(
+      fc.property(insetsArb(), fc.double({ min: 0, max: 2000, noNaN: true }), (insets, size) => {
+        expect(visibleSizeOf(insets, size)).toBe(new ListGeometry(insets, size).visibleSize())
+      }),
     )
   })
 

@@ -118,6 +118,25 @@ export interface UseVirtualListResult<T> {
   containerRef: (element: HTMLElement | null) => void
   /** Attach to each item. Handles measurement and positioning. */
   itemRef: (key: ItemKey) => (element: HTMLElement | null) => void
+  /**
+   * Attach to content sharing the scroller with the list. Handles measurement.
+   *
+   * One ref per slot rather than one parameterised by slot, because unlike
+   * `itemRef` the set is closed: there are four of these and there will be four
+   * of them tomorrow, so naming them costs nothing and reads as markup rather
+   * than as a lookup.
+   *
+   * **Order matters.** Render them as `VirtualList` does — header, stickyHeader,
+   * the item container, footer, stickyFooter — because that is the layout the
+   * measured heights are composed for. A `stickyHeader` placed below the items
+   * would be counted as space above them, and every offset would be wrong by its
+   * height. Nothing can check this for you: the library never sees your markup,
+   * only the boxes it is handed.
+   */
+  headerRef: (element: HTMLElement | null) => void
+  stickyHeaderRef: (element: HTMLElement | null) => void
+  footerRef: (element: HTMLElement | null) => void
+  stickyFooterRef: (element: HTMLElement | null) => void
   items: readonly RenderedItem<T>[]
   totalSize: number
   renderedRange: readonly [number, number]
@@ -446,6 +465,24 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     [engine],
   )
 
+  /**
+   * The four slot refs, resolved once per engine.
+   *
+   * `engine.slotRef` memoises per slot, so these identities are stable for the
+   * life of the engine — which is the whole requirement: a ref whose identity
+   * changed per render would detach and reattach the observer every time, and
+   * a slot detaching is not free, it zeroes the measured height and republishes.
+   */
+  const slotRefs = useMemo(
+    () => ({
+      headerRef: engine?.slotRef('header') ?? noopRef,
+      stickyHeaderRef: engine?.slotRef('stickyHeader') ?? noopRef,
+      footerRef: engine?.slotRef('footer') ?? noopRef,
+      stickyFooterRef: engine?.slotRef('stickyFooter') ?? noopRef,
+    }),
+    [engine],
+  )
+
   const rendered = useMemo<readonly RenderedItem<T>[]>(() => {
     const result: RenderedItem<T>[] = []
     for (const item of state.items) {
@@ -472,6 +509,7 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     scrollRef,
     containerRef,
     itemRef,
+    ...slotRefs,
     items: rendered,
     totalSize: state.totalSize,
     renderedRange: state.renderedRange,

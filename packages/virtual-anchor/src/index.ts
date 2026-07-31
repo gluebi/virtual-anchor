@@ -5,6 +5,7 @@ export type {
   ScrollEndReason,
   ScrollResult,
   ScrollToOptions,
+  SlotName,
 } from './types.js'
 
 export { SizeCache } from './sizeCache.js'
@@ -30,7 +31,7 @@ export { createElementViewport, createWindowViewport, documentScrollElement } fr
 export type { Viewport } from './viewport.js'
 
 export { createResizer } from './resizer.js'
-export type { Resizer, ResizeBatch, ResizerOptions } from './resizer.js'
+export type { Resizer, ResizeBatch, ResizerOptions, SlotResizeBatch } from './resizer.js'
 
 export {
   devicePixelRatioOf,

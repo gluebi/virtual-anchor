@@ -16,7 +16,20 @@ export interface DemoConfig {
   /** Comment to deep-link to on load. */
   target: number
   paddingStart: number
-  scrollMargin: number
+  /**
+   * Height of the measured `header` slot, in px.
+   *
+   * Replaces the old `scrollMargin` knob, which had to declare the same number
+   * twice — once as the option and once as the slot's inline height — and was
+   * therefore incapable of testing the case that matters: the two disagreeing.
+   * A measured slot has only one number, so the suite exercises the library's
+   * own measurement rather than the demo's arithmetic.
+   */
+  header: number
+  /** Height of the measured `footer` slot, in px. */
+  footer: number
+  /** Height of the measured `stickyFooter` slot, in px. */
+  stickyFooter: number
   windowScroller: boolean
   /** Load the entire thread, so targets sit deep in a large window. */
   loadAll: boolean
@@ -50,7 +63,9 @@ const number = (name: string, fallback: number): number => {
 export const CONFIG: DemoConfig = {
   target: Math.min(Math.max(number('comment', 0), 0), THREAD_SIZE - 1),
   paddingStart: number('paddingStart', DEFAULT_HEADER_HEIGHT),
-  scrollMargin: number('scrollMargin', 0),
+  header: number('header', 0),
+  footer: number('footer', 0),
+  stickyFooter: number('stickyFooter', 0),
   windowScroller: params.get('windowScroller') === '1',
   loadAll: params.get('loadAll') === '1',
   once: params.get('once') === '1',
