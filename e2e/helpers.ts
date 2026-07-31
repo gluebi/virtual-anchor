@@ -1,5 +1,10 @@
 import { expect, type Page } from '@playwright/test'
-import type { Anchor, ScrollResult, SizeSnapshot } from '../packages/virtual-anchor/src/index.js'
+import type {
+  Anchor,
+  ItemKey,
+  ScrollResult,
+  SizeSnapshot,
+} from '../packages/virtual-anchor/src/index.js'
 
 /**
  * The harness every accuracy spec shares.
@@ -134,8 +139,43 @@ export function setWindowAround(page: Page, index: number): Promise<void> {
   }, index)
 }
 
+/**
+ * Wait two animation frames: one for React to commit, one for the corrective
+ * write that commit provokes to land.
+ *
+ * Here rather than in each spec because the depth is a shared assumption about
+ * the library's timing — how many frames a geometry change needs before the view
+ * has settled. It had been written out three times in new code alone, twice with
+ * the same comment attached, which is exactly the drift this module exists to
+ * prevent.
+ */
+export function settle(page: Page): Promise<void> {
+  return page.evaluate(
+    () =>
+      new Promise<void>((resolve) => {
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            resolve()
+          })
+        })
+      }),
+  )
+}
+
+/**
+ * How far the scroller is from its own maximum.
+ *
+ * The e2e mirror of `getMaxScrollOffset`, and the predicate the whole
+ * `followOutput` suite asserts on — so it stays one definition.
+ */
+export function distanceFromBottom(page: Page): Promise<number> {
+  return page
+    .locator('.scroller')
+    .evaluate((el) => el.scrollHeight - el.clientHeight - el.scrollTop)
+}
+
 /** Where a row's top edge is, relative to the scrollport's content top. */
-export function topOfKey(page: Page, key: string): Promise<number> {
+export function topOfKey(page: Page, key: ItemKey): Promise<number> {
   return page.evaluate((k) => {
     const row = document.querySelector(`[data-virtual-key="${k}"]`)
     const scroller = document.querySelector('.scroller')
@@ -192,7 +232,10 @@ export function measure(
 
       // One view descriptor for both scroller kinds, so the arithmetic below — and the
       // clamp test in particular — exists once rather than per branch.
-      const scroller = document.querySelector('.scroller')
+      // Typed, because the scrollbar allowance below reads `offsetHeight`, which is
+      // an `HTMLElement` property. Untyped this compiled only because nothing ever
+      // ran `tsc` over `e2e/` — see the root `typecheck` script.
+      const scroller = document.querySelector<HTMLElement>('.scroller')
       if (!scroller) return miss
       const box = scroller.getBoundingClientRect()
       const view = windowScroller

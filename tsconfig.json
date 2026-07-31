@@ -1,5 +1,5 @@
 {
-  "//": "Covers the TypeScript that is not part of a publishable package — build and test configs, Playwright specs, the spike. Without it the ESLint project service falls back to a default program with no `strictNullChecks`, and four type-aware rules then report themselves as unusable once per file.",
+  "//": "Covers the TypeScript that is not part of a publishable package — build and test configs, Playwright specs, the spike. Without it the ESLint project service falls back to a default program with no `strictNullChecks`, and four type-aware rules then report themselves as unusable once per file. The root `typecheck` script runs the compiler over this project as well as the workspace packages — for a long time it did not, so everything listed here was checked only by ESLint, which reports lint rules and not type errors, and three real ones accumulated in `e2e/`.",
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
