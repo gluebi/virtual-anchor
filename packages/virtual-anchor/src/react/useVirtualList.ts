@@ -109,7 +109,8 @@ export interface UseVirtualListOptions<T> {
    *
    * A notification for the same reason `onVisibleRangeChange` is one: it is fed
    * from a store subscription rather than a render, so it costs no renders and
-   * cannot be stale.
+   * cannot be stale. Delivered after the publish that caused it, never during a
+   * render — see {@link onVisibleRangeChange}.
    */
   onAtBottomChange?: (atBottom: boolean) => void
   /**
@@ -121,6 +122,11 @@ export interface UseVirtualListOptions<T> {
    * target the animation is chasing, and the newly inserted items are unmeasured
    * so it keeps moving. The library cannot decide *whether* to fetch, but it can
    * refuse to ask at the one moment the answer must be no.
+   *
+   * Whether an edge has been reached is decided at the publish, so that
+   * suppression still reads the scroll state as it was; *you* are told a
+   * microtask later, so setting state from here is safe — see
+   * {@link onVisibleRangeChange}.
    */
   onEdgeReached?: (edge: 'start' | 'end') => void
   /** How near an edge counts as reaching it, in px. Default 600. */
@@ -140,6 +146,13 @@ export interface UseVirtualListOptions<T> {
    *
    * Fed by a store subscription, so it costs no renders of its own. What a consumer does with it
    * — set state, fetch a page, update a progress indicator — is theirs to decide.
+   *
+   * **Delivered a microtask after the publish that caused it, never during a render.** Options are
+   * pushed into the engine during render, so the publish behind a range change routinely happens
+   * mid-render; called synchronously from there, a consumer's `setState` would hit React's "Cannot
+   * update a component while rendering a different component". The hop costs nothing observable —
+   * a microtask still runs before paint — and it means the range you are handed is the one that
+   * caused the notification, not whatever the store holds by the time you read it.
    */
   onVisibleRangeChange?: (range: readonly [number, number]) => void
   /** Restore measured sizes from a previous visit. */
@@ -387,6 +400,27 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     return item === undefined ? undefined : latestEstimateSize.current?.(item, index)
   }, [])
 
+  const latestEdgeListener = useRef(onEdgeReached)
+  latestEdgeListener.current = onEdgeReached
+
+  /**
+   * Report an edge to the consumer, a microtask after the engine decided it was reached.
+   *
+   * The hazard here is the sharpest of the three notifications, because the documented use of
+   * this callback *is* a state change: it says "where you load the next page", and a page load
+   * begins with a `setState`. The publish behind the first edge report happens while the engine
+   * is being handed its options, which is during render — so on a list that opens at the top,
+   * every consumer following the documentation saw React's "Cannot update a component while
+   * rendering a different component" on mount.
+   *
+   * Whether an edge was reached, and the latch that makes it fire once per crossing, both stay in
+   * the engine at emission time. Only the hand-off moves, so the suppression during a programmatic
+   * scroll still reads the scroll state as it was rather than as it is a microtask later.
+   */
+  const reportEdgeReached = useCallback((edge: 'start' | 'end') => {
+    queueMicrotask(() => latestEdgeListener.current?.(edge))
+  }, [])
+
   // Push option changes into the engine during render rather than in an effect,
   // so a prepend is reflected in the very first commit that renders it — one
   // frame of stale positions is exactly the visible jump this design avoids.
@@ -408,7 +442,9 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
       // Spread conditionally rather than always wrapped, unlike the visibility
       // callback: the engine skips the whole edge computation when no listener is
       // installed, and a wrapper would defeat that for every list that has none.
-      ...(onEdgeReached === undefined ? {} : { onEdgeReached }),
+      // The wrapper it gets when there *is* one is permanently stable, so a call
+      // site's inline arrow does not reinstall an option every render.
+      ...(onEdgeReached === undefined ? {} : { onEdgeReached: reportEdgeReached }),
       onVisibilityChange: (events) => onVisibilityChange?.(events),
     })
   }
@@ -423,6 +459,16 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
    * sentinel reports it.
    */
   const reportedRange = useRef<readonly [number, number]>(EMPTY_STATE.visibleRange)
+  /**
+   * The consumer's callbacks, in boxes assigned during render.
+   *
+   * Deliberately not moved into an effect, which is the conventional form of a latest-callback
+   * ref. React flushes passive effects *after* microtasks, and the hand-off below is a microtask —
+   * so a box written from an effect would hand back the previous commit's callback in exactly the
+   * publish-during-render case this file defers for. Assigned here it is the freshest callback
+   * that exists at the moment the notification is scheduled. `react-hooks/refs` is off for this
+   * directory for the same family of reasons; see `eslint.config.js`.
+   */
   const latestRangeListener = useRef(onVisibleRangeChange)
   latestRangeListener.current = onVisibleRangeChange
 
@@ -455,18 +501,37 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
    * inline arrow would otherwise unsubscribe and resubscribe on every render, re-reading the
    * store and allocating closures each time. The cost of that is small, but this file goes
    * out of its way to avoid exactly this shape elsewhere.
+   *
+   * **What is reported is decided at the emission; who is told is a microtask later**, the same
+   * split the re-render subscription below makes and for the same reason. Options are pushed into
+   * the engine during render, so a publish routinely lands mid-render, and a consumer setting
+   * state from either callback would hit React's "Cannot update a component while rendering a
+   * different component" — reported as the library's bug, since nothing in the call site says the
+   * callback is not post-commit. Keeping the ref writes synchronous is what preserves the
+   * de-duplication: the comparison still happens against the emission order, and each hand-off
+   * carries the value that caused it rather than re-reading a ref that has moved on.
+   *
+   * Nothing cancels a scheduled hand-off when the subscription ends, and that is deliberate.
+   * StrictMode runs this effect's cleanup *before* the queued microtask, while the reported-value
+   * refs deliberately live outside the effect — so a `disposed` guard would drop the first report
+   * and the remount pass, finding it already reported, would queue nothing to replace it. The
+   * consumer would learn where the list started in production and not in development, which is the
+   * worst of both. What not guarding costs is one late call when a publish and an unmount land in
+   * the same tick, which React absorbs.
    */
   useEffect(() => {
     if (!engine) return
 
     const notify = (state: VirtualState): void => {
       if (state.visibleRange !== reportedRange.current) {
-        reportedRange.current = state.visibleRange
-        latestRangeListener.current?.(state.visibleRange)
+        const range = state.visibleRange
+        reportedRange.current = range
+        queueMicrotask(() => latestRangeListener.current?.(range))
       }
       if (state.atBottom !== reportedAtBottom.current) {
-        reportedAtBottom.current = state.atBottom
-        latestAtBottomListener.current?.(state.atBottom)
+        const atBottom = state.atBottom
+        reportedAtBottom.current = atBottom
+        queueMicrotask(() => latestAtBottomListener.current?.(atBottom))
       }
     }
 

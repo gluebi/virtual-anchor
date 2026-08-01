@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, render, screen } from '@testing-library/react'
-import { StrictMode, useState, type ReactNode } from 'react'
+import { StrictMode, useLayoutEffect, useState, type ReactNode } from 'react'
 import { VirtualList, type VirtualListHandle } from './VirtualList.js'
 import { layoutSignatureFor, type Engine, type ItemKey } from '../index.js'
 import { useVirtualList } from './useVirtualList.js'
@@ -72,6 +72,17 @@ afterEach(() => {
   vi.unstubAllEnvs()
   vi.restoreAllMocks()
 })
+
+/**
+ * Reach the next microtask, where the consumer notifications are handed over.
+ *
+ * They are deferred so a publish during React's render phase cannot call consumer code mid-render;
+ * the cost is that no assertion about them can be made on the same tick as the scroll that caused
+ * them.
+ */
+const flush = async (): Promise<void> => {
+  await act(async () => {})
+}
 
 describe('VirtualList rendering', () => {
   it('mounts a window of items rather than all of them', () => {
@@ -1292,7 +1303,7 @@ describe('onVisibleRangeChange', () => {
   }
 
   /** jsdom keeps an assigned `scrollTop` given the stubbed metrics, and publishes are sync. */
-  const scrollTo = (top: number) => {
+  const dispatchScroll = (top: number) => {
     const scroller = screen.getByTestId('scroller')
     act(() => {
       scroller.scrollTop = top
@@ -1300,9 +1311,16 @@ describe('onVisibleRangeChange', () => {
     })
   }
 
-  it('reports the first range once the engine mounts', () => {
+  /** The notification is handed over a microtask, so an assertion about it has to reach one. */
+  const scrollTo = async (top: number) => {
+    dispatchScroll(top)
+    await flush()
+  }
+
+  it('reports the first range once the engine mounts', async () => {
     const seen: (readonly [number, number])[] = []
     render(<Harness onVisibleRangeChange={(range) => { seen.push(range) }} />)
+    await flush()
 
     // Seeded from the empty sentinel, so the first real range arrives as a notification rather
     // than being silently adopted.
@@ -1310,41 +1328,66 @@ describe('onVisibleRangeChange', () => {
     expect(seen.at(-1)?.[1]).toBeGreaterThan(0)
   })
 
-  it('fires for a scroll that provokes no render at all', () => {
+  it('fires for a scroll that provokes no render at all', async () => {
     // The whole reason this is a callback: `needsRerender` omits `visibleRange`, so a scroll
     // within the mounted set is invisible to React. An effect on a render snapshot would miss
     // exactly this.
     const seen: (readonly [number, number])[] = []
     render(<Harness onVisibleRangeChange={(range) => { seen.push(range) }} />)
+    await flush()
     const count = seen.length
 
-    scrollTo(220)
+    await scrollTo(220)
 
     expect(seen.length).toBeGreaterThan(count)
     expect(seen.at(-1)?.[0]).toBeGreaterThan(0)
   })
 
-  it('stays quiet when the range does not move', () => {
+  it('stays quiet when the range does not move', async () => {
     const seen: (readonly [number, number])[] = []
     render(<Harness onVisibleRangeChange={(range) => { seen.push(range) }} />)
+    await flush()
 
-    scrollTo(220)
+    await scrollTo(220)
     const settled = seen.length
     // A sub-item nudge: a fresh tuple is published, with the same two numbers in it.
-    scrollTo(221)
+    await scrollTo(221)
 
     expect(seen.length).toBe(settled)
   })
 
-  it('does not re-fire when only the callback identity changes', () => {
+  it('hands over the range that caused the notification, not the one current when it lands', async () => {
+    // The de-duplication ref is written at the emission and the value is captured with it, so a
+    // burst inside one tick is delivered as the sequence of ranges that occurred. Reading the
+    // store from inside the microtask instead would report the last range three times.
+    const seen: string[] = []
+    render(<Harness onVisibleRangeChange={(range) => { seen.push(range.join(',')) }} />)
+    await flush()
+    seen.length = 0
+
+    const scroller = screen.getByTestId('scroller')
+    act(() => {
+      for (const top of [1000, 2000, 3000]) {
+        scroller.scrollTop = top
+        scroller.dispatchEvent(new Event('scroll'))
+      }
+    })
+    await flush()
+
+    expect(seen).toHaveLength(3)
+    expect(new Set(seen).size).toBe(3)
+  })
+
+  it('does not re-fire when only the callback identity changes', async () => {
     const seen: string[] = []
     const { rerender } = render(
       <Harness onVisibleRangeChange={(range) => { seen.push(`a:${range.join(',')}`) }} />,
     )
-    scrollTo(220)
+    await scrollTo(220)
     const before = seen.length
 
     rerender(<Harness onVisibleRangeChange={(range) => { seen.push(`b:${range.join(',')}`) }} />)
+    await flush()
 
     // Resubscribing reseeds from the current state, so swapping callbacks reports nothing.
     expect(seen.length).toBe(before)
@@ -1354,13 +1397,134 @@ describe('onVisibleRangeChange', () => {
     render(<Harness />)
     const rendered = screen.getByTestId('rendered').textContent
 
-    scrollTo(3000)
+    // Deliberately not flushed: the claim is about what a caller can read *now*, in the handler
+    // that just ran, before React has been given any chance to re-render — a keyboard handler
+    // deciding where to page from, a fetch decision. A render snapshot cannot answer that
+    // question, whatever it would say a moment later.
+    dispatchScroll(3000)
 
-    // The scroll stayed inside the mounted set, so React never re-rendered and the text is
-    // exactly what it was. The getter went to the store instead.
     expect(screen.getByTestId('rendered').textContent).toBe(rendered)
     expect(captured.read?.()[0]).toBeGreaterThan(0)
     expect(captured.read?.().join(',')).not.toBe(rendered)
+  })
+})
+
+describe('notifications and render', () => {
+  /**
+   * Which React phase the callback was invoked in.
+   *
+   * The authentic symptom is React's own "Cannot update a component while rendering a different
+   * component", and these tests were written against it first. It is the wrong assertion: React
+   * dedupes that warning by the *rendering* component for the lifetime of the module, so only the
+   * first test in the file to provoke it would ever see one, and the second would pass by being
+   * second. Recording the phase per call says the same thing and does not care what ran before it.
+   */
+  let phase: 'render' | 'committed' = 'committed'
+
+  /** A parent whose state the callbacks set, and a prepend that moves the visible range. */
+  const Parent = ({
+    onVisibleRangeChange,
+    onEdgeReached,
+  }: {
+    onVisibleRangeChange?: (range: readonly [number, number]) => void
+    onEdgeReached?: (edge: 'start' | 'end') => void
+  }) => {
+    const [items, setItems] = useState(() => comments(500))
+    const [, setEcho] = useState(0)
+    // Set as this subtree starts rendering and cleared once it has committed, so anything the
+    // list calls out to from inside its own render is seen for what it is.
+    phase = 'render'
+    useLayoutEffect(() => {
+      phase = 'committed'
+    })
+    return (
+      <>
+        <button
+          data-testid="prepend"
+          onClick={() => {
+            setItems([...comments(50, 'older'), ...items])
+          }}
+        />
+        <VirtualList
+          items={items}
+          getItemKey={(c) => c.id}
+          estimateSize={() => 100}
+          onVisibleRangeChange={(range) => {
+            onVisibleRangeChange?.(range)
+            setEcho((n) => n + 1)
+          }}
+          {...(onEdgeReached === undefined
+            ? {}
+            : {
+                onEdgeReached: (edge: 'start' | 'end') => {
+                  onEdgeReached(edge)
+                  setEcho((n) => n + 1)
+                },
+              })}
+          renderItem={(c) => <span>{c.text}</span>}
+        />
+      </>
+    )
+  }
+
+  it('lets a consumer set parent state from onVisibleRangeChange', async () => {
+    // Options are pushed into the engine during render, so a prepend publishes mid-render. Called
+    // synchronously from there, this callback ran inside `VirtualList`'s render and the consumer's
+    // `setState` was a cross-component update from a render phase — for a callback whose
+    // documented use is exactly that.
+    const phases: string[] = []
+    render(<Parent onVisibleRangeChange={() => { phases.push(phase) }} />)
+    await flush()
+
+    act(() => {
+      screen.getByTestId('prepend').click()
+    })
+    await flush()
+
+    // It genuinely fired more than once — otherwise this would pass by never notifying at all.
+    expect(phases.length).toBeGreaterThan(1)
+    expect(phases).not.toContain('render')
+  })
+
+  it('hands over onEdgeReached after the render that decided it, not inside it', async () => {
+    // The sharpest case, and it needs no interaction to reach: a list that opens at the top is
+    // already at its start edge, and the publish that notices sits in the very render that hands
+    // the engine its options. "Where you load the next page" therefore ran during render on
+    // mount, for every consumer following the documentation.
+    //
+    // Asserted as timing rather than through the phase flag above, because that flag only sees a
+    // render pass that starts at the parent. This one starts inside `VirtualList`, when the
+    // scrollport ref lands and the engine it derives comes into existence — so what is pinned
+    // here is the property that makes it safe: nothing has been handed over while the caller's
+    // stack, whatever it was, is still running.
+    const edges: string[] = []
+    render(<Parent onEdgeReached={(edge) => { edges.push(edge) }} />)
+
+    expect(edges).toEqual([])
+
+    await flush()
+    expect(edges).toEqual(['start'])
+  })
+
+  it('reports the first range exactly once under StrictMode', async () => {
+    // The case that rules out cancelling a scheduled hand-off on unsubscribe. StrictMode's
+    // cleanup runs before the microtask, and the reported-range ref outlives the effect — so a
+    // `disposed` guard would drop this report and the remount would not replace it.
+    const seen: (readonly [number, number])[] = []
+    render(
+      <StrictMode>
+        <VirtualList
+          items={comments(500)}
+          getItemKey={(c) => c.id}
+          estimateSize={() => 100}
+          onVisibleRangeChange={(range) => { seen.push(range) }}
+          renderItem={(c) => <span>{c.text}</span>}
+        />
+      </StrictMode>,
+    )
+    await flush()
+
+    expect(seen).toHaveLength(1)
   })
 })
 
@@ -1501,7 +1665,7 @@ describe('VirtualList measured slots', () => {
 })
 
 describe('VirtualList follow-output plumbing', () => {
-  it('reports whether the view is at the end, and only when it changes', () => {
+  it('reports whether the view is at the end, and only when it changes', async () => {
     // The stubbed scrollport is 600px tall over 100,000px of content, so the list
     // starts far from its end.
     const seen: boolean[] = []
@@ -1514,6 +1678,7 @@ describe('VirtualList follow-output plumbing', () => {
         renderItem={(c) => <span>{c.text}</span>}
       />,
     )
+    await flush()
 
     // Reported once, from a store subscription rather than a render — and the
     // first report happens at all, which is what seeding the ref to `null` buys:
