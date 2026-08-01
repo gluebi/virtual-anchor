@@ -167,6 +167,13 @@ export interface UseVirtualListOptions<T> {
   /** Keys always kept mounted, beyond the rendered range. */
   keepMounted?: readonly ItemKey[]
   visibility?: VisibilityOptions
+  /**
+   * Fires with each batch of visibility transitions.
+   *
+   * Delivered after the sample that produced it, never during a render — see
+   * {@link onVisibleRangeChange}. Each event's `at` is stamped at the sample, so a batch
+   * describes when it was taken rather than when it arrived.
+   */
   onVisibilityChange?: (events: VisibilityEvent[]) => void
   /**
    * Fires when the on-screen index range changes. Buffer excluded, unlike Virtuoso's
@@ -449,6 +456,27 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
     handToConsumer(latestEdgeListener, edge)
   }, [])
 
+  const latestVisibilityListener = useRef(onVisibilityChange)
+  latestVisibilityListener.current = onVisibilityChange
+
+  /**
+   * Report a batch of visibility events, on the same terms as everything else here.
+   *
+   * The one of the four with no reproduction behind it, and deferred anyway. `publish` samples
+   * visibility at its end, so this sits on the same stack as the notifications that did crash —
+   * but nothing drives it during a render in practice, because a rule with a `dwellMs` reports
+   * `enter` from a timer rather than from the sample, and every attempt to force it produced
+   * events only after the commit: in jsdom, and against the demo in a real browser with the
+   * dwell taken down to zero.
+   *
+   * Left synchronous it would be the same asymmetry the bug arrived as — one hand-off guarded,
+   * its neighbour not, for a reason nobody wrote down. Each event carries an `at` stamped at the
+   * sample, so a batch still describes the moment it was taken rather than the moment it lands.
+   */
+  const reportVisibility = useCallback((events: VisibilityEvent[]) => {
+    handToConsumer(latestVisibilityListener, events)
+  }, [])
+
   // Push option changes into the engine during render rather than in an effect,
   // so a prepend is reflected in the very first commit that renders it — one
   // frame of stale positions is exactly the visible jump this design avoids.
@@ -473,7 +501,9 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
       // The wrapper it gets when there *is* one is permanently stable, so a call
       // site's inline arrow does not reinstall an option every render.
       ...(onEdgeReached === undefined ? {} : { onEdgeReached: reportEdgeReached }),
-      onVisibilityChange: (events) => onVisibilityChange?.(events),
+      // Always installed, unlike the edge callback: the engine samples visibility regardless of
+      // whether anyone is listening, and this is only where a batch is handed on.
+      onVisibilityChange: reportVisibility,
     })
   }
 

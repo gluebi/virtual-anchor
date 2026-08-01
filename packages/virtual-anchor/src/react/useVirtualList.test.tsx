@@ -356,6 +356,59 @@ describe('useItemVisibility', () => {
     expect(screen.getByTestId('seen')).toBeInTheDocument()
   })
 
+  it('wakes React a microtask after the engine says the item moved', async () => {
+    // The engine notifies these listeners from the end of a publish, and a publish can land
+    // during a render — so calling React's `onChange` straight from one would be a store
+    // telling React to re-render from inside another component's render. The same hop
+    // `useVirtualList`'s own `useSyncExternalStore` subscription has always had.
+    //
+    // `{ mode: 'any' }` with no dwell so the sample emits rather than a timer, which is what
+    // makes a listener fire at all here.
+    const Row = ({ engine }: { engine: null | Parameters<typeof useItemVisibility>[0] }) => {
+      const visibility = useItemVisibility(engine, 'c0')
+      return <span data-testid="visible">{String(visibility.visible)}</span>
+    }
+
+    const Harness = () => {
+      const list = useVirtualList({
+        items: comments(100),
+        getItemKey: (c: Comment) => c.id,
+        estimateSize: () => 100,
+        visibility: { rule: { mode: 'any' } },
+      })
+      return (
+        <div ref={list.scrollRef} data-testid="scroller">
+          <div ref={list.containerRef}>
+            {list.items.map((rendered) => (
+              <div key={rendered.key} ref={list.itemRef(rendered.key)} />
+            ))}
+          </div>
+          <Row engine={list.engine} />
+        </div>
+      )
+    }
+
+    render(<Harness />)
+    await flush()
+    expect(screen.getByTestId('visible')).toHaveTextContent('true')
+
+    // Scroll the first comment off the top. The leave is reported from the sample at the end of
+    // that publish, so this is the notification the hop applies to.
+    const scroller = screen.getByTestId('scroller')
+    act(() => {
+      scroller.scrollTop = 5000
+      scroller.dispatchEvent(new Event('scroll'))
+    })
+
+    // Still the old answer: the engine has already sampled and told its listeners, and React
+    // has not been woken yet. That gap is the whole point — it is where a publish that happened
+    // during a render would otherwise have re-entered React.
+    expect(screen.getByTestId('visible')).toHaveTextContent('true')
+
+    await flush()
+    expect(screen.getByTestId('visible')).toHaveTextContent('false')
+  })
+
   it('reports nothing visible when handed no engine', () => {
     const Row = () => {
       const visibility = useItemVisibility(null, 'c0')
@@ -1504,6 +1557,33 @@ describe('notifications and render', () => {
 
     await flush()
     expect(edges).toEqual(['start'])
+  })
+
+  it('hands over a visibility batch after the sample, not inside it', async () => {
+    // The fourth notification, and the only one with no reproduction behind it: `publish`
+    // samples visibility at its end, so this sits on the same stack as the three that did
+    // crash, but nothing drives it during a render in practice — a rule with a `dwellMs`
+    // reports `enter` from a timer rather than from the sample. Deferred anyway, because one
+    // guarded hand-off beside an unguarded neighbour is the shape the bug came in.
+    //
+    // `{ mode: 'any' }` with no dwell so the sample itself emits, which is the case that could
+    // land mid-render at all.
+    const batches: number[] = []
+    render(
+      <VirtualList
+        items={comments(200)}
+        getItemKey={(c) => c.id}
+        estimateSize={() => 100}
+        visibility={{ rule: { mode: 'any' } }}
+        onVisibilityChange={(events) => { batches.push(events.length) }}
+        renderItem={(c) => <span>{c.text}</span>}
+      />,
+    )
+
+    expect(batches).toEqual([])
+
+    await flush()
+    expect(batches.length).toBeGreaterThan(0)
   })
 
   it('reports the first range exactly once under StrictMode', async () => {

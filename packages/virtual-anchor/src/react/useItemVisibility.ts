@@ -22,8 +22,24 @@ const NOT_VISIBLE: ItemVisibility = {
  * unmount/remount and StrictMode's double invocation cannot double-count.
  */
 export function useItemVisibility(engine: Engine | null, key: ItemKey): ItemVisibility {
+  /**
+   * Wake React a microtask after the engine says this item's visibility moved.
+   *
+   * The engine notifies these listeners from the end of a publish, and a publish can happen
+   * during React's render phase — options are pushed into the engine during render, so a
+   * prepend positions itself in the same commit that renders it. A store telling React to
+   * re-render from inside another component's render is the update React refuses, and the
+   * component named in the warning would be whichever row happened to be subscribed.
+   *
+   * The same hop `useVirtualList`'s own `useSyncExternalStore` has always had, for the same
+   * reason and at the same cost of nothing: React re-reads the snapshot for the render in
+   * progress, and a microtask still runs before paint.
+   */
   const subscribe = useCallback(
-    (onChange: () => void) => engine?.subscribeVisibility(key, onChange) ?? (() => {}),
+    (onChange: () => void) =>
+      engine?.subscribeVisibility(key, () => {
+        queueMicrotask(onChange)
+      }) ?? (() => {}),
     [engine, key],
   )
 
