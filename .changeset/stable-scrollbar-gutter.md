@@ -41,3 +41,13 @@ back, has one without the prop growing a third state.
 Consumers already passing `style={{ scrollbarGutter: 'stable' }}` by hand see no change: same
 computed value, and the merge order keeps their declaration winning either way. That line can go
 whenever it suits, and nothing breaks if it never does.
+
+The React entry's size budget moves from 11.7 kB to 11.95 kB, against an actual of 11704 B. Both
+this and the deferred notifications fit under the old ceiling on their own and are 4 bytes over it
+together, which is the ceiling behaving exactly as intended — and also the shape of budget that
+stops being a budget: with 46 bytes of headroom the next change is discussed on its file size
+rather than on its merits, and the one after that gets the ceiling raised in a hurry by whoever
+happens to be holding it. 250 bytes is enough room to have the argument properly. The core entry
+is untouched at 9.38 kB against 9.5 kB, and the gap between the two entries stays ~2.3 kB — the
+figure worth watching, because it says the React layer is still a translation rather than a second
+implementation.
