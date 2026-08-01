@@ -1,6 +1,6 @@
 {
   "name": "virtual-anchor",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Virtual scrolling that models position as an anchor rather than a pixel offset: variable item heights, per-item viewport events, and scroll-to-item that lands sub-pixel exactly. Framework-agnostic core, with a React adapter at virtual-anchor/react.",
   "license": "MIT",
   "author": "gluebi",

@@ -1,5 +1,136 @@
 # virtual-anchor
 
+## 0.4.0
+
+### Minor Changes
+
+- e9f1922: `VirtualList` now sets `scrollbar-gutter: stable` on the scrollport it creates. Opt out with
+  `stableScrollbarGutter={false}`; an explicit `style={{ scrollbarGutter: … }}` still wins, and
+  nothing is written under `windowScroller`.
+
+  **Changed, not fixed** — a list that never passed the style gets a reserved gutter it did not have
+  before. Visually that is a narrow strip on the right of a list short enough not to overflow.
+  Functionally it is the fix.
+
+  **The failure it prevents is internal to the component, which is why it is the default.** The list
+  mounts and measures its first rows against a scrollport with no scrollbar. Enough of them are
+  measured that the content overflows, the browser inserts a scrollbar, and the scrollport gets
+  narrower — so text wraps differently and every height taken before that moment is now wrong. The
+  list correctly throws all of them away. But those rows are outside the window by then and nothing
+  will re-measure them: they keep their estimate for good, and every offset derived from them is out
+  by the difference. What a consumer sees is a scrollbar slightly the wrong length and a
+  `scrollToKey` that overshoots on a cold list, neither of which points back at a scrollbar that
+  appeared once, seconds ago.
+
+  Nothing in that reasoning is application-specific. It holds for any virtualiser that measures
+  variable-height rows in a scroller it owns, which is exactly what this component is — so a setting
+  every correct call site must pass, for a reason the caller cannot see, is the component's default
+  rather than the caller's responsibility. Without it, the fourth list someone adds is silently
+  wrong until somebody notices.
+
+  The counter-argument is that a library should not impose layout, and it is thin here: the gutter is
+  reserved only on a scrollport the library itself created, it is the width the scrollbar was going
+  to take anyway, and it is one prop to turn off.
+
+  **Ignored under `windowScroller`** whatever the prop says, because there the page is the scroller.
+  Reserving a gutter on the document is the host page's decision, and a list is not entitled to make
+  it.
+
+  **`both-edges` is deliberately not a value.** It is a layout preference rather than a correctness
+  one, and `style` already reaches this element — so a consumer who wants it, or who wants `auto`
+  back, has one without the prop growing a third state.
+
+  Consumers already passing `style={{ scrollbarGutter: 'stable' }}` by hand see no change: same
+  computed value, and the merge order keeps their declaration winning either way. That line can go
+  whenever it suits, and nothing breaks if it never does.
+
+  The React entry's size budget moves from 11.7 kB to 11.95 kB, against an actual of 11704 B. Both
+  this and the deferred notifications fit under the old ceiling on their own and are 4 bytes over it
+  together, which is the ceiling behaving exactly as intended — and also the shape of budget that
+  stops being a budget: with 46 bytes of headroom the next change is discussed on its file size
+  rather than on its merits, and the one after that gets the ceiling raised in a hurry by whoever
+  happens to be holding it. 250 bytes is enough room to have the argument properly. The core entry
+  is untouched at 9.38 kB against 9.5 kB, and the gap between the two entries stays ~2.3 kB — the
+  figure worth watching, because it says the React layer is still a translation rather than a second
+  implementation.
+
+### Patch Changes
+
+- 831bbeb: `onVisibleRangeChange`, `onAtBottomChange` and `onEdgeReached` are handed to the consumer a
+  microtask after the publish that caused them, instead of synchronously from inside it. Setting
+  state from any of the three is now safe.
+
+  **The bug was that a publish is not always post-commit.** Options are pushed into the engine
+  _during_ render — deliberately, so a prepend is positioned in the very commit that renders it — and
+  `setOptions` publishes. Anything called synchronously from that publish therefore runs inside
+  React's render phase, and a consumer's `setState` there is the cross-component update React
+  refuses:
+
+      Cannot update a component (`Thread`) while rendering a different component (`VirtualList`).
+
+  The stack trace points at the consumer's `setState`, so the callback reads as the thing doing
+  something wrong. Nothing at the call site says otherwise: a callback named `onVisibleRangeChange`
+  is indistinguishable from a post-commit one until it isn't.
+
+  **The hazard was already understood in this file, and only half of it was guarded.** The re-render
+  subscription has hopped a microtask since it was written, with a comment explaining exactly this;
+  the notification subscription immediately above it did not. One of two subscribers to the same
+  store was safe and its sibling was not, for no reason anyone had decided.
+
+  `onEdgeReached` was the worst of the three and the last to be noticed, because it needs no
+  interaction at all to reach. A list that opens at the top is already at its start edge, and the
+  publish that notices sits in the same render that hands the engine its options — so _"where you
+  load the next page"_, which is a `setState` by definition, ran during render on mount for every
+  consumer following the documentation.
+
+  **What is decided at the emission stays at the emission; only the hand-off moves.** The
+  de-duplication refs are still written synchronously, so the comparison happens in publish order and
+  each notification carries the value that caused it rather than re-reading a ref that has since
+  moved on — a burst inside one tick is delivered as the sequence of ranges that actually occurred.
+  `onEdgeReached`'s latch and its suppression during a programmatic scroll also stay where they were,
+  in the engine, so the suppression still reads the scroll state as it was rather than as it is a
+  microtask later.
+
+  **Nothing cancels a scheduled hand-off when the subscription ends**, which is a decision rather than
+  an omission and is now pinned by a test. StrictMode runs the effect's cleanup _before_ the queued
+  microtask, while the reported-value refs deliberately live outside the effect — so a `disposed`
+  guard would drop the opening report, and the remount pass, finding it already reported, would queue
+  nothing to replace it. Consumers would learn where the list started in production and not in
+  development. What not guarding costs is one late call when a publish and an unmount land in the same
+  tick, which React absorbs.
+
+  **The one visible timing change**: the first range and the first at-bottom state now arrive one
+  microtask after mount rather than inside the mounting effect. Both were already post-commit, so
+  neither was unsafe — they are deferred anyway so the callback has one timing contract instead of a
+  contract that depends on which publish it came from. If you depended on the opening report landing
+  before your own first post-mount effect, that is the line to read twice.
+
+  Two paths are deliberately **not** changed: `onVisibilityChange` and `useItemVisibility`'s
+  subscription are reachable from the same `publish`, but neither could be driven during a render in
+  jsdom — visibility needs real layout and a real IntersectionObserver — and a fix nothing can
+  demonstrate is a fix nobody can keep.
+
+- 4e156c6: The last two notifications the React adapter forwards — `onVisibilityChange`, and the
+  subscription behind `useItemVisibility` — are handed over a microtask, the same way the other
+  three now are. Every callback this adapter routes to a consumer, and every wake-up it gives React,
+  now has one timing contract: after the publish that caused it, never inside it.
+
+  **These two have no crash behind them, which is the honest reason to say so here.** `publish`
+  samples visibility at its end, so they sit on exactly the stack that made
+  `onVisibleRangeChange` and `onEdgeReached` fail, and `useItemVisibility` is a store waking React
+  from a subscription — the same shape the hook's own `useSyncExternalStore` subscription has always
+  deferred. But nothing drives them during a render in practice. A rule with a `dwellMs` reports
+  `enter` from a timer rather than from the sample, and every attempt to force one produced events
+  only after the commit: in jsdom against a stubbed observer, and against the demo in a real browser
+  with the dwell taken down to zero.
+
+  So this is uniformity rather than a fix, and it is worth the bytes because the alternative is what
+  the previous release was: one hand-off guarded, its neighbour not, for a reason nobody had written
+  down. The next person to add a rule that emits from a sample should not have to rediscover it.
+
+  Each visibility event still carries an `at` stamped where it was sampled, so a batch describes when
+  it was taken rather than when it arrived — dwell arithmetic downstream is unaffected.
+
 ## 0.3.0
 
 ### Minor Changes
