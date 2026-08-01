@@ -67,6 +67,39 @@ function warnOnRenderStorm(burst: Burst): void {
   )
 }
 
+/** A latest-callback box, as `useRef` hands one back. */
+interface Listener<A> {
+  current: ((value: A) => void) | undefined
+}
+
+/**
+ * Hand a value to a consumer's callback once the work that produced it has finished.
+ *
+ * Every notification this adapter forwards comes out of an engine publish, and a publish is not
+ * always post-commit: options are pushed into the engine *during* render, deliberately, so a
+ * prepend is positioned in the very commit that renders it. Called straight from there, a
+ * consumer's `setState` is a cross-component update from a render phase — React's "Cannot update a
+ * component while rendering a different component", reported against the library, with the stack
+ * trace pointing at the consumer's own callback. The same hop for the same reason as the re-render
+ * subscription below, which has always had one.
+ *
+ * The value is captured rather than re-read on arrival, which is what keeps the notification
+ * describing the publish that caused it: a burst inside one tick is delivered as the sequence that
+ * occurred, not as the last state repeated. Whether to notify at all stays at the emission too —
+ * the de-duplication refs and the engine's edge latch are both written synchronously — so only who
+ * is told, and when, moves.
+ *
+ * Nothing cancels a scheduled hand-off, and that is deliberate. StrictMode runs an effect's
+ * cleanup *before* the queued microtask, while the reported-value refs deliberately outlive the
+ * effect — so a `disposed` guard would drop the opening report, and the remount pass, finding it
+ * already reported, would queue nothing to replace it. Consumers would learn where the list
+ * started in production and not in development. What not guarding costs is one late call when a
+ * publish and an unmount land in the same tick, which React absorbs.
+ */
+function handToConsumer<A>(listener: Listener<A>, value: A): void {
+  queueMicrotask(() => listener.current?.(value))
+}
+
 export interface UseVirtualListOptions<T> {
   /** The loaded window, in display order. */
   items: readonly T[]
@@ -406,19 +439,14 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
   /**
    * Report an edge to the consumer, a microtask after the engine decided it was reached.
    *
-   * The hazard here is the sharpest of the three notifications, because the documented use of
-   * this callback *is* a state change: it says "where you load the next page", and a page load
-   * begins with a `setState`. The publish behind the first edge report happens while the engine
-   * is being handed its options, which is during render — so on a list that opens at the top,
-   * every consumer following the documentation saw React's "Cannot update a component while
-   * rendering a different component" on mount.
-   *
-   * Whether an edge was reached, and the latch that makes it fire once per crossing, both stay in
-   * the engine at emission time. Only the hand-off moves, so the suppression during a programmatic
-   * scroll still reads the scroll state as it was rather than as it is a microtask later.
+   * The sharpest of the three notifications {@link handToConsumer} covers, because the documented
+   * use of this one *is* a state change: it says "where you load the next page", and a page load
+   * begins with a `setState`. It also needs no interaction to reach — a list that opens at the top
+   * is already at its start edge, and the publish that notices sits in the very render that hands
+   * the engine its options.
    */
   const reportEdgeReached = useCallback((edge: 'start' | 'end') => {
-    queueMicrotask(() => latestEdgeListener.current?.(edge))
+    handToConsumer(latestEdgeListener, edge)
   }, [])
 
   // Push option changes into the engine during render rather than in an effect,
@@ -460,14 +488,14 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
    */
   const reportedRange = useRef<readonly [number, number]>(EMPTY_STATE.visibleRange)
   /**
-   * The consumer's callbacks, in boxes assigned during render.
+   * The consumer's callbacks, in boxes assigned during render — here and at the two above.
    *
    * Deliberately not moved into an effect, which is the conventional form of a latest-callback
-   * ref. React flushes passive effects *after* microtasks, and the hand-off below is a microtask —
-   * so a box written from an effect would hand back the previous commit's callback in exactly the
+   * ref. React flushes passive effects *after* microtasks, and a hand-off is a microtask — so a
+   * box written from an effect would give back the previous commit's callback in exactly the
    * publish-during-render case this file defers for. Assigned here it is the freshest callback
-   * that exists at the moment the notification is scheduled. `react-hooks/refs` is off for this
-   * directory for the same family of reasons; see `eslint.config.js`.
+   * that exists when the notification is scheduled. `react-hooks/refs` is off for this directory
+   * for the same family of reasons; see `eslint.config.js`.
    */
   const latestRangeListener = useRef(onVisibleRangeChange)
   latestRangeListener.current = onVisibleRangeChange
@@ -502,36 +530,22 @@ export function useVirtualList<T>(options: UseVirtualListOptions<T>): UseVirtual
    * store and allocating closures each time. The cost of that is small, but this file goes
    * out of its way to avoid exactly this shape elsewhere.
    *
-   * **What is reported is decided at the emission; who is told is a microtask later**, the same
-   * split the re-render subscription below makes and for the same reason. Options are pushed into
-   * the engine during render, so a publish routinely lands mid-render, and a consumer setting
-   * state from either callback would hit React's "Cannot update a component while rendering a
-   * different component" — reported as the library's bug, since nothing in the call site says the
-   * callback is not post-commit. Keeping the ref writes synchronous is what preserves the
-   * de-duplication: the comparison still happens against the emission order, and each hand-off
-   * carries the value that caused it rather than re-reading a ref that has moved on.
-   *
-   * Nothing cancels a scheduled hand-off when the subscription ends, and that is deliberate.
-   * StrictMode runs this effect's cleanup *before* the queued microtask, while the reported-value
-   * refs deliberately live outside the effect — so a `disposed` guard would drop the first report
-   * and the remount pass, finding it already reported, would queue nothing to replace it. The
-   * consumer would learn where the list started in production and not in development, which is the
-   * worst of both. What not guarding costs is one late call when a publish and an unmount land in
-   * the same tick, which React absorbs.
+   * **What is reported is decided here; who is told is a microtask later**, through
+   * {@link handToConsumer} — the same split the re-render subscription below makes, and for the
+   * same reason. The de-duplication is what has to stay on this side of it: compared at the
+   * emission, in publish order, against a ref nothing else can have moved.
    */
   useEffect(() => {
     if (!engine) return
 
     const notify = (state: VirtualState): void => {
       if (state.visibleRange !== reportedRange.current) {
-        const range = state.visibleRange
-        reportedRange.current = range
-        queueMicrotask(() => latestRangeListener.current?.(range))
+        reportedRange.current = state.visibleRange
+        handToConsumer(latestRangeListener, state.visibleRange)
       }
       if (state.atBottom !== reportedAtBottom.current) {
-        const atBottom = state.atBottom
-        reportedAtBottom.current = atBottom
-        queueMicrotask(() => latestAtBottomListener.current?.(atBottom))
+        reportedAtBottom.current = state.atBottom
+        handToConsumer(latestAtBottomListener, state.atBottom)
       }
     }
 
