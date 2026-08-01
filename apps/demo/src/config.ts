@@ -37,6 +37,27 @@ export interface DemoConfig {
   windowScroller: boolean
   /** Load the entire thread, so targets sit deep in a large window. */
   loadAll: boolean
+  /**
+   * Open with exactly this many comments from the top, and page no further. 0 for the usual
+   * window.
+   *
+   * The one state the demo could not otherwise reach: a list *short enough not to overflow*.
+   * Every other mode opens on 40 comments or the whole thread, so the scroller has had a
+   * scrollbar since before the first measurement — which makes the transition into having one
+   * unobservable, and that transition is what `stableScrollbarGutter` exists for.
+   *
+   * Paging is off in this mode rather than merely unlikely: a list with no scroll range is
+   * within reach of both its edges at once, so `onEdgeReached` would fire immediately and page
+   * the shortness away before anything could look at it.
+   */
+  loaded: number
+  /**
+   * Reserve the scrollbar's width in the scrollport. Default on, as the library's is.
+   *
+   * Here to be turned *off*, so the suite can show what the default prevents rather than only
+   * that it is applied.
+   */
+  stableGutter: boolean
   /** Report each comment at most once, rather than on every re-entry. */
   once: boolean
   /**
@@ -74,8 +95,20 @@ export const CONFIG: DemoConfig = {
   alignToBottom: params.get('alignToBottom') === '1',
   windowScroller: params.get('windowScroller') === '1',
   loadAll: params.get('loadAll') === '1',
+  loaded: Math.max(0, number('loaded', 0)),
+  stableGutter: params.get('stableGutter') !== '0',
   once: params.get('once') === '1',
   rule: params.get('rule') === 'edge' ? 'edge' : 'fraction',
   trace: params.get('trace') === '1',
   snapshot: params.get('snapshot') === '1',
 }
+
+/**
+ * Whether the loaded window is decided at load and never moves.
+ *
+ * Two modes want it for opposite reasons — `loadAll` because there is nothing left to page,
+ * `loaded` because paging would undo the state it exists to create — and the three places that
+ * page all have to agree, which they did not when only one of the two was spelled at each of
+ * them.
+ */
+export const FIXED_WINDOW = CONFIG.loadAll || CONFIG.loaded > 0

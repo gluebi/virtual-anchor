@@ -27,7 +27,7 @@ import {
   type Comment,
   type Window as ThreadWindow,
 } from './thread.js'
-import { CONFIG, SNAPSHOT_KEY } from './config.js'
+import { CONFIG, FIXED_WINDOW, SNAPSHOT_KEY } from './config.js'
 import './styles.css'
 
 /**
@@ -79,9 +79,13 @@ export function App(): ReactNode {
   const postedCount = useRef(0)
   const target = CONFIG.target
 
-  const [window_, setWindow] = useState<ThreadWindow>(() =>
-    CONFIG.loadAll ? { from: 0, to: THREAD_SIZE } : initialWindow(target),
-  )
+  const [window_, setWindow] = useState<ThreadWindow>(() => {
+    if (CONFIG.loadAll) return { from: 0, to: THREAD_SIZE }
+    // From the top rather than around the target: this mode is about a list with no scroll
+    // range, and a window that starts at comment 6000 has nowhere to sit but the top anyway.
+    if (CONFIG.loaded > 0) return { from: 0, to: Math.min(THREAD_SIZE, CONFIG.loaded) }
+    return initialWindow(target)
+  })
   const [loading, setLoading] = useState(false)
   const [events, setEvents] = useState<VisibilityEvent[]>([])
   const [seen, setSeen] = useState<Set<string>>(new Set())
@@ -110,6 +114,18 @@ export function App(): ReactNode {
   /** How many comments the insert buttons post, as text so it can be edited freely. */
   const [insertCount, setInsertCount] = useState('3')
   const [settleInfo, setSettleInfo] = useState<string>('')
+  /**
+   * Which comments are on screen, as plain React state set from `onVisibleRangeChange`.
+   *
+   * State rather than a ref, and that is the point of it being here at all. A "showing
+   * 4,192–4,211 of 12,000" readout is the first thing anyone builds on this callback, and until
+   * it existed the demo consumed none of the three notifications the way a consumer does:
+   * `onAtBottomChange` wrote a ref, `onEdgeReached` set state only after an awaited fetch, and
+   * `onVisibleRangeChange` was not passed at all. So the library's own reference consumer could
+   * not have hit the render-phase update those callbacks were fixed for — and did not, until it
+   * was reported from outside.
+   */
+  const [visibleRange, setVisibleRange] = useState<readonly [number, number] | null>(null)
 
   const listRef = useRef<VirtualListHandle>(null)
   const loadingRef = useRef(false)
@@ -206,8 +222,9 @@ export function App(): ReactNode {
       // Never fetch while a programmatic scroll is in flight: a load moves every offset
       // below it, so the target would outrun the animation and the scroll would never
       // settle. This is the protocol the library documents rather than a test hook.
-      // With the whole thread loaded there is nothing to page.
-      if (CONFIG.loadAll) return
+      // With the whole thread loaded there is nothing to page, and with a fixed short window
+      // paging is what would destroy the state under test.
+      if (FIXED_WINDOW) return
       if (loadingRef.current) return
       if (!force && listRef.current?.isScrolling() === true) return
       const atEdge = direction === 'up' ? window_.from === 0 : window_.to >= THREAD_SIZE
@@ -437,7 +454,7 @@ export function App(): ReactNode {
       const comment = thread[clamped]
       if (!comment) return
 
-      if (!CONFIG.loadAll) setWindow(initialWindow(clamped))
+      if (!FIXED_WINDOW) setWindow(initialWindow(clamped))
 
       for (let attempt = 0; attempt < 30; attempt++) {
         const result = await listRef.current?.scrollToKey(comment.id, { align })
@@ -631,6 +648,7 @@ export function App(): ReactNode {
             )
           }
           windowScroller={CONFIG.windowScroller}
+          stableScrollbarGutter={CONFIG.stableGutter}
           totalCount={thread.length}
           firstItemPosition={window_.from + 1}
           loading={loading}
@@ -648,6 +666,7 @@ export function App(): ReactNode {
             once: CONFIG.once,
           }}
           onVisibilityChange={onVisibilityChange}
+          onVisibleRangeChange={setVisibleRange}
           onEdgeReached={onEdgeReached}
           followOutput={CONFIG.follow}
           alignToBottom={CONFIG.alignToBottom}
@@ -690,6 +709,12 @@ export function App(): ReactNode {
         <aside className="panel" aria-label="Visibility events">
           <h2>Visibility events</h2>
           <p className="muted small">{settleInfo || 'waiting for the deep link to settle…'}</p>
+          <p className="muted small" data-testid="visible-range">
+            {visibleRange === null
+              ? 'nothing on screen yet'
+              : `showing ${String(window_.from + visibleRange[0])}–` +
+                `${String(window_.from + visibleRange[1])} of ${String(THREAD_SIZE)}`}
+          </p>
           <p className="muted small">{seen.size} marked read</p>
           <ol>
             {events.map((event, i) => (
