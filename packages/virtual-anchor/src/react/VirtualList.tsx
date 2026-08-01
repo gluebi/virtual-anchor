@@ -237,6 +237,10 @@ const WINDOW_HOST_STYLE: CSSProperties = {
  * explicit height. Putting them here collapses the scroller to zero height inside
  * a flex parent, and since inline styles beat a stylesheet the consumer cannot
  * override it.
+ *
+ * The one thing that did earn a place here is below, and it is the exception that
+ * shows what the rule is about: a reserved scrollbar gutter is not a look, it is
+ * what the list's own measurements are taken against.
  */
 const SCROLLER_STYLE: CSSProperties = {
   position: 'relative',
@@ -253,13 +257,13 @@ const SCROLLER_STYLE: CSSProperties = {
 /**
  * The scrollport, with the scrollbar's width reserved — the default.
  *
- * The one opinion this component does impose on layout, and it earns the exception because the
- * failure it prevents is internal: a scrollbar appearing part-way through the first measurements
- * changes the width every one of them was taken at, and the rows already scrolled past never get
- * re-measured. See {@link VirtualListProps.stableScrollbarGutter}.
+ * The single exception to the rule above, and it earns one because the failure it prevents is
+ * *internal*: the width every early measurement was taken at, not how the list looks. The
+ * mechanism is on {@link VirtualListProps.stableScrollbarGutter}, where a consumer deciding
+ * whether to opt out will look for it.
  *
- * It is thin as impositions go — the gutter is reserved only on a scrollport this component
- * created, it is the width the scrollbar was about to take anyway, and it is opt-out.
+ * Thin as impositions go — reserved only on a scrollport this component created, the width the
+ * scrollbar was about to take anyway, and one prop to turn off.
  */
 const SCROLLER_STYLE_STABLE_GUTTER: CSSProperties = {
   ...SCROLLER_STYLE,
