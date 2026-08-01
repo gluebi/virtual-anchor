@@ -231,8 +231,18 @@ Key options: `items`, `getItemKey`, `estimateSize`, `gap`, `buffer`,
 `scrollPaddingStart`/`End`, `scrollMargin`, `keepMounted`, `visibility`,
 `sizeSnapshot`, `windowScroller`, `onVisibleRangeChange`, `followOutput`,
 `alignToBottom`, `atBottomThreshold`, `onAtBottomChange`, `onEdgeReached`,
-`edgeReachedThreshold`, the four slots below, and on the component `scrollerRef` and
-`onEngineReady`.
+`edgeReachedThreshold`, the four slots below, and on the component `scrollerRef`,
+`onEngineReady` and `stableScrollbarGutter`.
+
+`VirtualList` sets `scrollbar-gutter: stable` on the scrollport it creates. Not cosmetic:
+a scrollbar appearing once the rows overflow narrows the scrollport, and a width change
+invalidates every height measured before it — so the list discards them, correctly, and
+the rows already scrolled past are never re-measured. They keep their estimate for good.
+The symptom is a scrollbar slightly the wrong length and a `scrollToKey` that overshoots
+on a cold list, which points nowhere near the cause. Opt out with
+`stableScrollbarGutter={false}`; an explicit `style={{ scrollbarGutter: … }}` wins either
+way. Under `windowScroller` nothing is written — the document's gutter is the host page's
+decision, not a list's.
 
 ### Content around the list
 

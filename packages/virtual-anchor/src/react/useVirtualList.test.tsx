@@ -1664,6 +1664,53 @@ describe('VirtualList measured slots', () => {
   })
 })
 
+describe('VirtualList scrollbar gutter', () => {
+  /** The element the component styles as the scrollport, in either mode. */
+  const scrollport = (container: HTMLElement): HTMLElement =>
+    container.firstElementChild as HTMLElement
+
+  const list = (props: Partial<Parameters<typeof VirtualList<Comment>>[0]> = {}) => (
+    <VirtualList
+      items={comments(200)}
+      getItemKey={(c) => c.id}
+      estimateSize={() => 100}
+      renderItem={(c) => <span>{c.text}</span>}
+      {...props}
+    />
+  )
+
+  it('reserves the scrollbar’s width by default', () => {
+    // Not cosmetic, and not the consumer's call to remember: a scrollbar appearing part-way
+    // through the first measurements changes the width all of them were taken at. The list
+    // correctly discards them — and the rows already scrolled past are never re-measured, so
+    // they keep their estimate for good.
+    const { container } = render(list())
+    expect(scrollport(container).style.scrollbarGutter).toBe('stable')
+  })
+
+  it('leaves it alone when the consumer opts out', () => {
+    const { container } = render(list({ stableScrollbarGutter: false }))
+    expect(scrollport(container).style.scrollbarGutter).toBe('')
+  })
+
+  it('lets an explicit style overrule it', () => {
+    // The prop is a default, not a policy: `style` is spread last for exactly this, so a
+    // consumer who wants `auto` back — or `both-edges`, which is a layout preference and so is
+    // not offered as a prop — reaches the same element without one.
+    const { container } = render(list({ style: { scrollbarGutter: 'auto' } }))
+    expect(scrollport(container).style.scrollbarGutter).toBe('auto')
+  })
+
+  it('never writes it when the page is the scroller', () => {
+    // Asked for explicitly, and still refused: in window-scrolled mode this element is not a
+    // scrollport at all, and whether the *document* reserves a gutter is the host page's
+    // decision rather than a list's.
+    const { container } = render(list({ windowScroller: true, stableScrollbarGutter: true }))
+    expect(scrollport(container).style.scrollbarGutter).toBe('')
+    expect(scrollport(container).style.overflowY).toBe('')
+  })
+})
+
 describe('VirtualList follow-output plumbing', () => {
   it('reports whether the view is at the end, and only when it changes', async () => {
     // The stubbed scrollport is 600px tall over 100,000px of content, so the list

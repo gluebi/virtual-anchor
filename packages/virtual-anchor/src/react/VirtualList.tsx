@@ -127,6 +127,30 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
   /** Move focus to the target once a `scrollToKey` settles. Default true. */
   focusOnScrollEnd?: boolean
   /**
+   * Reserve the scrollbar's width in the scrollport from the start. Default true.
+   *
+   * A scrollbar that appears once the rows overflow narrows the scrollport, and a width change
+   * invalidates every height measured before it — so the list discards them, correctly. The rows
+   * from before are outside the window by then and will never be re-measured: they keep their
+   * estimate for good, and every offset computed from them is out by the difference. The symptom
+   * is a scrollbar slightly the wrong length and a `scrollToKey` that overshoots on a cold list,
+   * neither of which points back at the cause.
+   *
+   * The default is `true` because that reasoning is not application-specific: it holds for any
+   * list that measures variable-height rows in a scroller it owns, which is what this component
+   * is. A setting every correct call site must pass, for a reason the caller cannot see, is the
+   * component's default rather than the caller's responsibility.
+   *
+   * **Ignored under `windowScroller`**, whatever it is set to. There the page is the scroller, and
+   * reserving a gutter on the document is the host page's decision — not a list's.
+   *
+   * Set it to `false` when the scroller is styled by the host page in a way this fights.
+   * `both-edges` is deliberately not offered: it is a layout preference, and `style` already
+   * reaches this element — an explicit `style={{ scrollbarGutter: … }}` wins over this prop
+   * either way.
+   */
+  stableScrollbarGutter?: boolean
+  /**
    * Raw scroll events from the scrollport.
    *
    * Exposed so a consumer can trigger bidirectional pagination near either edge.
@@ -224,6 +248,33 @@ const SCROLLER_STYLE: CSSProperties = {
   // A stray `scroll-behavior: smooth` inherited from the page would animate every
   // corrective write and fight the convergence loop.
   scrollBehavior: 'auto',
+}
+
+/**
+ * The scrollport, with the scrollbar's width reserved — the default.
+ *
+ * The one opinion this component does impose on layout, and it earns the exception because the
+ * failure it prevents is internal: a scrollbar appearing part-way through the first measurements
+ * changes the width every one of them was taken at, and the rows already scrolled past never get
+ * re-measured. See {@link VirtualListProps.stableScrollbarGutter}.
+ *
+ * It is thin as impositions go — the gutter is reserved only on a scrollport this component
+ * created, it is the width the scrollbar was about to take anyway, and it is opt-out.
+ */
+const SCROLLER_STYLE_STABLE_GUTTER: CSSProperties = {
+  ...SCROLLER_STYLE,
+  scrollbarGutter: 'stable',
+}
+
+/**
+ * What this component styles its host element as, which depends on whether it is the scroller.
+ *
+ * The gutter question does not arise in window-scrolled mode: there is no scrollport of ours to
+ * reserve it in, and the document's is the host page's business.
+ */
+function hostStyleFor(windowScroller: boolean, stableScrollbarGutter: boolean): CSSProperties {
+  if (windowScroller) return WINDOW_HOST_STYLE
+  return stableScrollbarGutter ? SCROLLER_STYLE_STABLE_GUTTER : SCROLLER_STYLE
 }
 
 /**
@@ -359,6 +410,7 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
     style,
     itemClassName,
     focusOnScrollEnd = true,
+    stableScrollbarGutter = true,
     onScroll,
     scrollerRef,
     onEngineReady,
@@ -562,7 +614,9 @@ export function VirtualList<T>(props: VirtualListProps<T>): ReactNode {
       // scrollport; see `setScrollport`.
       ref={setScrollport}
       className={className}
-      style={{ ...(windowScroller ? WINDOW_HOST_STYLE : SCROLLER_STYLE), ...style }}
+      // The consumer's `style` last, so an explicit `scrollbarGutter` — or anything else here —
+      // is theirs to overrule.
+      style={{ ...hostStyleFor(windowScroller, stableScrollbarGutter), ...style }}
       onScroll={onScroll}
       onFocus={(event) => {
         // `closest`, not the target's own dataset: only the row carries the key, so
