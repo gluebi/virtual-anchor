@@ -51,6 +51,23 @@ test.describe('demo smoke', () => {
     }
   })
 
+  test('reports which comments are on screen, as consumer state', async ({ page }) => {
+    // The demo reads `onVisibleRangeChange` into React state and renders it, which is what a
+    // consumer does with that callback and what nothing here used to do. Worth a test of its
+    // own rather than only a demo feature: the readout moving is the notification arriving,
+    // through a real render, in a browser.
+    await page.goto('/?comment=4211')
+    const readout = page.getByTestId('visible-range')
+    await expect(readout).toContainText(/showing \d+–\d+ of 12000/, { timeout: 15_000 })
+    const landed = await readout.textContent()
+
+    await page.locator('.scroller').evaluate((el) => {
+      el.scrollTop += 4000
+    })
+
+    await expect(readout).not.toHaveText(landed ?? '')
+  })
+
   test('emits per-item visibility events', async ({ page }) => {
     await page.goto('/')
     // The default rule needs 600ms of dwell at 50% coverage.
