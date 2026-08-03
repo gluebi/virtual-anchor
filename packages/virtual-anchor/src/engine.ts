@@ -690,7 +690,23 @@ export function createEngine(initial: EngineOptions): Engine {
     // A model change writes through a shut gate; a measurement waits. See the
     // `Restore` doc for why the two are not interchangeable — in short, a deferred
     // prepend teleports the reader and a deferred measurement does not.
-    if (restore !== 'model' && !writeGate.canWrite()) {
+    const deferred = restore !== 'model' && !writeGate.canWrite()
+
+    // The size of each correction, and whether it was taken. This is the number that
+    // says whether deferring one is invisible or a visible lurch: the design assumes
+    // sub-pixel, and a list whose estimate is fitted to a different viewport width
+    // produces hundreds of pixels per row.
+    if (TRACING) {
+      trace('scroll.write', () => ({
+        restore,
+        offset,
+        from: viewport.getScrollOffset(),
+        delta: offset - viewport.getScrollOffset(),
+        deferred,
+      }))
+    }
+
+    if (deferred) {
       writeDeferred = true
       return false
     }

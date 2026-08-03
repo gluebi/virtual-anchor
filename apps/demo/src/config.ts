@@ -70,6 +70,24 @@ export interface DemoConfig {
   trace: boolean
   /** Persist measured sizes to sessionStorage and restore them on the next load. */
   snapshot: boolean
+  /**
+   * Stop the demo re-rendering itself on every frame of a scroll.
+   *
+   * A measurement aid, not a feature. The panel's visible-range readout, its 60-row
+   * visibility log and its read-count all live in React state fed from the list's
+   * callbacks, so an ordinary fling re-renders the whole page on most frames. That is
+   * the demo being a demo — but it is indistinguishable, by feel, from the *library*
+   * stuttering, and until momentum survived at all on iOS there was never a fling long
+   * enough to notice it. Turning it off is how you tell the two apart.
+   */
+  quiet: boolean
+  /**
+   * Overlay the last few scroll corrections on the page.
+   *
+   * So a phone can be diagnosed without being tethered to a Mac for the Web Inspector.
+   * Implies {@link trace}, since it reads the same sink.
+   */
+  hud: boolean
 }
 
 export const SNAPSHOT_KEY = 'virtual-anchor-demo-sizes'
@@ -99,8 +117,10 @@ export const CONFIG: DemoConfig = {
   stableGutter: params.get('stableGutter') !== '0',
   once: params.get('once') === '1',
   rule: params.get('rule') === 'edge' ? 'edge' : 'fraction',
-  trace: params.get('trace') === '1',
+  trace: params.get('trace') === '1' || params.get('hud') === '1',
   snapshot: params.get('snapshot') === '1',
+  quiet: params.get('quiet') === '1',
+  hud: params.get('hud') === '1',
 }
 
 /**
