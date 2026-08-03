@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test'
+import { expect, test, type Page } from '@playwright/test'
 import { open } from './helpers.js'
 
 /**
@@ -22,7 +22,7 @@ import { open } from './helpers.js'
  */
 
 /** Count every `scrollTop` write on the scrollport, from page load onwards. */
-const countScrollWrites = async (page: import('@playwright/test').Page): Promise<void> => {
+const countScrollWrites = async (page: Page): Promise<void> => {
   await page.addInitScript(() => {
     const proto = Element.prototype as unknown as Record<string, unknown>
     const descriptor = Object.getOwnPropertyDescriptor(proto, 'scrollTop')
@@ -33,7 +33,7 @@ const countScrollWrites = async (page: import('@playwright/test').Page): Promise
       descriptor.set?.call(target, value)
     }
     const read = (target: Element): unknown => descriptor.get?.call(target)
-    ;(window as unknown as Record<string, unknown>).__scrollWrites = 0
+    window.__scrollWrites = 0
     Object.defineProperty(proto, 'scrollTop', {
       configurable: true,
       get(this: Element) {
@@ -41,8 +41,7 @@ const countScrollWrites = async (page: import('@playwright/test').Page): Promise
       },
       set(this: Element, value: number) {
         if ((this as HTMLElement).classList.contains('scroller')) {
-          const box = window as unknown as { __scrollWrites: number }
-          box.__scrollWrites++
+          window.__scrollWrites = (window.__scrollWrites ?? 0) + 1
         }
         original(this, value)
       },
@@ -50,8 +49,20 @@ const countScrollWrites = async (page: import('@playwright/test').Page): Promise
   })
 }
 
-const writes = (page: import('@playwright/test').Page): Promise<number> =>
-  page.evaluate(() => (window as unknown as { __scrollWrites: number }).__scrollWrites)
+const writes = (page: Page): Promise<number> =>
+  page.evaluate(() => window.__scrollWrites ?? 0)
+
+/**
+ * Put a finger down and leave it there.
+ *
+ * A DOM event rather than `page.touchscreen`, which also lifts the finger and so starts
+ * the grace period that correctly reopens the gate — a tap is not a fling. Holding
+ * `touching` needs no timer, so there is no race to lose.
+ */
+const holdFinger = (page: Page): Promise<void> =>
+  page.evaluate(() => {
+    document.querySelector('.scroller')?.dispatchEvent(new Event('touchstart', { bubbles: true }))
+  })
 
 test.describe('the momentum write gate on an emulated iPhone', () => {
   test.skip(
@@ -73,15 +84,7 @@ test.describe('the momentum write gate on an emulated iPhone', () => {
     await countScrollWrites(page)
     await open(page, 'comment=4211')
 
-    // A finger held down, dispatched as a DOM event rather than through
-    // `page.touchscreen`. Two reasons: `tap` also lifts the finger, which starts the
-    // 150ms grace and then correctly reopens the gate — a tap is not a fling — and
-    // holding `touching` needs no timer at all, so there is no race to lose.
-    await page.evaluate(() => {
-      document
-        .querySelector('.scroller')
-        ?.dispatchEvent(new Event('touchstart', { bubbles: true }))
-    })
+    await holdFinger(page)
 
     const baseline = await writes(page)
 
@@ -107,11 +110,7 @@ test.describe('the momentum write gate on an emulated iPhone', () => {
     await countScrollWrites(page)
     await open(page, 'comment=4211')
 
-    await page.evaluate(() => {
-      document
-        .querySelector('.scroller')
-        ?.dispatchEvent(new Event('touchstart', { bubbles: true }))
-    })
+    await holdFinger(page)
     const baseline = await writes(page)
 
     await page.evaluate(() => window.__list.insert('above', 20))

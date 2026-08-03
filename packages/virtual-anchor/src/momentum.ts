@@ -11,7 +11,7 @@ import type { Viewport } from './viewport.js'
  * first momentum scroll event; it deliberately does not try to bound the fling
  * itself, which is what {@link MOMENTUM_MAX_MS} and the settle signal are for.
  */
-export const IOS_TOUCH_GRACE_MS = 150
+const IOS_TOUCH_GRACE_MS = 150
 
 /**
  * Ceiling on an unterminated fling.
@@ -22,7 +22,7 @@ export const IOS_TOUCH_GRACE_MS = 150
  * the scroller's `HARD_DEADLINE_MS` of 5000, so a programmatic scroll issued
  * mid-fling still has frames left to converge in once the gate reopens.
  */
-export const MOMENTUM_MAX_MS = 3000
+const MOMENTUM_MAX_MS = 3000
 
 /**
  * Where a touch-driven scroll currently is.
@@ -122,35 +122,35 @@ export function createScrollWriteGate(options: ScrollWriteGateOptions): ScrollWr
   }
 
   const arm = (ms: number, onFire: () => void): void => {
-    clearPendingTimer()
     timer = setTimer(() => {
       timer = null
       onFire()
     }, ms)
   }
 
+  /**
+   * Move to a new state, cancelling whatever timer was going to move us instead.
+   *
+   * Every transition invalidates the pending timer — a second fling starting must not
+   * be reopened by the first one's cap, and a settle must not be undone by the grace
+   * expiry behind it — so clearing here rather than at each call site is what stops a
+   * new transition needing to remember.
+   */
   const enter = (next: GateState, reason: string): void => {
     if (state === next) return
-    const wasShut = state !== 'idle'
+    clearPendingTimer()
+    // The early return above is what makes this the shut → open *edge*: reaching
+    // `idle` means we were not already there. Firing on every transition would run
+    // the deferred work mid-gesture, which is the thing being deferred.
+    const reopened = next === 'idle'
     state = next
     if (TRACING) trace('scroll.gate', () => ({ state: next, reason }))
-    // Only on the shut → open edge. Firing on every transition would run the
-    // deferred work again mid-gesture, which is the thing being deferred.
-    if (next === 'idle' && wasShut) {
+    if (reopened) {
       for (const listener of [...openListeners]) listener()
     }
   }
 
-  /** Reopen, whatever the reason, cancelling whatever timer was going to do it. */
-  const open = (reason: string): void => {
-    clearPendingTimer()
-    enter('idle', reason)
-  }
-
   const onTouchStart = (): void => {
-    // A second fling before the first settled. Both timers have to go, or the
-    // earlier one reopens the gate with a finger still on the glass.
-    clearPendingTimer()
     enter('touching', 'touchstart')
   }
 
@@ -161,7 +161,7 @@ export function createScrollWriteGate(options: ScrollWriteGateOptions): ScrollWr
     // thing that can reopen the gate. Without it a stationary press shuts the
     // list's corrections down permanently.
     arm(IOS_TOUCH_GRACE_MS, () => {
-      open('grace-expired')
+      enter('idle', 'grace-expired')
     })
   }
 
@@ -171,13 +171,16 @@ export function createScrollWriteGate(options: ScrollWriteGateOptions): ScrollWr
     if (state !== 'grace') return
     enter('momentum', 'momentum-onset')
     arm(MOMENTUM_MAX_MS, () => {
-      open('cap')
+      enter('idle', 'cap')
     })
   }
 
   const onSettled = (): void => {
-    if (state === 'idle' || state === 'touching') return
-    open('settled')
+    // A settle with a finger still down is the end of a scroll the reader is about to
+    // continue, not the end of the gesture. Already-idle needs no guard: `enter`
+    // returns early on it, so no listener is notified.
+    if (state === 'touching') return
+    enter('idle', 'settled')
   }
 
   return {

@@ -1,7 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { pretendIPhone, touch, unpretendIPhone } from './iosPlatform.test.helpers.js'
 import { createEngine, layoutSignatureFor, type Engine } from './engine.js'
 import type { Surface } from './surface.js'
-import type { ItemKey, SlotName } from './types.js'
+import type { ItemKey } from './types.js'
 import type { Viewport } from './viewport.js'
 
 /**
@@ -21,28 +22,7 @@ import type { Viewport } from './viewport.js'
 const KEYS = (count: number, prefix = 'c'): ItemKey[] =>
   Array.from({ length: count }, (_, i) => `${prefix}${String(i)}`)
 
-const IPHONE_UA =
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
 
-const patched: string[] = []
-const pretendIPhone = (): void => {
-  const values: Record<string, unknown> = {
-    userAgent: IPHONE_UA,
-    platform: 'iPhone',
-    maxTouchPoints: 5,
-  }
-  for (const [name, value] of Object.entries(values)) {
-    Object.defineProperty(navigator, name, { configurable: true, get: () => value })
-    patched.push(name)
-  }
-  Object.defineProperty(window, 'ontouchend', { configurable: true, value: null })
-}
-
-const unpretendIPhone = (): void => {
-  for (const name of patched) Reflect.deleteProperty(navigator, name)
-  patched.length = 0
-  Reflect.deleteProperty(window, 'ontouchend')
-}
 
 /** A fake ResizeObserver whose deliveries the test drives. */
 class FakeResizeObserver implements ResizeObserver {
@@ -97,17 +77,14 @@ class FakeIntersectionObserver implements IntersectionObserver {
 interface Harness {
   engine: Engine
   scroller: HTMLElement
-  writes: string[]
   /** Just the scroll writes, which is what this file is about. */
   scrollWrites: () => number[]
   offset: () => number
-  setOffset: (value: number) => void
   scroll: (value: number) => void
   scrollSettled: () => void
   resize: (size: number) => void
   measure: (key: ItemKey, size: number) => void
-  measureSlot: (slot: SlotName, size: number) => void
-  mountItem: (key: ItemKey, height: number) => HTMLElement
+  mountItem: (key: ItemKey, height: number) => void
   contentWidth: (value: number) => void
 }
 
@@ -132,7 +109,6 @@ const setup = (
   const state = { offset: 0, viewportSize: 800, contentWidth: 600, contentSize: 0, leadingSpace: 0 }
   const writes: string[] = []
   const elements = new Map<ItemKey, HTMLElement>()
-  const slotElements = new Map<SlotName, HTMLElement>()
   const scrollListeners: (() => void)[] = []
   const scrollEndListeners: (() => void)[] = []
   const sizeListeners: ((size: number) => void)[] = []
@@ -212,13 +188,9 @@ const setup = (
   return {
     engine,
     scroller,
-    writes,
     scrollWrites: () =>
       writes.filter((w) => w.startsWith('scroll:')).map((w) => Number(w.slice('scroll:'.length))),
     offset: () => state.offset,
-    setOffset: (value) => {
-      state.offset = value
-    },
     scroll: (value) => {
       state.offset = value
       for (const listener of [...scrollListeners]) listener()
@@ -234,36 +206,18 @@ const setup = (
       const element = elements.get(key)
       if (element) FakeResizeObserver.deliverTo(element, size)
     },
-    measureSlot: (slot, size) => {
-      const element = slotElements.get(slot)
-      if (element) FakeResizeObserver.deliverTo(element, size)
-    },
     mountItem: (key, height) => {
       const element = document.createElement('div')
       vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 600, height))
       document.body.appendChild(element)
       engine.observeItem(element, key)
-      return element
     },
     contentWidth: (value) => {
       state.contentWidth = value
     },
   }
-
-  function mountSlot(slot: SlotName, height: number): void {
-    const element = document.createElement('div')
-    vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 600, height))
-    document.body.appendChild(element)
-    slotElements.set(slot, element)
-    engine.observeSlot(element, slot)
-  }
-  // Referenced so the helper is not dead code when a test wants a slot.
-  void mountSlot
 }
 
-const touch = (element: HTMLElement, type: 'touchstart' | 'touchend' | 'touchcancel'): void => {
-  element.dispatchEvent(new Event(type))
-}
 
 /**
  * Put the list into live momentum: finger down, finger up, one frame of fling.

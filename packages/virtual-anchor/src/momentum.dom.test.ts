@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { pretendIPhone, touch, unpretendIPhone } from './iosPlatform.test.helpers.js'
 import { createScrollWriteGate, type ScrollWriteGate } from './momentum.js'
 import type { Viewport } from './viewport.js'
 
@@ -21,22 +22,6 @@ interface Harness {
   pendingTimers: () => number
 }
 
-const IPHONE_UA =
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
-
-const patched: string[] = []
-const pretendIPhone = (): void => {
-  const values: Record<string, unknown> = {
-    userAgent: IPHONE_UA,
-    platform: 'iPhone',
-    maxTouchPoints: 5,
-  }
-  for (const [name, value] of Object.entries(values)) {
-    Object.defineProperty(navigator, name, { configurable: true, get: () => value })
-    patched.push(name)
-  }
-  Object.defineProperty(window, 'ontouchend', { configurable: true, value: null })
-}
 
 beforeEach(() => {
   document.body.replaceChildren()
@@ -45,12 +30,10 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
-  for (const name of patched) Reflect.deleteProperty(navigator, name)
-  patched.length = 0
-  Reflect.deleteProperty(window, 'ontouchend')
+  unpretendIPhone()
 })
 
-const harness = (options: { isIOS?: boolean } = {}): Harness => {
+const harness = (options: { isIOS?: boolean, detached?: boolean } = {}): Harness => {
   const element = document.createElement('div')
   document.body.appendChild(element)
 
@@ -60,12 +43,12 @@ const harness = (options: { isIOS?: boolean } = {}): Harness => {
   const timers = new Map<number, { dueAt: number, callback: () => void }>()
   const listeners = new Map<string, Set<() => void>>()
 
-  const viewport = {
+  const viewport: Viewport = {
     getScrollOffset: () => 0,
     getViewportSize: () => 600,
     getMaxScrollOffset: () => 10_000,
     setScrollOffset: () => {},
-    addEventListener: (type: string, listener: () => void) => {
+    addEventListener: (type, listener) => {
       let set = listeners.get(type)
       if (!set) {
         set = new Set()
@@ -78,11 +61,11 @@ const harness = (options: { isIOS?: boolean } = {}): Harness => {
     },
     observeSize: () => () => {},
     getGateTarget: () => element,
-    getElement: () => element,
+    getElement: () => (options.detached === true ? null : element),
     getScrollportElement: () => element,
     getWindow: () => window,
     getDevicePixelRatio: () => 2,
-  } as unknown as Viewport
+  }
 
   const gate = createScrollWriteGate({
     viewport,
@@ -133,9 +116,6 @@ const harness = (options: { isIOS?: boolean } = {}): Harness => {
   }
 }
 
-const touch = (element: HTMLElement, type: 'touchstart' | 'touchend' | 'touchcancel'): void => {
-  element.dispatchEvent(new Event(type))
-}
 
 describe('the scroll write gate', () => {
   it('is open before anything has happened', () => {
@@ -265,6 +245,19 @@ describe('the scroll write gate', () => {
     expect(h.gate.canWrite()).toBe(true)
   })
 
+  it('ignores a settle while the finger is still down', () => {
+    // The platform reports the scrolling over between two drags of one gesture. That
+    // is the end of a scroll the reader is about to continue, not the end of the
+    // gesture — reopening here would write under a finger still on the glass.
+    const h = harness()
+    touch(h.element, 'touchstart')
+
+    h.settle()
+
+    expect(h.gate.canWrite()).toBe(false)
+    expect(h.opens()).toBe(0)
+  })
+
   it('ignores a touchend with no touchstart before it', () => {
     const h = harness()
     touch(h.element, 'touchend')
@@ -325,6 +318,20 @@ describe('the scroll write gate', () => {
     expect(h.gate.canWrite()).toBe(true)
     expect(h.pendingTimers()).toBe(0)
     expect(add).not.toHaveBeenCalled()
+  })
+
+  it('still watches scroll and settle when the viewport has no element', () => {
+    // A window viewport resolves `getElement()` lazily and can answer null on a
+    // document with no browsing context. The touch listeners have nowhere to go, but
+    // the scroll and settle subscriptions go through the viewport and must still bind —
+    // otherwise the gate could shut and never reopen.
+    const h = harness({ detached: true })
+
+    h.scroll()
+    expect(h.gate.canWrite()).toBe(true)
+
+    h.settle()
+    expect(h.gate.canWrite()).toBe(true)
   })
 
   it('reports whether it is active, so callers can scope their own iOS guards', () => {

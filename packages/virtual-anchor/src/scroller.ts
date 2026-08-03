@@ -100,13 +100,6 @@ export interface ScrollerOptions {
   requestFrame?: (callback: () => void) => number
   cancelFrame?: (handle: number) => void
   /**
-   * Timer seam, forwarded to a gate this scroller builds for itself.
-   *
-   * Ignored when {@link writeGate} is supplied — the owner of the gate configures it.
-   */
-  setTimer?: (callback: () => void, ms: number) => unknown
-  clearTimer?: (handle: unknown) => void
-  /**
    * The momentum-aware write gate, shared with whoever else writes scroll offsets.
    *
    * Optional so a standalone `createScroller` still guards itself; the engine passes
@@ -280,13 +273,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
   // corrections are banked until the gesture is demonstrably over. The decision of
   // *when* that is lives in the gate, which the engine shares so its own writes
   // cannot bypass it.
-  const gate =
-    options.writeGate ??
-    createScrollWriteGate({
-      viewport,
-      ...(options.setTimer === undefined ? {} : { setTimer: options.setTimer }),
-      ...(options.clearTimer === undefined ? {} : { clearTimer: options.clearTimer }),
-    })
+  const gate = options.writeGate ?? createScrollWriteGate({ viewport })
   /** Whether this scroller built the gate and must therefore dispose of it. */
   const ownsGate = options.writeGate === undefined
   let deferredCorrection = 0
@@ -332,12 +319,24 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // binding either — so that by the time the engine asks `canWrite()` the gate has
     // already seen the same event and transitioned.
     gate.attach()
+    // Two things wait on the gate reopening.
+    //
     // The banked correction needs somewhere to go once the fling is over. It used to
     // ride on the next scroll event, which worked only because the guard reopened
     // *during* momentum while events were still arriving. Now that it stays shut
     // until settle, the reopening is the last thing that happens — so the flush has
     // to hang off that rather than off an event that will never come.
-    cleanups.push(gate.onOpen(flushDeferredCorrection))
+    //
+    // And the convergence loop parks itself rather than spinning through a fling, so
+    // this is what wakes it. Guarded on `pending` because the scroll it was running for
+    // may have been replaced or cancelled while it slept, and on `frame` because a
+    // `notifyModelChanged` may already have restarted it.
+    cleanups.push(
+      gate.onOpen(() => {
+        flushDeferredCorrection()
+        schedule()
+      }),
+    )
 
     // `scrollend` is corroboration, not the primary mechanism: the rAF loop is what
     // establishes that the *target* has stopped moving, which no scroll event can tell
@@ -551,18 +550,28 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // `lastTickAt` rather than `lastStepAt`, which belongs to the smooth integrator
     // and is only touched on frames that actually advance. Measuring the suspension
     // against that would bill the first blocked frame for every open frame before it.
+    //
+    // Gated on the *gesture*, not on `canWriteScroll()`, which also refuses during
+    // rubber-band overscroll. Two reasons: a bounce is ~300ms and well inside every
+    // deadline, so it needs no suspension; and the positional half of that predicate
+    // reads `scrollTop` and `scrollHeight`, which has no business running at the top of
+    // every frame of every ordinary scroll.
     const tick = now()
     const sinceTick = Math.max(tick - current.lastTickAt, 0)
     current.lastTickAt = tick
-    if (!canWriteScroll()) {
+    if (!gate.canWrite()) {
       current.startedAt += sinceTick
       current.lastModelChangeAt += sinceTick
       current.lastStepAt += sinceTick
-      frame = requestFrame(step)
+      // Sleep rather than spin. The gate stays shut for the length of a fling, so
+      // re-requesting here would schedule a main-thread wakeup every frame for up to
+      // `MOMENTUM_MAX_MS` — hundreds of them, all guaranteed to do nothing — during the
+      // one moment on iOS where contention is most visible. `attach` subscribes the
+      // resume to `gate.onOpen`, which is the event that ends the wait.
       return
     }
 
-    const elapsed = now() - current.startedAt
+    const elapsed = tick - current.startedAt
     if (elapsed > HARD_DEADLINE_MS) {
       finish(false, 'deadline')
       return
@@ -593,8 +602,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // Either the model has been still for long enough, or the platform has told us the
     // scrolling itself is over. The second is strictly better information when it
     // arrives, and it usually arrives sooner.
-    const quiet =
-      settledExternally || now() - current.lastModelChangeAt > MODEL_QUIET_MS
+    const quiet = settledExternally || tick - current.lastModelChangeAt > MODEL_QUIET_MS
 
     if (isTracing()) {
       traceStep({
@@ -641,7 +649,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
           // takes the same wall clock at any frame rate.
           const from = viewport.getScrollOffset()
           const elapsedSinceStep = Math.min(
-            Math.max(now() - current.lastStepAt, 0),
+            Math.max(tick - current.lastStepAt, 0),
             MAX_STEP_MS,
           )
           const k = 1 - Math.exp(-elapsedSinceStep / SMOOTH_TAU_MS)
@@ -652,7 +660,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
           // the platform will accept the offset simply stops changing — the next
           // frame computes the same advance and the animation stalls short of its
           // target forever. See SMOOTH_MIN_STEP.
-          current.lastStepAt = now()
+          current.lastStepAt = tick
           write(Math.abs(advance) <= SMOOTH_MIN_STEP ? target : from + advance)
         } else {
           write(target)
@@ -818,11 +826,3 @@ export function createScroller(options: ScrollerOptions): Scroller {
   }
 }
 
-/**
- * Settle detection, re-exported from where it now lives.
- *
- * Moved to `settle.js` so the momentum gate can use it without importing this
- * module, which imports the gate. Re-exported rather than relocated in the public
- * API, because `virtual-anchor` has always exported it from here.
- */
-export { onScrollSettled } from './settle.js'

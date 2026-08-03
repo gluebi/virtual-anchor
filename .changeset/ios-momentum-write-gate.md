@@ -36,10 +36,20 @@ Two further fixes fall out of it:
 
 A prepend still writes through a shut gate, deliberately: deferring a *model* change would
 move the reader by the whole inserted height, which is the one thing an anchored list
-promises cannot happen. Only *measurement* corrections are postponed, and they are
-re-applied in a single publish when the gate reopens. `publish`'s parameter changes from a
-boolean to `'none' | 'measure' | 'model'` to carry that distinction by cause rather than by
-a size threshold, which this file has never had.
+promises cannot happen. Only *measurement* corrections are postponed. `publish`'s parameter
+changes from a boolean to `'none' | 'measure' | 'model'` to carry that distinction by cause
+rather than by a size threshold, which this file has never had.
+
+Two honest caveats on that. A postponed correction is re-derived from the anchor when the
+gate reopens — but the scroll listener re-derives the anchor from the actual offset on every
+momentum event, so after a real fling the replay normally finds nothing left to do and the
+correction is *dropped* rather than applied. That is the right answer for a wobble the
+reader has already scrolled past, and it genuinely replays only where no scroll intervened
+(a tap, or the hard cap). And the `'measure'`/`'model'` split is a proxy for "did content
+above the anchor move", which it does not capture exactly: a measured `header` or
+`stickyHeader` slot moves the list's origin, so it is a model change wearing a measurement
+label. Both are noted in the source; neither is a regression against 0.4.0, where the write
+was simply unconditional.
 
 Nothing changes off iOS: the gate binds no listeners, arms no timers, and `canWrite()` is a
 constant `true` on Chromium, Firefox and desktop WebKit.

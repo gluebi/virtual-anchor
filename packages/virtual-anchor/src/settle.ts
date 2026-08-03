@@ -14,10 +14,11 @@ const SCROLL_END_FALLBACK_MS = 150
  * entirely. The README points those consumers at the optional `scrollyfills`
  * peer dependency.
  *
- * Lives in its own module rather than in `scroller.ts`, where it was, because
- * the momentum gate needs it too and `scroller.ts` imports the gate — a cycle
- * that ESM would tolerate and every reader would have to re-derive. Still
- * re-exported from `scroller.js` so the public entry point is unchanged.
+ * Lives in its own module rather than in `scroller.ts`, where it was, because the
+ * momentum gate needs it too and `scroller.ts` imports the gate — a cycle that ESM
+ * would tolerate and every reader would have to re-derive. The package exposes only
+ * `.` and `./react`, so moving it changes nothing a consumer can observe: `index.ts`
+ * re-points at this module and the public surface is byte-identical.
  */
 export function onScrollSettled(viewport: Viewport, callback: () => void): () => void {
   if (supportsScrollEnd()) {

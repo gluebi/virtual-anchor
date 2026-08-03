@@ -175,6 +175,29 @@ const DEFAULT_EDGE_THRESHOLD = 600
 const REPIN_QUIET_MS = 150
 
 /**
+ * Whether a publish may move the scroll offset, and on whose authority.
+ *
+ * The distinction exists because iOS refuses scroll writes during a fling and the two
+ * reasons for restoring are not equally postponable.
+ *
+ * - `'measure'` — the offsets moved because something got measured. Deferring it to
+ *   the end of the fling costs a drift the reader is already scrolling past.
+ * - `'model'` — the offsets moved because the collection or the caller's declaration
+ *   moved. A prepend of forty comments shifts everything below it, and skipping *that*
+ *   teleports the reader. It writes regardless of the gate, and killing the fling is
+ *   the lesser harm.
+ *
+ * By cause, not by magnitude: a size threshold here would be the first compensation
+ * heuristic in a file whose whole design is not having one.
+ *
+ * The honest caveat, since it is not obvious from the names: what the two buckets are
+ * really proxying is *whether content above the anchor moved*, and the proxy is not
+ * exact. A measured `header` or `stickyHeader` slot moves the list's origin, so it is a
+ * `'model'` change wearing a `'measure'` label — see `onSlotGeometryChange`.
+ */
+type Restore = 'none' | 'measure' | 'model'
+
+/**
  * A shared empty inset set.
  *
  * Shared so that "the consumer passed no geometry" is a stable reference, which
@@ -520,25 +543,6 @@ export function createEngine(initial: EngineOptions): Engine {
     edgeLatched.end = nearEnd
   }
 
-  /**
-   * Whether a publish may move the scroll offset, and on whose authority.
-   *
-   * The distinction exists because iOS refuses scroll writes during a fling and the
-   * two reasons for restoring are not equally postponable.
-   *
-   * - `'measure'` — the offsets moved because something got measured. The correction
-   *   is a wobble; deferring it to the end of the fling costs a sub-pixel drift
-   *   nobody can see against a view moving hundreds of pixels a frame.
-   * - `'model'` — the offsets moved because the collection or the caller's
-   *   declaration moved. A prepend of forty comments shifts everything below it, and
-   *   skipping *that* teleports the reader. It writes regardless of the gate, and
-   *   killing the fling is the lesser harm.
-   *
-   * By cause, not by magnitude: a size threshold here would be the first compensation
-   * heuristic in a file whose whole design is not having one.
-   */
-  type Restore = 'none' | 'measure' | 'model'
-
   /** Last applied carry, so an unchanged value is not re-written to the DOM. */
   let carry = 0
   const applyCarry = (next: number): void => {
@@ -638,6 +642,69 @@ export function createEngine(initial: EngineOptions): Engine {
   }
 
   /**
+   * The momentum gate this module and the scroller both consult.
+   *
+   * Built here rather than left to the scroller because this module writes scroll
+   * offsets too, and for a long time did so without consulting the guard at all. On
+   * iOS that cancelled the fling on the first measurement to land after the finger
+   * lifted, which is every fling in a list whose rows are not pre-measured.
+   */
+  const writeGate = createScrollWriteGate({ viewport })
+
+  /**
+   * Whether a publish skipped a scroll write because the gate was shut.
+   *
+   * A flag rather than a banked offset: the restore is a pure function of the anchor,
+   * the size cache and the geometry, so recomputing it when the gate reopens beats
+   * replaying a number that was only correct for one frame of a moving fling.
+   *
+   * Note what that means in practice for a real fling: the scroll listener re-derives
+   * `anchor` from the actual offset on every momentum event, so by the time the gate
+   * reopens the anchor already describes the uncorrected position and the replay finds
+   * nothing over the threshold. The correction is *dropped*, which is the right answer
+   * for a sub-pixel wobble the reader has already scrolled past. It genuinely replays
+   * only where no scroll intervened — a tap, or the hard cap.
+   */
+  let writeDeferred = false
+
+  /**
+   * The engine's only door to `viewport.setScrollOffset`.
+   *
+   * A funnel rather than a check at each site, because the invariant that matters is
+   * not "ask the gate" but "**no bookkeeping unless the write happened**". Marking a
+   * self-write that never occurred puts a phantom entry in the scroller's intent queue,
+   * and `isSelfWrite`'s 1.5px tolerance then swallows a genuine user scroll that lands
+   * near it; a `restoreIntent` pushed for the same non-write is consumed by the next
+   * momentum scroll event, which then skips `deriveAnchor` for a scroll that really was
+   * the reader's. Returning a boolean makes both hazards structural — a caller that
+   * does its bookkeeping outside the `if` cannot compile into something plausible.
+   *
+   * @returns whether the platform took the write.
+   */
+  const writeScroll = (offset: number, restore: Restore): boolean => {
+    // Nothing to do. Kept here so the callers do not each re-derive the threshold;
+    // it exists to absorb the disagreement between an integer `clientHeight` and the
+    // exact float offset it is compared against.
+    if (Math.abs(offset - viewport.getScrollOffset()) <= 0.01) return false
+
+    // A model change writes through a shut gate; a measurement waits. See the
+    // `Restore` doc for why the two are not interchangeable — in short, a deferred
+    // prepend teleports the reader and a deferred measurement does not.
+    if (restore !== 'model' && !writeGate.canWrite()) {
+      writeDeferred = true
+      return false
+    }
+
+    // Declare it first: the scroll event this produces must not be mistaken for the
+    // user grabbing the scrollbar, which would cancel any in-flight programmatic
+    // scroll and flip the tracked scroll direction.
+    scroller.markSelfWrite(offset)
+    // eslint-disable-next-line no-restricted-syntax -- the engine's single gated write
+    viewport.setScrollOffset(offset)
+    return true
+  }
+
+  /**
    * Recompute everything from the anchor and publish a new snapshot.
    *
    * `restore` is the crux: when the layout changed underneath — a prepend, an
@@ -699,83 +766,47 @@ export function createEngine(initial: EngineOptions): Engine {
     // the typing indicator in the footer on screen, which is the opposite of what
     // `scrollToKey(last, { align: 'end' })` wants.
     if (following && !scroller.isScrolling()) {
-      if (Math.abs(maxOffset - viewport.getScrollOffset()) > 0.01) {
-        // Refused mid-fling, and nothing is banked. A move's destination is the
-        // bottom *as it is when the move happens*, so a remembered `maxOffset` is
-        // already wrong by the time it could be replayed. Nor does this need the
-        // deferred re-publish: `repin` runs off the same settle event that reopens
-        // the gate, and re-pinning is what re-issues the write.
-        //
-        // The branch matters despite `following` being cleared on the scroll event
-        // below — the two windows it survives are the first frames of a fling
-        // launched from the bottom, which is momentum onset and the worst possible
-        // moment to cancel, and the re-pin that fires in the gaps of a decaying one.
-        if (!writeGate.canWrite()) {
-          writeDeferred = true
-        } else {
-          // `markSelfWrite` but deliberately *not* `restoreIntents`, and the two
-          // queues mean different things. The scroller's says "this offset is mine,
-          // do not read it as the user grabbing the scrollbar". The engine's says
-          // "do not re-derive the anchor from this", which is right for a
-          // correction whose read-back may be pixel-snapped and wrong for a move.
-          //
-          // Following is a move. Suppressing the re-derivation leaves the anchor
-          // describing wherever the reader was before they were pinned, so the
-          // moment following stops — the option flipping off, the reader scrolling
-          // back — the next publish restores that stale position and the view jumps
-          // backwards. Caught by exactly that test.
-          //
-          // All of it inside the taken branch. Marking a self-write that never
-          // happened puts a phantom entry in the scroller's intent queue, and
-          // `isSelfWrite`'s 1.5px tolerance then swallows a genuine user scroll that
-          // lands near it. The `deriveAnchor` resync is worse still: without the
-          // write it leaves the anchor claiming a position the view is not at.
-          scroller.markSelfWrite(maxOffset)
-          // eslint-disable-next-line no-restricted-syntax -- gated by writeGate above
-          viewport.setScrollOffset(maxOffset)
-          applyCarry(0)
-          // Synchronously, rather than waiting for the scroll event: a publish later
-          // in the same tick would otherwise resolve the old anchor and fight this
-          // write. The event still arrives and derives the same value again.
-          anchor = deriveAnchor(viewport.getScrollOffset(), cache, geometry())
-        }
+      // The branch matters despite `following` being cleared on the scroll event
+      // below — the two windows it survives are the first frames of a fling launched
+      // from the bottom, which is momentum onset and the worst possible moment to
+      // cancel one, and the re-pin that fires in the gaps of a decaying fling.
+      //
+      // `markSelfWrite` but deliberately *not* `restoreIntents`, and the two queues
+      // mean different things. The scroller's says "this offset is mine, do not read
+      // it as the user grabbing the scrollbar". The engine's says "do not re-derive
+      // the anchor from this", which is right for a correction whose read-back may be
+      // pixel-snapped and wrong for a move.
+      //
+      // Following is a move. Suppressing the re-derivation leaves the anchor
+      // describing wherever the reader was before they were pinned, so the moment
+      // following stops — the option flipping off, the reader scrolling back — the
+      // next publish restores that stale position and the view jumps backwards.
+      if (writeScroll(maxOffset, restore)) {
+        applyCarry(0)
+        // Synchronously, rather than waiting for the scroll event: a publish later in
+        // the same tick would otherwise resolve the old anchor and fight this write.
+        // The event still arrives and derives the same value again.
+        anchor = deriveAnchor(viewport.getScrollOffset(), cache, geometry())
       }
     } else if (restoreScroll && anchor && !scroller.isScrolling()) {
       const restored = resolveAnchorOffset(anchor, cache, geometry())
       // A null restore means the anchored key left the window. For a grows-only
       // window that cannot happen; if it does, holding position beats jumping.
-      if (restored !== null && Math.abs(restored - viewport.getScrollOffset()) > 0.01) {
-        // A model change writes through a shut gate; a measurement waits. See the
-        // `Restore` doc for why the two are not interchangeable — in short, a
-        // deferred prepend teleports the reader and a deferred measurement does not.
-        if (restore === 'measure' && !writeGate.canWrite()) {
-          writeDeferred = true
-        } else {
-          // Declare it first: the scroll event this produces must not be mistaken
-          // for the user grabbing the scrollbar, which would cancel any in-flight
-          // programmatic scroll and flip the tracked scroll direction.
-          //
-          // Inside the branch, like the follow pin above and for a sharper version
-          // of the same reason: a `restoreIntent` pushed for a write that did not
-          // happen is consumed by the next *momentum* scroll event, which then skips
-          // `deriveAnchor` for a scroll that really was the reader's — leaving the
-          // anchor stale for the rest of the fling.
-          scroller.markSelfWrite(restored)
-          restoreIntents.push(restored)
-          if (restoreIntents.length > MAX_RESTORE_INTENTS) restoreIntents.shift()
-          // Gated by writeGate above, except for 'model' restores, which are
-          // deliberately unconditional.
-          // eslint-disable-next-line no-restricted-syntax -- see above
-          viewport.setScrollOffset(restored)
+      if (restored !== null && writeScroll(restored, restore)) {
+        // Not `markSelfWrite`'s queue but the engine's own: do not re-derive the
+        // anchor from this write's read-back, which may have been snapped to a whole
+        // pixel. Absorbing that into `offsetWithinItem` re-introduces the residual
+        // the carry just removed.
+        restoreIntents.push(restored)
+        if (restoreIntents.length > MAX_RESTORE_INTENTS) restoreIntents.shift()
 
-          // Recover the fraction the platform refused to take — the same treatment
-          // every scroller write gets. This path had been writing raw, which meant the
-          // *most frequent* correction (a measurement landing, a prepend) was the one
-          // place the carry did not apply. It went unnoticed only because a first-frame
-          // `clearAll()` used to force a fresh scroller write straight afterwards; with
-          // that gone, a cold-start deep link lands exactly 0.5px short without this.
-          applyCarry(carryFor(restored, viewport.getScrollOffset()))
-        }
+        // Recover the fraction the platform refused to take — the same treatment
+        // every scroller write gets. This path had been writing raw, which meant the
+        // *most frequent* correction (a measurement landing, a prepend) was the one
+        // place the carry did not apply. It went unnoticed only because a first-frame
+        // `clearAll()` used to force a fresh scroller write straight afterwards; with
+        // that gone, a cold-start deep link lands exactly 0.5px short without this.
+        applyCarry(carryFor(restored, viewport.getScrollOffset()))
       }
     }
 
@@ -1007,25 +1038,6 @@ export function createEngine(initial: EngineOptions): Engine {
     // a height-only resize deliberately changes nothing.
     if (invalidated) scroller.notifyModelChanged()
   }
-
-  /**
-   * The shared momentum gate.
-   *
-   * Built here rather than left to the scroller because this module writes scroll
-   * offsets too — twice — and for a long time did so without consulting the guard at
-   * all. On iOS that cancelled the fling on the first measurement to land after the
-   * finger lifted, which is every fling in a list whose rows are not pre-measured.
-   */
-  const writeGate = createScrollWriteGate({ viewport })
-
-  /**
-   * Whether a publish skipped a scroll write because the gate was shut.
-   *
-   * A flag rather than a banked offset: the restore is a pure function of the anchor,
-   * the size cache and the geometry, so recomputing it when the gate reopens beats
-   * replaying a number that was only correct for one frame of a moving fling.
-   */
-  let writeDeferred = false
 
   const scroller: Scroller = createScroller({
     viewport,

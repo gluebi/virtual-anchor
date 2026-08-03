@@ -110,10 +110,17 @@ export default defineConfig(
     // scroller. A grep-shaped rule is not elegant, but it is the only thing that
     // makes a *third* such site fail the build rather than ship.
     //
-    // Scoped to the two modules that legitimately write. The viewports are where
-    // `setScrollOffset` is defined and the tests are where it is faked, so neither
-    // belongs here.
-    files: ['packages/virtual-anchor/src/engine.ts', 'packages/virtual-anchor/src/scroller.ts'],
+    // Scoped to the whole library, not to the two files that already write. The bug
+    // it exists for was `engine.ts` *acquiring* writes that `scroller.ts`'s guard did
+    // not cover, so a rule listing exactly those two files cannot catch the next one —
+    // a write added to `resizer.ts`, or to a module that does not exist yet, would be
+    // unrestricted. `viewport.ts` is where `setScrollOffset` is defined and the tests
+    // are where it is faked, so both are exempted below.
+    files: ['packages/virtual-anchor/src/**/*.{ts,tsx}'],
+    ignores: [
+      'packages/virtual-anchor/src/viewport.ts',
+      'packages/virtual-anchor/src/**/*.test.*',
+    ],
     rules: {
       'no-restricted-syntax': [
         'error',

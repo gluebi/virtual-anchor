@@ -53,8 +53,10 @@ export type {
 export { createScrollerGate } from './gate.js'
 export type { ScrollerGate, ScrollerGateOptions } from './gate.js'
 
-export { createScroller, onScrollSettled } from './scroller.js'
+export { createScroller } from './scroller.js'
 export type { Scroller, ScrollerOptions } from './scroller.js'
+
+export { onScrollSettled } from './settle.js'
 
 export { createVirtualStore, EMPTY_RANGE, EMPTY_STATE, needsRerender } from './store.js'
 export type { VirtualItem, VirtualState, VirtualStore } from './store.js'

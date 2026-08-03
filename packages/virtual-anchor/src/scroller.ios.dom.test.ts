@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { pretendIPhone, touch, unpretendIPhone } from './iosPlatform.test.helpers.js'
+import { createScrollWriteGate } from './momentum.js'
 import { createScroller, type Scroller } from './scroller.js'
 import { SizeCache } from './sizeCache.js'
 import type { ItemKey } from './types.js'
@@ -14,22 +16,6 @@ import type { Viewport } from './viewport.js'
  */
 const keysFor = (n: number): ItemKey[] => Array.from({ length: n }, (_, i) => `c${String(i)}`)
 
-const IPHONE_UA =
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1'
-
-const patched: string[] = []
-const pretendIPhone = (): void => {
-  const values: Record<string, unknown> = {
-    userAgent: IPHONE_UA,
-    platform: 'iPhone',
-    maxTouchPoints: 5,
-  }
-  for (const [name, value] of Object.entries(values)) {
-    Object.defineProperty(navigator, name, { configurable: true, get: () => value })
-    patched.push(name)
-  }
-  Object.defineProperty(window, 'ontouchend', { configurable: true, value: null })
-}
 
 beforeEach(() => {
   document.body.replaceChildren()
@@ -38,9 +24,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks()
-  for (const name of patched) Reflect.deleteProperty(navigator, name)
-  patched.length = 0
-  Reflect.deleteProperty(window, 'ontouchend')
+  unpretendIPhone()
 })
 
 interface Harness {
@@ -68,6 +52,8 @@ interface Harness {
   scroll: (next: number) => void
   /** The platform reporting that the scrolling is over. */
   settle: () => void
+  /** Frames the convergence loop currently has queued: 0 means it has parked. */
+  queued: () => number
   max: number
 }
 
@@ -142,12 +128,11 @@ const harness = (options: { max?: number } = {}): Harness => {
     getDevicePixelRatio: () => 2,
   }
 
-  const scroller = createScroller({
+  // Built here rather than left to the scroller so its timers run off the same fake
+  // clock as `now`. The scroller takes a gate instead of timer options because the
+  // options were public API existing only for this line.
+  const gate = createScrollWriteGate({
     viewport,
-    getCache: () => cache,
-    getGeometry: () => ({}),
-    applyCarry: () => {},
-    now: () => clock,
     setTimer: (callback, ms) => {
       const id = nextTimer++
       timers.set(id, { dueAt: clock + ms, callback })
@@ -156,6 +141,15 @@ const harness = (options: { max?: number } = {}): Harness => {
     clearTimer: (handle) => {
       timers.delete(handle as number)
     },
+  })
+
+  const scroller = createScroller({
+    viewport,
+    writeGate: gate,
+    getCache: () => cache,
+    getGeometry: () => ({}),
+    applyCarry: () => {},
+    now: () => clock,
     requestFrame: (callback) => {
       queue.push(callback)
       return queue.length
@@ -188,6 +182,7 @@ const harness = (options: { max?: number } = {}): Harness => {
     settle: () => {
       emit('scrollend')
     },
+    queued: () => queue.length,
     frames: (n) => {
       for (let i = 0; i < n; i++) {
         const pendingFrames = queue
@@ -199,9 +194,6 @@ const harness = (options: { max?: number } = {}): Harness => {
   }
 }
 
-const touch = (element: HTMLElement, type: 'touchstart' | 'touchend' | 'touchcancel'): void => {
-  element.dispatchEvent(new Event(type))
-}
 
 describe('scroller on iOS WebKit', () => {
   it('refuses to write while a finger is down', () => {
@@ -339,6 +331,28 @@ describe('scroller on iOS WebKit', () => {
     expect(h.offset()).toBe(50_000)
   })
 
+  it('parks the convergence loop while the gate is shut rather than spinning', () => {
+    // The gate stays shut for the length of a fling, so re-requesting a frame each
+    // time would schedule hundreds of guaranteed-useless main-thread wakeups during
+    // momentum. It waits on `gate.onOpen` instead.
+    const h = harness()
+    touch(h.element, 'touchstart')
+    void h.scroller.scrollToIndex(500)
+
+    h.frames(1)
+    expect(h.queued()).toBe(0)
+
+    // Still pending, and still nothing scheduled however long the gesture lasts.
+    h.frames(20)
+    expect(h.queued()).toBe(0)
+    expect(h.scroller.isScrolling()).toBe(true)
+
+    // The reopening is what wakes it.
+    touch(h.element, 'touchend')
+    h.advance(200)
+    expect(h.queued()).toBe(1)
+  })
+
   it('refuses to write during rubber-band overscroll past the top', () => {
     // Writing while the bounce is in progress snaps the page to the clamped value
     // the moment it ends.
@@ -414,13 +428,16 @@ describe('scroller on iOS WebKit', () => {
     expect(h.offset()).toBe(1000)
   })
 
-  it('removes its touch listeners on disposal', () => {
+  it('removes its own input listeners on disposal', () => {
+    // The touch listeners moved to the gate, which disposes them itself — covered by
+    // `momentum.dom.test.ts`. What is still the scroller's to release is the input set
+    // that cancels an in-flight programmatic scroll.
     const h = harness()
     const remove = vi.spyOn(h.element, 'removeEventListener')
     h.scroller.dispose()
 
-    expect(remove).toHaveBeenCalledWith('touchstart', expect.any(Function))
-    expect(remove).toHaveBeenCalledWith('touchend', expect.any(Function))
-    expect(remove).toHaveBeenCalledWith('touchcancel', expect.any(Function))
+    for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
+      expect(remove).toHaveBeenCalledWith(type, expect.any(Function))
+    }
   })
 })
