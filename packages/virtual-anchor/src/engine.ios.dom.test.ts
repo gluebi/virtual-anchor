@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { pretendIPhone, touch, unpretendIPhone } from './iosPlatform.test.helpers.js'
 import { createEngine, layoutSignatureFor, type Engine } from './engine.js'
+import { setTraceSink, type TraceEvent } from './trace.js'
 import type { Surface } from './surface.js'
 import type { ItemKey } from './types.js'
 import type { Viewport } from './viewport.js'
@@ -403,6 +404,35 @@ describe('the engine on iOS WebKit', () => {
     vi.advanceTimersByTime(3100)
 
     expect(h.scrollWrites().slice(before)).toHaveLength(1)
+  })
+
+  it('reports every correction it was about to make, deferred or not', () => {
+    // The diagnostic that made this bug measurable on a device rather than a matter
+    // of opinion: it is what produced the 389px figure in #28. Tested because it is
+    // load-bearing for future device work, and because it costs bundle size that has
+    // to be justified.
+    const seen: TraceEvent[] = []
+    expect(setTraceSink((event) => seen.push(event))).toBe(true)
+
+    try {
+      const h = setup()
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      h.measure('c10', 700)
+
+      const writes = seen.filter((event) => event.topic === 'scroll.write')
+      expect(writes.length).toBeGreaterThan(0)
+
+      const deferred = writes.find((event) => event.data.deferred === true)
+      expect(deferred).toBeDefined()
+      expect(deferred?.data.restore).toBe('measure')
+      // The delta is the size of the uncorrected shift, which is the whole point of
+      // reporting it — a sub-pixel wobble and a 389px lurch are the same event
+      // otherwise.
+      expect(Math.abs(Number(deferred?.data.delta))).toBeGreaterThan(0)
+    } finally {
+      setTraceSink(null)
+    }
   })
 
   it('writes a measurement correction normally when no gesture is in flight', () => {

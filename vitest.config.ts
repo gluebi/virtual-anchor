@@ -68,11 +68,11 @@ export default defineConfig({
         // Raised again with the momentum write gate (#26), which arrived with the first
         // engine-level iOS tests this suite has ever had — the absence of which is why
         // `publish` was able to write `scrollTop` past the guard for two releases.
-        'packages/virtual-anchor/src/engine.ts': { branches: 85, functions: 85, lines: 97 },
+        'packages/virtual-anchor/src/engine.ts': { branches: 86, functions: 90, lines: 97 },
         'packages/virtual-anchor/src/scroller.ts': { branches: 91, functions: 96, lines: 98 },
         // The gate itself, whole but for the production-build trace call — the same
         // exemption `trace.ts` carries, and by definition not this build.
-        'packages/virtual-anchor/src/momentum.ts': { branches: 96, functions: 95, lines: 100 },
+        'packages/virtual-anchor/src/momentum.ts': { branches: 96, functions: 100, lines: 100 },
         // Both settle paths, including the debounce fallback that bounds a fling on any
         // Safari without `scrollend`. Whole, so held at whole.
         'packages/virtual-anchor/src/settle.ts': { branches: 100, functions: 100, lines: 100 },
