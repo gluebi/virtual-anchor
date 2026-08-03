@@ -17,6 +17,22 @@ export default defineConfig({
     // landing rather than merely computing a sub-pixel target.
     { name: 'webkit', use: { ...devices['Desktop Safari'] } },
     { name: 'firefox', use: { ...devices['Desktop Firefox'] } },
+    // An iPhone descriptor over the same WebKit: iPhone UA, `hasTouch`, so
+    // `isIOSWebKit()` is genuinely true and the momentum write gate is live. That is
+    // as far as automation reaches — Playwright dispatches touch events but produces
+    // no real fling, so what this project proves is that no write escapes between
+    // `touchend` and `scrollend`, not that momentum survives. See
+    // `e2e/ios-momentum.spec.ts`.
+    {
+      name: 'mobile-webkit',
+      use: { ...devices['iPhone 15'] },
+      // Only the momentum spec. The rest of the suite encodes desktop geometry — header
+      // heights that wrap differently at 390px, scrollport sizes, how many articles fit
+      // — so running it here reports twelve failures about the viewport and none about
+      // the library. This project exists to make `isIOSWebKit()` true, not to be a
+      // second full matrix; a mobile layout pass would be its own piece of work.
+      testMatch: /ios-momentum\.spec\.ts/,
+    },
   ],
   webServer: {
     command: 'pnpm --filter demo preview',
