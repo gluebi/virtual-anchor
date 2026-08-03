@@ -97,6 +97,7 @@ describe('createNullSurface', () => {
     const surface = createNullSurface()
     expect(() => {
       surface.setLeadingSpace(100)
+      surface.setGestureShift(120)
     }).not.toThrow()
   })
 })
@@ -133,6 +134,48 @@ describe('createDomSurface carry', () => {
 
     surface.setCarry(0.5)
     expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('applies a gesture shift the same way', () => {
+    const { container, surface } = setup()
+    surface.setGestureShift(120)
+    expect(container.style.top).toBe('-120px')
+  })
+
+  it('sums the carry and the gesture shift into one offset', () => {
+    // They share a single `top`, so two setters writing it independently would each
+    // clobber the other — invisible until both are non-zero at once, which is a
+    // sub-pixel landing taken mid-gesture.
+    const { container, surface } = setup()
+    surface.setGestureShift(120)
+    surface.setCarry(0.5)
+    expect(container.style.top).toBe('-120.5px')
+
+    surface.setGestureShift(0)
+    expect(container.style.top).toBe('-0.5px')
+  })
+
+  it('does not re-write an unchanged shift', () => {
+    const { container, surface } = setup()
+    surface.setGestureShift(120)
+    const spy = vi.spyOn(container.style, 'top', 'set')
+
+    surface.setGestureShift(120)
+    expect(spy).not.toHaveBeenCalled()
+  })
+
+  it('forgets the shift on disposal, so a reused surface re-writes it', () => {
+    // `dispose` resets the memo rather than the DOM — the container is being torn down
+    // either way — but the memo has to go, or re-attaching one leaves the next identical
+    // write deduped against a value the fresh container does not have.
+    const { container, surface } = setup()
+    surface.setGestureShift(120)
+
+    surface.dispose()
+    container.style.top = ''
+    surface.setGestureShift(120)
+
+    expect(container.style.top).toBe('-120px')
   })
 })
 

@@ -173,6 +173,17 @@ const DEFAULT_EDGE_THRESHOLD = 600
  * outlasts the gap between frames of a fling.
  */
 const REPIN_QUIET_MS = 150
+/**
+ * How far the content may be held away from the scroll offset, in viewports.
+ *
+ * A safety valve on {@link Surface.setGestureShift}, not a tuning knob. While a shift
+ * is outstanding the scrollbar, `atBottom` and both edge thresholds are reading a
+ * position the content is no longer at, and the discrepancy is only recoverable while
+ * there is scroll range left to absorb it. Two viewports is comfortably more than any
+ * single gesture accumulates in practice — the measured worst case is one tall row —
+ * and small enough that hitting either end of the list cannot snap by a screenful.
+ */
+const MAX_GESTURE_SHIFT = 2
 
 /**
  * Whether a publish may move the scroll offset, and on whose authority.
@@ -652,18 +663,49 @@ export function createEngine(initial: EngineOptions): Engine {
   const writeGate = createScrollWriteGate({ viewport })
 
   /**
+   * The correction owed to the view, held as a paint offset instead of a scroll write.
+   *
+   * This is what makes a refused write harmless rather than merely postponed. iOS will
+   * not move the scroll offset during a gesture — writing it cancels a fling, and
+   * writing it under a finger is undone by the gesture's own baseline — so the
+   * correction is applied to the *content* instead, via `surface.setGestureShift`, and
+   * folded into `scrollTop` when the gesture ends and the platform will accept it.
+   *
+   * Without this, deferring meant the view lurched by the whole of every correction:
+   * measured at 389px per row on a phone, because a size estimate fitted at desktop
+   * width is wrong by hundreds of pixels when the text wraps three times as often.
+   *
+   * Zero whenever the gate is open, which is the invariant that keeps every other
+   * offset calculation in this file unchanged off iOS and between gestures.
+   */
+  let pendingShift = 0
+
+  /** Last shift handed to the surface, so an unchanged value is not re-written. */
+  let appliedShift = 0
+
+  const applyGestureShift = (next: number): void => {
+    if (next === appliedShift) return
+    appliedShift = next
+    surface.setGestureShift(next)
+  }
+
+  /**
+   * Where the content actually sits, in the coordinate space offsets are computed in.
+   *
+   * `scrollTop` alone stops being the answer the moment a shift is outstanding: the
+   * content has been moved without it. Every read that compares against an item offset
+   * has to go through here, or the anchor derived during a gesture describes a position
+   * the view is not at — and then each momentum event makes it worse rather than
+   * holding it still.
+   */
+  const contentOffset = (): number => viewport.getScrollOffset() + pendingShift
+
+  /**
    * Whether a publish skipped a scroll write because the gate was shut.
    *
-   * A flag rather than a banked offset: the restore is a pure function of the anchor,
-   * the size cache and the geometry, so recomputing it when the gate reopens beats
-   * replaying a number that was only correct for one frame of a moving fling.
-   *
-   * Note what that means in practice for a real fling: the scroll listener re-derives
-   * `anchor` from the actual offset on every momentum event, so by the time the gate
-   * reopens the anchor already describes the uncorrected position and the replay finds
-   * nothing over the threshold. The correction is *dropped*, which is the right answer
-   * for a sub-pixel wobble the reader has already scrolled past. It genuinely replays
-   * only where no scroll intervened — a tap, or the hard cap.
+   * Distinct from {@link pendingShift}: that holds the view *now*, this remembers that
+   * the model should be re-examined once writing is allowed again. The re-publish is
+   * what turns the paint offset back into a real scroll offset.
    */
   let writeDeferred = false
 
@@ -682,10 +724,15 @@ export function createEngine(initial: EngineOptions): Engine {
    * @returns whether the platform took the write.
    */
   const writeScroll = (offset: number, restore: Restore): boolean => {
+    // Against the *content* offset, not the raw scroll offset: with a shift
+    // outstanding the two differ by exactly the correction already applied to the
+    // content, so comparing against `scrollTop` would re-apply it every publish.
+    const delta = offset - contentOffset()
+
     // Nothing to do. Kept here so the callers do not each re-derive the threshold;
     // it exists to absorb the disagreement between an integer `clientHeight` and the
     // exact float offset it is compared against.
-    if (Math.abs(offset - viewport.getScrollOffset()) <= 0.01) return false
+    if (Math.abs(delta) <= 0.01) return false
 
     // A model change writes through a shut gate; a measurement waits. See the
     // `Restore` doc for why the two are not interchangeable — in short, a deferred
@@ -693,22 +740,34 @@ export function createEngine(initial: EngineOptions): Engine {
     const deferred = restore !== 'model' && !writeGate.canWrite()
 
     // The size of each correction, and whether it was taken. This is the number that
-    // says whether deferring one is invisible or a visible lurch: the design assumes
-    // sub-pixel, and a list whose estimate is fitted to a different viewport width
-    // produces hundreds of pixels per row.
+    // turned "seems jumpy on my phone" into 389px, and so the reason this compensates
+    // rather than merely postpones.
     if (TRACING) {
       trace('scroll.write', () => ({
         restore,
         offset,
-        from: viewport.getScrollOffset(),
-        delta: offset - viewport.getScrollOffset(),
+        from: contentOffset(),
+        delta,
         deferred,
+        pendingShift,
       }))
     }
 
     if (deferred) {
       writeDeferred = true
-      return false
+      // Hold the view by moving the content the distance `scrollTop` was going to
+      // move. The gesture never sees a scroll write, so nothing cancels it, and the
+      // reader sees the correction it would have seen anyway.
+      //
+      // Capped, because content and scroll offset are drifting apart while this
+      // accumulates: past the cap, taking the write — and losing the fling — beats
+      // holding a shift so large that reaching either end of the list snaps.
+      const next = pendingShift + delta
+      if (Math.abs(next) <= MAX_GESTURE_SHIFT * viewport.getViewportSize()) {
+        pendingShift = next
+        applyGestureShift(next)
+        return false
+      }
     }
 
     // Declare it first: the scroll event this produces must not be mistaken for the
@@ -717,7 +776,37 @@ export function createEngine(initial: EngineOptions): Engine {
     scroller.markSelfWrite(offset)
     // eslint-disable-next-line no-restricted-syntax -- the engine's single gated write
     viewport.setScrollOffset(offset)
+    // The shift has been superseded by a real scroll offset. Cleared *after* the write
+    // so the two never both describe the same correction, which would double it.
+    pendingShift = 0
+    applyGestureShift(0)
     return true
+  }
+
+  /**
+   * Turn the outstanding paint offset back into a real scroll offset.
+   *
+   * Called when the gate reopens, which is the first moment the platform will take the
+   * write. Both halves happen in one task so no frame is painted between them — the
+   * content jumps back by the shift and `scrollTop` moves forward by it, and the
+   * visible result is that nothing moves at all.
+   *
+   * Whatever the browser clamps stays outstanding rather than being discarded: at the
+   * end of a list the write cannot land in full, and dropping the remainder is how a
+   * reader ends up permanently offset by it.
+   */
+  const reconcileGestureShift = (): void => {
+    if (pendingShift === 0) return
+
+    const target = viewport.getScrollOffset() + pendingShift
+    scroller.markSelfWrite(target)
+    restoreIntents.push(target)
+    if (restoreIntents.length > MAX_RESTORE_INTENTS) restoreIntents.shift()
+    // eslint-disable-next-line no-restricted-syntax -- the gate is open by construction
+    viewport.setScrollOffset(target)
+
+    pendingShift = target - viewport.getScrollOffset()
+    applyGestureShift(pendingShift)
   }
 
   /**
@@ -802,7 +891,7 @@ export function createEngine(initial: EngineOptions): Engine {
         // Synchronously, rather than waiting for the scroll event: a publish later in
         // the same tick would otherwise resolve the old anchor and fight this write.
         // The event still arrives and derives the same value again.
-        anchor = deriveAnchor(viewport.getScrollOffset(), cache, geometry())
+        anchor = deriveAnchor(contentOffset(), cache, geometry())
       }
     } else if (restoreScroll && anchor && !scroller.isScrolling()) {
       const restored = resolveAnchorOffset(anchor, cache, geometry())
@@ -1198,6 +1287,10 @@ export function createEngine(initial: EngineOptions): Engine {
       // individually would write the same offset repeatedly.
       cleanups.push(
         writeGate.onOpen(() => {
+          // Before the re-publish, not after: the publish re-derives the offset from
+          // the anchor, and it has to be comparing against a `scrollTop` that already
+          // owns the correction rather than one a paint offset is standing in for.
+          reconcileGestureShift()
           if (!writeDeferred) return
           writeDeferred = false
           publish('measure')
@@ -1249,7 +1342,7 @@ export function createEngine(initial: EngineOptions): Engine {
             // shifting half a pixel on the first prepend after a landing. Invisible while
             // every inset was a whole number; a sticky header that wraps to 85.5px makes it
             // routine.
-            anchor = deriveAnchor(offset + carry, cache, geometry())
+            anchor = deriveAnchor(offset + carry + pendingShift, cache, geometry())
           } else {
             restoreIntents.splice(0, restoreIndex + 1)
           }
@@ -1323,7 +1416,7 @@ export function createEngine(initial: EngineOptions): Engine {
       // origin, and an anchor derived against an origin of zero and then resolved
       // against the real one is wrong by the whole spacer.
       syncLeadingSpace(cache.totalSize())
-      anchor = deriveAnchor(viewport.getScrollOffset(), cache, geometry())
+      anchor = deriveAnchor(contentOffset(), cache, geometry())
       publish('none')
 
       const teardown = (): void => {
@@ -1334,7 +1427,13 @@ export function createEngine(initial: EngineOptions): Engine {
         // since `attach()` is once-only, tearing the gate down on unmount would
         // leave a remounted engine writing `scrollTop` through nothing at all. It
         // goes in `dispose()`, with the scroller.
+        //
+        // The shift *is* cleared: it stands in for a scroll write, and an unmounted
+        // engine has no business holding the content away from the scroll offset. The
+        // surface is about to be torn down or re-attached either way.
         writeDeferred = false
+        pendingShift = 0
+        applyGestureShift(0)
         if (unmount === teardown) unmount = null
       }
       unmount = teardown

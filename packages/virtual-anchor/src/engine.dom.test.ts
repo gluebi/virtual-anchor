@@ -146,6 +146,7 @@ const setup = (
       writes.push(`lead:${String(px)}`)
     },
     setCarry: (px) => writes.push(`carry:${String(px)}`),
+    setGestureShift: (px) => writes.push(`shift:${String(px)}`),
     setItemOffset: (key, offset) => writes.push(`item:${String(key)}@${String(offset)}`),
     attachItem: (key, element) => {
       elements.set(key, element)

@@ -50,6 +50,21 @@ export interface Surface {
    * See {@link createDomSurface} for why this is not a transform.
    */
   setCarry(px: number): void
+  /**
+   * Paint offset standing in for a scroll write the platform will not accept yet.
+   *
+   * The same mechanism as {@link setCarry} and deliberately a separate input, because
+   * the two answer different questions and compose: the carry is the fraction of a
+   * pixel a *completed* write lost, while this is the whole of a correction that has
+   * not been written at all. iOS refuses to move the scroll offset during a touch
+   * gesture — writing it either cancels the fling or is undone by the gesture's own
+   * baseline — so a correction that arrives mid-gesture has to hold the view by moving
+   * the content instead, and is folded into `scrollTop` once the gesture ends.
+   *
+   * Unbounded, unlike the carry: corrections here are routinely hundreds of pixels on
+   * a list whose size estimate was fitted at a different viewport width.
+   */
+  setGestureShift(px: number): void
   /** Position an item. Offsets are exact floats and must not be rounded. */
   setItemOffset(key: ItemKey, offset: number): void
   /** Register an element for a key. Returns its own detach. */
@@ -88,7 +103,25 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
 
   let lastContentSize: number | null = null
   let lastCarry = 0
+  let lastShift = 0
   let lastLeadingSpace = 0
+
+  /**
+   * Write the container's paint offset, which two inputs contribute to.
+   *
+   * Summed in one place because they share a single `top` — two setters writing it
+   * independently would each clobber the other's contribution, which is the kind of
+   * bug that only shows up when both are non-zero at once: a sub-pixel landing taken
+   * mid-gesture.
+   *
+   * Applied as `top` on the relatively-positioned container for the same antialiasing
+   * reason as items.
+   */
+  const writeContainerOffset = (): void => {
+    const total = lastCarry + lastShift
+    const container = options.container.current
+    if (container) container.style.top = total === 0 ? '' : `${String(-total)}px`
+  }
 
   const position = (element: HTMLElement, offset: number): void => {
     if (!styled.has(element)) {
@@ -131,10 +164,13 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
     setCarry(px) {
       if (px === lastCarry) return
       lastCarry = px
-      const container = options.container.current
-      // Applied as `top` on the relatively-positioned container for the same
-      // antialiasing reason as items.
-      if (container) container.style.top = px === 0 ? '' : `${String(-px)}px`
+      writeContainerOffset()
+    },
+
+    setGestureShift(px) {
+      if (px === lastShift) return
+      lastShift = px
+      writeContainerOffset()
     },
 
     setItemOffset(key, offset) {
@@ -164,6 +200,7 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
       elements.clear()
       lastContentSize = null
       lastCarry = 0
+      lastShift = 0
       lastLeadingSpace = 0
     },
   }
@@ -175,6 +212,7 @@ export function createNullSurface(): Surface {
     setContentSize: () => {},
     setLeadingSpace: () => {},
     setCarry: () => {},
+    setGestureShift: () => {},
     setItemOffset: () => {},
     attachItem: () => () => {},
     hasItem: () => false,

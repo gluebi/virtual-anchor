@@ -80,6 +80,8 @@ interface Harness {
   scroller: HTMLElement
   /** Just the scroll writes, which is what this file is about. */
   scrollWrites: () => number[]
+  /** Every gesture shift handed to the surface, in order. */
+  shifts: () => number[]
   offset: () => number
   scroll: (value: number) => void
   scrollSettled: () => void
@@ -129,6 +131,7 @@ const setup = (
       writes.push(`lead:${String(px)}`)
     },
     setCarry: (px) => writes.push(`carry:${String(px)}`),
+    setGestureShift: (px) => writes.push(`shift:${String(px)}`),
     setItemOffset: (key, offset) => writes.push(`item:${String(key)}@${String(offset)}`),
     attachItem: (key, element) => {
       elements.set(key, element)
@@ -191,6 +194,8 @@ const setup = (
     scroller,
     scrollWrites: () =>
       writes.filter((w) => w.startsWith('scroll:')).map((w) => Number(w.slice('scroll:'.length))),
+    shifts: () =>
+      writes.filter((w) => w.startsWith('shift:')).map((w) => Number(w.slice('shift:'.length))),
     offset: () => state.offset,
     scroll: (value) => {
       state.offset = value
@@ -347,33 +352,35 @@ describe('the engine on iOS WebKit', () => {
   })
 
   it('does not record a restore intent for a write it refused', () => {
-    // A phantom intent is consumed by the next momentum scroll event, which then
-    // skips re-deriving the anchor for a scroll that really was the reader's —
-    // leaving the anchor stale for the rest of the fling.
+    // A phantom intent is consumed by the next momentum scroll event, which then skips
+    // re-deriving the anchor for a scroll that really was the reader's — leaving the
+    // anchor stale for the rest of the fling.
     //
-    // The offset the refused restore *would* have written is learned by running the
-    // same measurement with the gate open, rather than hard-coded: it depends on the
-    // median estimator, so a literal here would silently stop being the offset under
-    // test the moment that changed. Landing the next momentum frame exactly there is
+    // The offset the refused write aimed at is taken from the trace rather than
+    // hard-coded: it depends on the median estimator, so a literal would quietly stop
+    // being the offset under test. Landing the next momentum frame exactly there is
     // what makes a phantom intent match, within `isSelfWrite`'s 1.5px tolerance.
-    const reference = setup()
-    reference.mountItem('c10', 100)
-    reference.scroll(5000)
-    const writesBefore = reference.scrollWrites().length
-    reference.measure('c10', 700)
-    const restored = reference.scrollWrites().at(writesBefore)
-    expect(restored).toBeTypeOf('number')
+    const seen: TraceEvent[] = []
+    expect(setTraceSink((event) => seen.push(event))).toBe(true)
 
-    const h = setup()
-    h.mountItem('c10', 100)
-    fling(h, 5000)
-    h.measure('c10', 700)
-    expect(h.scrollWrites().at(-1)).not.toBe(restored)
+    try {
+      const h = setup()
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      h.measure('c10', 700)
 
-    h.scroll(restored!)
+      const refused = seen.find(
+        (event) => event.topic === 'scroll.write' && event.data.deferred === true,
+      )
+      expect(refused).toBeDefined()
 
-    // Re-derived from where the fling actually is, not skipped as an echo.
-    expect(h.engine.getAnchor()).toEqual(reference.engine.getAnchor())
+      const before = h.engine.getAnchor()
+      h.scroll(Number(refused?.data.offset))
+
+      expect(h.engine.getAnchor()).not.toEqual(before)
+    } finally {
+      setTraceSink(null)
+    }
   })
 
   it('holds the follow pin rather than writing it mid-fling', () => {
@@ -404,6 +411,112 @@ describe('the engine on iOS WebKit', () => {
     vi.advanceTimersByTime(3100)
 
     expect(h.scrollWrites().slice(before)).toHaveLength(1)
+  })
+
+  it('holds the view with a paint offset instead of the refused scroll write', () => {
+    // The whole point of #28. Deferring alone left the content lurching by the full
+    // correction — measured at 389px per row on a phone — because nothing cancelled the
+    // growth above the anchor. The shift is that cancellation, applied where the
+    // platform cannot refuse it.
+    const h = setup()
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    const scrollsBefore = h.scrollWrites().length
+
+    h.measure('c10', 700)
+
+    expect(h.scrollWrites().slice(scrollsBefore)).toEqual([])
+    const shift = h.shifts().at(-1)
+    expect(shift).toBeDefined()
+    expect(Math.abs(shift ?? 0)).toBeGreaterThan(0)
+  })
+
+  it('accumulates successive refused corrections into one shift', () => {
+    // `estimateSize` rather than the harness default, which supplies only
+    // `defaultEstimate` and so leaves the median estimator live: the second measurement
+    // would then rebuild every unmeasured offset at once and produce a correction two
+    // orders of magnitude past the cap. That is a real effect worth knowing about, but
+    // it is not accumulation, and the consumer this bug was reported against supplies an
+    // estimator — which is precisely why its corrections are per-row.
+    const h = setup({ estimateSize: () => 100 })
+    h.mountItem('c10', 100)
+    h.mountItem('c12', 100)
+    fling(h, 5000)
+
+    h.measure('c10', 700)
+    const first = h.shifts().at(-1) ?? 0
+    h.measure('c12', 500)
+    const second = h.shifts().at(-1) ?? 0
+
+    // One running total, not two independent offsets — the second correction is
+    // applied on top of the first, not instead of it.
+    expect(Math.abs(second)).toBeGreaterThan(Math.abs(first))
+  })
+
+  it('derives the anchor from where the content is, not from scrollTop', () => {
+    // The subtlest half of the compensation. While a shift is outstanding the content
+    // has moved without `scrollTop`, so an anchor derived from the raw offset describes
+    // a position the view is not at — and every momentum event would then re-derive it
+    // wrong, compounding instead of holding.
+    //
+    // Observable as idempotence: once compensated, a further publish with nothing
+    // changed must find no correction left to make.
+    const h = setup({ estimateSize: () => 100 })
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    h.measure('c10', 700)
+    const held = h.shifts().at(-1) ?? 0
+    expect(held).not.toBe(0)
+
+    // A momentum frame that does not move: the anchor is re-derived here.
+    h.scroll(5000)
+    // A publish with no model change behind it.
+    h.resize(800)
+
+    expect(h.shifts().at(-1) ?? 0).toBe(held)
+  })
+
+  it('folds the shift into scrollTop once the gesture ends, and clears it', () => {
+    const h = setup()
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    h.measure('c10', 700)
+    const shift = h.shifts().at(-1) ?? 0
+    const offsetBefore = h.offset()
+
+    h.scrollSettled()
+
+    // `scrollTop` moves forward by exactly what the content was holding, and the
+    // content offset returns to zero. Same visible position, different mechanism.
+    expect(h.offset()).toBeCloseTo(offsetBefore + shift, 5)
+    expect(h.shifts().at(-1)).toBe(0)
+  })
+
+  it('takes the write rather than holding a shift larger than the cap', () => {
+    // Past the cap the scrollbar, `atBottom` and both edge thresholds are reading a
+    // position the content is nowhere near, and only a shrinking amount of scroll range
+    // is left to absorb it. Losing the fling is the lesser harm.
+    const h = setup({ count: 400 })
+    fling(h, 5000)
+    const scrollsBefore = h.scrollWrites().length
+
+    // One absurdly tall row: 40 000px against a 100px estimate, far past 2 viewports.
+    h.mountItem('c10', 40_000)
+
+    expect(h.scrollWrites().slice(scrollsBefore)).not.toEqual([])
+    expect(h.shifts().at(-1) ?? 0).toBe(0)
+  })
+
+  it('leaves no shift outstanding off iOS', () => {
+    unpretendIPhone()
+    const h = setup()
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+
+    h.measure('c10', 700)
+
+    // The gate is inert, so the write is taken and the paint offset is never used.
+    expect(h.shifts().filter((px) => px !== 0)).toEqual([])
   })
 
   it('reports every correction it was about to make, deferred or not', () => {

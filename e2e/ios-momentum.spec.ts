@@ -102,6 +102,14 @@ test.describe('the momentum write gate on an emulated iPhone', () => {
     await page.waitForTimeout(600)
 
     expect(await writes(page)).toBe(baseline)
+
+    // And the correction was not simply dropped: it is being held as a paint offset on
+    // the item container, which is what keeps the view still without a scroll write.
+    const shift = await page.evaluate(() => {
+      const container = document.querySelector('.scroller > *')
+      return container instanceof HTMLElement ? container.style.top : ''
+    })
+    expect(shift).not.toBe('')
   })
 
   test('a prepend still writes, gesture or no gesture', async ({ page }) => {
