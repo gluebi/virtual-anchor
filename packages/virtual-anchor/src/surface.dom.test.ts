@@ -97,17 +97,16 @@ describe('createNullSurface', () => {
     const surface = createNullSurface()
     expect(() => {
       surface.setLeadingSpace(100)
-      surface.setGestureShift(120)
     }).not.toThrow()
   })
 })
 
-describe('createDomSurface carry', () => {
+describe('createDomSurface paint offset', () => {
   it('shifts the container up by the residual', () => {
     // Positive carry means the browser stopped short of where we wanted, so content
     // moves up to compensate.
     const { container, surface } = setup()
-    surface.setCarry(0.5)
+    surface.setPaintOffset(0.5)
     expect(container.style.top).toBe('-0.5px')
   })
 
@@ -115,67 +114,25 @@ describe('createDomSurface carry', () => {
     // A fractional translate disables subpixel text antialiasing in Blink for the whole
     // subtree (crbug 573146) — and a sub-pixel carry is fractional by definition.
     const { container, surface } = setup()
-    surface.setCarry(0.25)
+    surface.setPaintOffset(0.25)
     expect(container.style.transform).toBe('')
     expect(container.style.top).toBe('-0.25px')
   })
 
   it('clears the offset at zero rather than writing -0px', () => {
     const { container, surface } = setup()
-    surface.setCarry(0.5)
-    surface.setCarry(0)
+    surface.setPaintOffset(0.5)
+    surface.setPaintOffset(0)
     expect(container.style.top).toBe('')
   })
 
-  it('does not re-write an unchanged carry', () => {
+  it('does not re-write an unchanged paint offset', () => {
     const { container, surface } = setup()
-    surface.setCarry(0.5)
+    surface.setPaintOffset(0.5)
     const spy = vi.spyOn(container.style, 'top', 'set')
 
-    surface.setCarry(0.5)
+    surface.setPaintOffset(0.5)
     expect(spy).not.toHaveBeenCalled()
-  })
-
-  it('applies a gesture shift the same way', () => {
-    const { container, surface } = setup()
-    surface.setGestureShift(120)
-    expect(container.style.top).toBe('-120px')
-  })
-
-  it('sums the carry and the gesture shift into one offset', () => {
-    // They share a single `top`, so two setters writing it independently would each
-    // clobber the other — invisible until both are non-zero at once, which is a
-    // sub-pixel landing taken mid-gesture.
-    const { container, surface } = setup()
-    surface.setGestureShift(120)
-    surface.setCarry(0.5)
-    expect(container.style.top).toBe('-120.5px')
-
-    surface.setGestureShift(0)
-    expect(container.style.top).toBe('-0.5px')
-  })
-
-  it('does not re-write an unchanged shift', () => {
-    const { container, surface } = setup()
-    surface.setGestureShift(120)
-    const spy = vi.spyOn(container.style, 'top', 'set')
-
-    surface.setGestureShift(120)
-    expect(spy).not.toHaveBeenCalled()
-  })
-
-  it('forgets the shift on disposal, so a reused surface re-writes it', () => {
-    // `dispose` resets the memo rather than the DOM — the container is being torn down
-    // either way — but the memo has to go, or re-attaching one leaves the next identical
-    // write deduped against a value the fresh container does not have.
-    const { container, surface } = setup()
-    surface.setGestureShift(120)
-
-    surface.dispose()
-    container.style.top = ''
-    surface.setGestureShift(120)
-
-    expect(container.style.top).toBe('-120px')
   })
 })
 
@@ -296,7 +253,7 @@ describe('createNullSurface', () => {
     const surface = createNullSurface()
     expect(() => {
       surface.setContentSize(100)
-      surface.setCarry(0.5)
+      surface.setPaintOffset(0.5)
       surface.setItemOffset('a', 10)
       surface.attachItem('a', document.createElement('div'))()
       surface.dispose()

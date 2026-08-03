@@ -80,8 +80,18 @@ interface Harness {
   scroller: HTMLElement
   /** Just the scroll writes, which is what this file is about. */
   scrollWrites: () => number[]
-  /** Every gesture shift handed to the surface, in order. */
-  shifts: () => number[]
+  /**
+   * Every paint offset handed to the surface, in order.
+   *
+   * Carry and gesture shift arrive summed, since they share one `top`. They are told
+   * apart by magnitude: the carry cannot exceed `MAX_CARRY` of 1px, and a shift worth
+   * testing is hundreds.
+   */
+  paintOffsets: () => number[]
+  /** The paint offset currently applied. */
+  paintOffset: () => number
+  /** The scroller's own maximum, for assertions about the end of the list. */
+  maxOffset: () => number
   offset: () => number
   scroll: (value: number) => void
   scrollSettled: () => void
@@ -102,9 +112,11 @@ const setup = (
      * the first scroll event unpins and the follow branch is never exercised at all.
      */
     trackContent?: boolean
+    /** Truncate written offsets to integers, as WebKit does. */
+    truncateWrites?: boolean
   } = {},
 ): Harness => {
-  const { count = 200, trackContent = false, ...engineOptions } = options
+  const { count = 200, trackContent = false, truncateWrites = false, ...engineOptions } = options
 
   const scroller = document.createElement('div')
   document.body.appendChild(scroller)
@@ -130,8 +142,7 @@ const setup = (
       state.leadingSpace = px
       writes.push(`lead:${String(px)}`)
     },
-    setCarry: (px) => writes.push(`carry:${String(px)}`),
-    setGestureShift: (px) => writes.push(`shift:${String(px)}`),
+    setPaintOffset: (px) => writes.push(`paint:${String(px)}`),
     setItemOffset: (key, offset) => writes.push(`item:${String(key)}@${String(offset)}`),
     attachItem: (key, element) => {
       elements.set(key, element)
@@ -152,9 +163,10 @@ const setup = (
         ? Math.max(0, state.contentSize + state.leadingSpace - state.viewportSize)
         : 1_000_000,
     setScrollOffset: (next) => {
+      const accepted = truncateWrites ? Math.trunc(next) : next
       state.offset = trackContent
-        ? Math.min(Math.max(next, 0), Math.max(0, state.contentSize + state.leadingSpace - state.viewportSize))
-        : next
+        ? Math.min(Math.max(accepted, 0), Math.max(0, state.contentSize + state.leadingSpace - state.viewportSize))
+        : accepted
       writes.push(`scroll:${String(next)}`)
     },
     addEventListener: (type, listener) => {
@@ -189,13 +201,16 @@ const setup = (
   })
   engine.mount()
 
+  const numbersFor = (prefix: string): number[] =>
+    writes.filter((w) => w.startsWith(prefix)).map((w) => Number(w.slice(prefix.length)))
+
   return {
     engine,
     scroller,
-    scrollWrites: () =>
-      writes.filter((w) => w.startsWith('scroll:')).map((w) => Number(w.slice('scroll:'.length))),
-    shifts: () =>
-      writes.filter((w) => w.startsWith('shift:')).map((w) => Number(w.slice('shift:'.length))),
+    scrollWrites: () => numbersFor('scroll:'),
+    paintOffsets: () => numbersFor('paint:'),
+    paintOffset: () => numbersFor('paint:').at(-1) ?? 0,
+    maxOffset: () => viewport.getMaxScrollOffset(),
     offset: () => state.offset,
     scroll: (value) => {
       state.offset = value
@@ -414,10 +429,9 @@ describe('the engine on iOS WebKit', () => {
   })
 
   it('holds the view with a paint offset instead of the refused scroll write', () => {
-    // The whole point of #28. Deferring alone left the content lurching by the full
-    // correction — measured at 389px per row on a phone — because nothing cancelled the
-    // growth above the anchor. The shift is that cancellation, applied where the
-    // platform cannot refuse it.
+    // The whole point of #28: deferring alone cancelled nothing, so the content lurched
+    // by the full correction. The shift is that cancellation, applied where the platform
+    // cannot refuse it.
     const h = setup()
     h.mountItem('c10', 100)
     fling(h, 5000)
@@ -426,27 +440,21 @@ describe('the engine on iOS WebKit', () => {
     h.measure('c10', 700)
 
     expect(h.scrollWrites().slice(scrollsBefore)).toEqual([])
-    const shift = h.shifts().at(-1)
-    expect(shift).toBeDefined()
-    expect(Math.abs(shift ?? 0)).toBeGreaterThan(0)
+    expect(Math.abs(h.paintOffset())).toBeGreaterThan(1)
   })
 
   it('accumulates successive refused corrections into one shift', () => {
-    // `estimateSize` rather than the harness default, which supplies only
-    // `defaultEstimate` and so leaves the median estimator live: the second measurement
-    // would then rebuild every unmeasured offset at once and produce a correction two
-    // orders of magnitude past the cap. That is a real effect worth knowing about, but
-    // it is not accumulation, and the consumer this bug was reported against supplies an
-    // estimator — which is precisely why its corrections are per-row.
+    // `estimateSize` disables the median estimator, whose rebuild on the second
+    // measurement would swamp the per-row corrections this is about.
     const h = setup({ estimateSize: () => 100 })
     h.mountItem('c10', 100)
     h.mountItem('c12', 100)
     fling(h, 5000)
 
     h.measure('c10', 700)
-    const first = h.shifts().at(-1) ?? 0
+    const first = h.paintOffset()
     h.measure('c12', 500)
-    const second = h.shifts().at(-1) ?? 0
+    const second = h.paintOffset()
 
     // One running total, not two independent offsets — the second correction is
     // applied on top of the first, not instead of it.
@@ -465,7 +473,7 @@ describe('the engine on iOS WebKit', () => {
     h.mountItem('c10', 100)
     fling(h, 5000)
     h.measure('c10', 700)
-    const held = h.shifts().at(-1) ?? 0
+    const held = h.paintOffset()
     expect(held).not.toBe(0)
 
     // A momentum frame that does not move: the anchor is re-derived here.
@@ -473,7 +481,7 @@ describe('the engine on iOS WebKit', () => {
     // A publish with no model change behind it.
     h.resize(800)
 
-    expect(h.shifts().at(-1) ?? 0).toBe(held)
+    expect(h.paintOffset()).toBe(held)
   })
 
   it('folds the shift into scrollTop once the gesture ends, and clears it', () => {
@@ -481,7 +489,7 @@ describe('the engine on iOS WebKit', () => {
     h.mountItem('c10', 100)
     fling(h, 5000)
     h.measure('c10', 700)
-    const shift = h.shifts().at(-1) ?? 0
+    const shift = h.paintOffset()
     const offsetBefore = h.offset()
 
     h.scrollSettled()
@@ -489,7 +497,48 @@ describe('the engine on iOS WebKit', () => {
     // `scrollTop` moves forward by exactly what the content was holding, and the
     // content offset returns to zero. Same visible position, different mechanism.
     expect(h.offset()).toBeCloseTo(offsetBefore + shift, 5)
-    expect(h.shifts().at(-1)).toBe(0)
+    expect(h.paintOffset()).toBe(0)
+  })
+
+  it('mounts the range the content is showing, not the one scrollTop implies', () => {
+    // With a shift outstanding, `scrollTop` and the visible content differ by it. Compute
+    // the rendered window from the raw offset and it is centred up to two viewports from
+    // the screen — which paints blank — and the visibility band reports rows that never
+    // appeared.
+    // One correction bigger than the buffer plus the viewport, so the two candidate
+    // windows do not overlap — otherwise `DEFAULT_BUFFER` hides the difference and the
+    // assertion passes either way.
+    const h = setup({ estimateSize: () => 100 })
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    h.measure('c10', 1500)
+
+    const held = h.paintOffset()
+    expect(held).toBeGreaterThan(1200)
+
+    // The index under the viewport top, in content space.
+    const shown = h.engine.cache.indexAt(h.offset() + held)
+    const [first, last] = h.engine.store.getState().renderedRange
+    expect(shown).toBeGreaterThanOrEqual(first)
+    expect(shown).toBeLessThanOrEqual(last)
+  })
+
+  it('sends what a truncating platform refuses to the carry, and holds nothing', () => {
+    // WebKit truncates a written scroll offset to an integer, so on the one platform this
+    // runs on the fold is never exact. The shortfall is what the carry is *for*, so it
+    // goes there and `MAX_CARRY` governs it — leaving no shift outstanding with the gate
+    // open, which is the invariant the rest of the file's offset arithmetic rests on.
+    const h = setup({ estimateSize: () => 100, truncateWrites: true })
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    h.measure('c10', 700.5)
+    expect(h.paintOffset()).toBeGreaterThan(1)
+
+    h.scrollSettled()
+
+    expect(Number.isInteger(h.offset())).toBe(true)
+    // Nothing held: what the platform dropped is under a pixel and now rides in the carry.
+    expect(Math.abs(h.paintOffset())).toBeLessThanOrEqual(1)
   })
 
   it('takes the write rather than holding a shift larger than the cap', () => {
@@ -504,7 +553,7 @@ describe('the engine on iOS WebKit', () => {
     h.mountItem('c10', 40_000)
 
     expect(h.scrollWrites().slice(scrollsBefore)).not.toEqual([])
-    expect(h.shifts().at(-1) ?? 0).toBe(0)
+    expect(h.paintOffset()).toBe(0)
   })
 
   it('leaves no shift outstanding off iOS', () => {
@@ -515,8 +564,9 @@ describe('the engine on iOS WebKit', () => {
 
     h.measure('c10', 700)
 
-    // The gate is inert, so the write is taken and the paint offset is never used.
-    expect(h.shifts().filter((px) => px !== 0)).toEqual([])
+    // The gate is inert, so the write is taken and no shift is ever held. Any paint
+    // offset here is the sub-pixel carry, which is what `MAX_CARRY` bounds at 1px.
+    expect(h.paintOffsets().filter((px) => Math.abs(px) > 1)).toEqual([])
   })
 
   it('reports every correction it was about to make, deferred or not', () => {

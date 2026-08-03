@@ -1,5 +1,5 @@
 ---
-'virtual-anchor': patch
+'virtual-anchor': minor
 ---
 
 Hold the view during an iOS gesture, instead of lurching by every correction.
@@ -13,32 +13,48 @@ iPhone, because a size estimate fitted at desktop width is wrong by hundreds of 
 the text wraps three times as often.
 
 The correction now stops going through `scrollTop`. Deferred deltas accumulate into a paint
-offset on the item container — `Surface.setGestureShift`, the same mechanism the sub-pixel
-carry uses, which moves content without touching the scroll position and so cannot be
-refused or undone by the platform. When the gesture ends and the gate reopens, the offset is
+offset on the item container — the same mechanism the sub-pixel carry uses, which moves
+content without touching the scroll position and so cannot be refused or undone by the
+platform. When the gesture ends and the gate reopens, the offset is
 folded into `scrollTop` in a single task: the content jumps back by the shift and the scroll
-offset moves forward by it, so nothing visibly moves. Whatever the browser clamps stays
-outstanding rather than being discarded, which is what stops a reader ending up permanently
-displaced at the end of a list.
+offset moves forward by it, so nothing visibly moves.
+
+Whatever the platform will not take goes to the carry, bounded by `MAX_CARRY` as it always
+is — and on WebKit, which truncates written offsets to integers, that is every fold. The
+shift itself always clears, so nothing is ever held while the gate is open: a correction
+cannot exceed the content above it, so the fold's target cannot leave the scrollable range
+and there is no larger residue to strand.
 
 Three details worth knowing:
 
-- **The anchor is now derived from where the content is**, not from `scrollTop`. With a shift
-  outstanding the two differ by exactly the correction already applied, so deriving from the
-  raw offset would describe a position the view is not at — and every momentum event would
-  re-derive it wrong, compounding rather than holding.
+- **Content-space reads now go through one helper.** The anchor, the rendered range and the
+  visibility band all compare against item offsets, so all three read where the content
+  *is*: computing them from the raw offset while a shift is outstanding centres the mounted
+  window up to two viewports from the screen — which paints blank — and reports comments
+  visible that never appeared. `atBottom` and the offset published to consumers stay in
+  scroll space, since both are about the scrollbar.
 - **The shift is capped at two viewports.** While it is outstanding the scrollbar, `atBottom`
   and both edge thresholds are reading a position the content is no longer at, and the
   discrepancy is only recoverable while scroll range remains to absorb it. Past the cap the
   write is taken and the fling is sacrificed, which is the lesser harm.
-- **The carry and the shift share one `top`**, so the surface sums them in one place. Two
-  setters writing it independently would each clobber the other — invisible until both are
-  non-zero at once, which is a sub-pixel landing taken mid-gesture.
+- **The carry and the shift share one `top`**, so the engine — which already holds both for
+  its own arithmetic — sums them and the surface takes one number. `Surface.setCarry` is
+  renamed `setPaintOffset` to say so: two writers of one property would each clobber the
+  other, invisibly until both are non-zero at once, which is a sub-pixel landing taken
+  mid-gesture.
 
-`Surface` gains one method. Nothing else changes off iOS, where the gate is inert and the
-shift is never non-zero.
+**Breaking:** `Surface.setCarry` is now `Surface.setPaintOffset`. Only an implementor of that
+interface is affected; consumers of `VirtualList`, `useVirtualList` or `createEngine` are not.
 
-Verified on an iPhone 15 Pro Max. Automated coverage asserts the shift is applied rather
-than the write, that successive corrections accumulate into one offset, that the fold on
-reopen is exact, that the cap takes the write, that the anchor derivation includes the shift,
-and that no shift is ever outstanding off iOS.
+Nothing changes off iOS, where the gate is inert and no shift is ever held — asserted
+directly.
+
+Verified on an iPhone 15 Pro Max. Automated coverage asserts the correction is held as a
+paint offset rather than written, that successive corrections accumulate into one, that the
+fold on reopen moves `scrollTop` by what the content was holding, that a truncating platform
+leaves nothing held, that the rendered range follows the content rather than `scrollTop`,
+that the cap takes the write, that the anchor derivation
+includes the shift, and that nothing is held off iOS. The `mobile-webkit` project asserts in
+a real WebKit that no write escapes a gesture; it deliberately does not assert the
+correction's *size*, which depends on how wrong the demo's estimate happens to be at the
+device descriptor's viewport rather than on anything the library does.

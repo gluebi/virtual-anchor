@@ -19,6 +19,14 @@ import { open } from './helpers.js'
  * Counting is done by patching the `scrollTop` setter before any script runs, so it
  * catches a write from anywhere in the library rather than from the paths a test
  * thought to look at.
+ *
+ * What is deliberately *not* asserted here is the size of the correction being held as a
+ * paint offset. It depends on how wrong the demo's size estimate is at whatever viewport
+ * the device descriptor supplies, which is not something a test controls: measured here
+ * it comes out under a pixel, indistinguishable from the sub-pixel carry that writes the
+ * same property. A threshold loose enough to pass would pass with the compensation
+ * removed. The magnitude, the accumulation and the fold are asserted in
+ * `engine.ios.dom.test.ts`, where the correction is an input rather than an accident.
  */
 
 /** Count every `scrollTop` write on the scrollport, from page load onwards. */
@@ -103,13 +111,7 @@ test.describe('the momentum write gate on an emulated iPhone', () => {
 
     expect(await writes(page)).toBe(baseline)
 
-    // And the correction was not simply dropped: it is being held as a paint offset on
-    // the item container, which is what keeps the view still without a scroll write.
-    const shift = await page.evaluate(() => {
-      const container = document.querySelector('.scroller > *')
-      return container instanceof HTMLElement ? container.style.top : ''
-    })
-    expect(shift).not.toBe('')
+
   })
 
   test('a prepend still writes, gesture or no gesture', async ({ page }) => {

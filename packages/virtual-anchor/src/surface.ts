@@ -44,27 +44,17 @@ export interface Surface {
    */
   setLeadingSpace(px: number): void
   /**
-   * Sub-pixel paint offset for the whole item container.
+   * Paint offset for the whole item container, in px. Positive moves content up.
    *
-   * Recovers the fraction of a pixel the platform refused to take on a scroll write.
+   * Two things arrive here, summed by the engine because both are its arithmetic: the
+   * fraction of a pixel the platform refused on a scroll write, and — on iOS, which
+   * will not move the scroll offset during a touch gesture at all — the whole of a
+   * correction that could not be written yet. Hence "paint offset" rather than "carry":
+   * the second contributor is routinely hundreds of pixels.
+   *
    * See {@link createDomSurface} for why this is not a transform.
    */
-  setCarry(px: number): void
-  /**
-   * Paint offset standing in for a scroll write the platform will not accept yet.
-   *
-   * The same mechanism as {@link setCarry} and deliberately a separate input, because
-   * the two answer different questions and compose: the carry is the fraction of a
-   * pixel a *completed* write lost, while this is the whole of a correction that has
-   * not been written at all. iOS refuses to move the scroll offset during a touch
-   * gesture — writing it either cancels the fling or is undone by the gesture's own
-   * baseline — so a correction that arrives mid-gesture has to hold the view by moving
-   * the content instead, and is folded into `scrollTop` once the gesture ends.
-   *
-   * Unbounded, unlike the carry: corrections here are routinely hundreds of pixels on
-   * a list whose size estimate was fitted at a different viewport width.
-   */
-  setGestureShift(px: number): void
+  setPaintOffset(px: number): void
   /** Position an item. Offsets are exact floats and must not be rounded. */
   setItemOffset(key: ItemKey, offset: number): void
   /** Register an element for a key. Returns its own detach. */
@@ -102,26 +92,8 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
   const styled = new WeakSet<HTMLElement>()
 
   let lastContentSize: number | null = null
-  let lastCarry = 0
-  let lastShift = 0
+  let lastPaintOffset = 0
   let lastLeadingSpace = 0
-
-  /**
-   * Write the container's paint offset, which two inputs contribute to.
-   *
-   * Summed in one place because they share a single `top` — two setters writing it
-   * independently would each clobber the other's contribution, which is the kind of
-   * bug that only shows up when both are non-zero at once: a sub-pixel landing taken
-   * mid-gesture.
-   *
-   * Applied as `top` on the relatively-positioned container for the same antialiasing
-   * reason as items.
-   */
-  const writeContainerOffset = (): void => {
-    const total = lastCarry + lastShift
-    const container = options.container.current
-    if (container) container.style.top = total === 0 ? '' : `${String(-total)}px`
-  }
 
   const position = (element: HTMLElement, offset: number): void => {
     if (!styled.has(element)) {
@@ -161,16 +133,13 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
       if (container) container.style.marginTop = px === 0 ? '' : `${String(px)}px`
     },
 
-    setCarry(px) {
-      if (px === lastCarry) return
-      lastCarry = px
-      writeContainerOffset()
-    },
-
-    setGestureShift(px) {
-      if (px === lastShift) return
-      lastShift = px
-      writeContainerOffset()
+    setPaintOffset(px) {
+      if (px === lastPaintOffset) return
+      lastPaintOffset = px
+      const container = options.container.current
+      // Applied as `top` on the relatively-positioned container for the same
+      // antialiasing reason as items.
+      if (container) container.style.top = px === 0 ? '' : `${String(-px)}px`
     },
 
     setItemOffset(key, offset) {
@@ -199,8 +168,7 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
     dispose() {
       elements.clear()
       lastContentSize = null
-      lastCarry = 0
-      lastShift = 0
+      lastPaintOffset = 0
       lastLeadingSpace = 0
     },
   }
@@ -211,8 +179,7 @@ export function createNullSurface(): Surface {
   return {
     setContentSize: () => {},
     setLeadingSpace: () => {},
-    setCarry: () => {},
-    setGestureShift: () => {},
+    setPaintOffset: () => {},
     setItemOffset: () => {},
     attachItem: () => () => {},
     hasItem: () => false,
