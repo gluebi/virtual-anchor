@@ -1,5 +1,131 @@
 # virtual-anchor
 
+## 0.5.0
+
+### Minor Changes
+
+- a2b6281: Hold the view during an iOS gesture, instead of lurching by every correction.
+
+  iOS will not move the scroll offset while a touch gesture is in progress. Writing
+  `scrollTop` during a fling cancels it — which is what the momentum write gate fixed — and
+  writing it under a finger is undone by the gesture's own baseline. So a scroll correction
+  mid-gesture fails in _both_ directions, and the gate's answer of deferring it left the
+  content lurching by the full correction instead: measured at 389px for a single row on an
+  iPhone, because a size estimate fitted at desktop width is wrong by hundreds of pixels once
+  the text wraps three times as often.
+
+  The correction now stops going through `scrollTop`. Deferred deltas accumulate into a paint
+  offset on the item container — the same mechanism the sub-pixel carry uses, which moves
+  content without touching the scroll position and so cannot be refused or undone by the
+  platform. When the gesture ends and the gate reopens, the offset is
+  folded into `scrollTop` in a single task: the content jumps back by the shift and the scroll
+  offset moves forward by it, so nothing visibly moves.
+
+  Whatever the platform will not take goes to the carry, bounded by `MAX_CARRY` as it always
+  is — and on WebKit, which truncates written offsets to integers, that is every fold. The
+  shift itself always clears, so nothing is ever held while the gate is open: a correction
+  cannot exceed the content above it, so the fold's target cannot leave the scrollable range
+  and there is no larger residue to strand.
+
+  Three details worth knowing:
+
+  - **Content-space reads now go through one helper.** The anchor, the rendered range and the
+    visibility band all compare against item offsets, so all three read where the content
+    _is_: computing them from the raw offset while a shift is outstanding centres the mounted
+    window up to two viewports from the screen — which paints blank — and reports comments
+    visible that never appeared. `atBottom` and the offset published to consumers stay in
+    scroll space, since both are about the scrollbar.
+  - **The shift is bounded by the scroll range on either side of where you are**, because that
+    is what the displacement actually costs: the content shown at `scrollTop` belongs at
+    `scrollTop + shift`, so the last `shift` pixels in that direction are unreachable and the
+    fold needs that much room to land. Deep in a list that bound is effectively unlimited,
+    which is where flings happen and where the displacement is harmless; near either end it
+    tightens to nothing, and the write is taken instead. Deliberately not a viewport multiple —
+    that was the first attempt, it is unrelated to the thing being protected, and at ~1300px it
+    fired part-way through a real fling and cancelled the momentum this exists to preserve.
+  - **The carry and the shift share one `top`**, so the engine — which already holds both for
+    its own arithmetic — sums them and the surface takes one number. `Surface.setCarry` is
+    renamed `setPaintOffset` to say so: two writers of one property would each clobber the
+    other, invisibly until both are non-zero at once, which is a sub-pixel landing taken
+    mid-gesture.
+
+  **Breaking:** `Surface.setCarry` is now `Surface.setPaintOffset`. Only an implementor of that
+  interface is affected; consumers of `VirtualList`, `useVirtualList` or `createEngine` are not.
+
+  Nothing changes off iOS, where the gate is inert and no shift is ever held — asserted
+  directly.
+
+  Verified on an iPhone 15 Pro Max. Automated coverage asserts the correction is held as a
+  paint offset rather than written, that successive corrections accumulate into one, that the
+  fold on reopen moves `scrollTop` by what the content was holding, that a truncating platform
+  leaves nothing held, that the rendered range follows the content rather than `scrollTop`,
+  that the cap takes the write, that the anchor derivation
+  includes the shift, and that nothing is held off iOS. The `mobile-webkit` project asserts in
+  a real WebKit that no write escapes a gesture; it deliberately does not assert the
+  correction's _size_, which depends on how wrong the demo's estimate happens to be at the
+  device descriptor's viewport rather than on anything the library does.
+
+### Patch Changes
+
+- 8424eda: Stop cancelling iOS momentum scrolling from `engine.publish()`.
+
+  Writing `scrollTop` during a fling cancels it on iOS WebKit. The library guarded against
+  that, but the guard lived inside the scroller and only `scroller.write()` consulted it —
+  while `engine.publish()` wrote scroll offsets directly, from two places, gated only on
+  `!scroller.isScrolling()`. That flag is about _programmatic_ scrolls, so a user's momentum
+  fling was precisely the state in which it let the write through. In a list with
+  variable-height rows, every row measured on mount mid-fling took that path, which is very
+  nearly all of them: momentum died on the first frame after the finger lifted. A list with
+  uniform rows and an accurate estimate produced no correction, no write, and no symptom,
+  which is why this went unnoticed.
+
+  The decision now lives in one place — an internal `ScrollWriteGate` — and the engine's two
+  writes consult the same answer. An eslint rule fails the build on a third ungated
+  `setScrollOffset` call, since two releases of exactly that is how this arrived.
+
+  Two further fixes fall out of it:
+
+  - **The grace period never bounded a fling.** `IOS_TOUCH_GRACE_MS` is 150ms and iOS
+    momentum runs for one to three seconds, so the old guard reopened mid-flight and the
+    next banked correction killed the scroll anyway. The gate is now a state machine —
+    `idle → touching → grace → momentum` — that stays shut until the platform reports the
+    scrolling over, via `scrollend` where available and the settle helper's scroll debounce
+    where not. The 150ms timer keeps its real job of bridging `touchend` to the first
+    momentum event, and two escape hatches guarantee the gate cannot wedge shut: a
+    `touchend` that never scrolls reopens on that timer, and a fling that never settles
+    reopens at a 3s cap.
+  - **A `scrollToIndex` issued mid-fling no longer spends its deadline while refused.** With
+    the closed window now measured in seconds rather than milliseconds, the convergence loop
+    would otherwise burn `SOFT_DEADLINE_MS` and resolve `deadline` with a large deviation for
+    a scroll never given a chance to write.
+
+  A prepend still writes through a shut gate, deliberately: deferring a _model_ change would
+  move the reader by the whole inserted height, which is the one thing an anchored list
+  promises cannot happen. Only _measurement_ corrections are postponed. `publish`'s parameter
+  changes from a boolean to `'none' | 'measure' | 'model'` to carry that distinction by cause
+  rather than by a size threshold, which this file has never had.
+
+  Two honest caveats on that. A postponed correction is re-derived from the anchor when the
+  gate reopens — but the scroll listener re-derives the anchor from the actual offset on every
+  momentum event, so after a real fling the replay normally finds nothing left to do and the
+  correction is _dropped_ rather than applied. That is the right answer for a wobble the
+  reader has already scrolled past, and it genuinely replays only where no scroll intervened
+  (a tap, or the hard cap). And the `'measure'`/`'model'` split is a proxy for "did content
+  above the anchor move", which it does not capture exactly: a measured `header` or
+  `stickyHeader` slot moves the list's origin, so it is a model change wearing a measurement
+  label. Both are noted in the source; neither is a regression against 0.4.0, where the write
+  was simply unconditional.
+
+  Nothing changes off iOS: the gate binds no listeners, arms no timers, and `canWrite()` is a
+  constant `true` on Chromium, Firefox and desktop WebKit.
+
+  Verification is still partly manual. A new `mobile-webkit` Playwright project runs real
+  WebKit behind an iPhone descriptor, so the gate is live and the suite can prove no write
+  escapes a gesture — but Playwright produces no actual momentum, so that momentum _survives_
+  remains a real-device check. New `momentum.dom.test.ts`, `settle.dom.test.ts` and
+  `engine.ios.dom.test.ts` cover the rest; the last of those is the first engine-level iOS
+  coverage this package has had, and its absence is the reason the bypass survived.
+
 ## 0.4.0
 
 ### Minor Changes
