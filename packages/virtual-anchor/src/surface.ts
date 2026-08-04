@@ -44,12 +44,17 @@ export interface Surface {
    */
   setLeadingSpace(px: number): void
   /**
-   * Sub-pixel paint offset for the whole item container.
+   * Paint offset for the whole item container, in px. Positive moves content up.
    *
-   * Recovers the fraction of a pixel the platform refused to take on a scroll write.
+   * Two things arrive here, summed by the engine because both are its arithmetic: the
+   * fraction of a pixel the platform refused on a scroll write, and — on iOS, which
+   * will not move the scroll offset during a touch gesture at all — the whole of a
+   * correction that could not be written yet. Hence "paint offset" rather than "carry":
+   * the second contributor is routinely hundreds of pixels.
+   *
    * See {@link createDomSurface} for why this is not a transform.
    */
-  setCarry(px: number): void
+  setPaintOffset(px: number): void
   /** Position an item. Offsets are exact floats and must not be rounded. */
   setItemOffset(key: ItemKey, offset: number): void
   /** Register an element for a key. Returns its own detach. */
@@ -87,7 +92,7 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
   const styled = new WeakSet<HTMLElement>()
 
   let lastContentSize: number | null = null
-  let lastCarry = 0
+  let lastPaintOffset = 0
   let lastLeadingSpace = 0
 
   const position = (element: HTMLElement, offset: number): void => {
@@ -128,9 +133,9 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
       if (container) container.style.marginTop = px === 0 ? '' : `${String(px)}px`
     },
 
-    setCarry(px) {
-      if (px === lastCarry) return
-      lastCarry = px
+    setPaintOffset(px) {
+      if (px === lastPaintOffset) return
+      lastPaintOffset = px
       const container = options.container.current
       // Applied as `top` on the relatively-positioned container for the same
       // antialiasing reason as items.
@@ -163,7 +168,7 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
     dispose() {
       elements.clear()
       lastContentSize = null
-      lastCarry = 0
+      lastPaintOffset = 0
       lastLeadingSpace = 0
     },
   }
@@ -174,7 +179,7 @@ export function createNullSurface(): Surface {
   return {
     setContentSize: () => {},
     setLeadingSpace: () => {},
-    setCarry: () => {},
+    setPaintOffset: () => {},
     setItemOffset: () => {},
     attachItem: () => () => {},
     hasItem: () => false,

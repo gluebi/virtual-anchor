@@ -101,12 +101,12 @@ describe('createNullSurface', () => {
   })
 })
 
-describe('createDomSurface carry', () => {
+describe('createDomSurface paint offset', () => {
   it('shifts the container up by the residual', () => {
     // Positive carry means the browser stopped short of where we wanted, so content
     // moves up to compensate.
     const { container, surface } = setup()
-    surface.setCarry(0.5)
+    surface.setPaintOffset(0.5)
     expect(container.style.top).toBe('-0.5px')
   })
 
@@ -114,24 +114,24 @@ describe('createDomSurface carry', () => {
     // A fractional translate disables subpixel text antialiasing in Blink for the whole
     // subtree (crbug 573146) — and a sub-pixel carry is fractional by definition.
     const { container, surface } = setup()
-    surface.setCarry(0.25)
+    surface.setPaintOffset(0.25)
     expect(container.style.transform).toBe('')
     expect(container.style.top).toBe('-0.25px')
   })
 
   it('clears the offset at zero rather than writing -0px', () => {
     const { container, surface } = setup()
-    surface.setCarry(0.5)
-    surface.setCarry(0)
+    surface.setPaintOffset(0.5)
+    surface.setPaintOffset(0)
     expect(container.style.top).toBe('')
   })
 
-  it('does not re-write an unchanged carry', () => {
+  it('does not re-write an unchanged paint offset', () => {
     const { container, surface } = setup()
-    surface.setCarry(0.5)
+    surface.setPaintOffset(0.5)
     const spy = vi.spyOn(container.style, 'top', 'set')
 
-    surface.setCarry(0.5)
+    surface.setPaintOffset(0.5)
     expect(spy).not.toHaveBeenCalled()
   })
 })
@@ -253,7 +253,7 @@ describe('createNullSurface', () => {
     const surface = createNullSurface()
     expect(() => {
       surface.setContentSize(100)
-      surface.setCarry(0.5)
+      surface.setPaintOffset(0.5)
       surface.setItemOffset('a', 10)
       surface.attachItem('a', document.createElement('div'))()
       surface.dispose()

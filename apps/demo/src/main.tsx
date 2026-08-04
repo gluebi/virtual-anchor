@@ -61,6 +61,7 @@ if (CONFIG.trace) {
     let taken = 0
     let deferredCount = 0
     let worst = 0
+    let held = 0
 
     setTraceSink((event) => {
       buffer.push(event)
@@ -72,15 +73,20 @@ if (CONFIG.trace) {
       if (deferred) deferredCount++
       else taken++
       if (Math.abs(delta) > Math.abs(worst)) worst = delta
+      held = deferred ? Number(event.data.pendingShift) + delta : 0
 
+      // A write that happened *while* a gesture wanted it deferred is the bound firing —
+      // the one thing that still cancels momentum, and worth naming rather than leaving
+      // to be inferred from a WRITE among DEFERs.
+      const label = deferred ? 'DEFER' : 'WRITE'
       lines.unshift(
-        `${deferred ? 'DEFER' : 'WRITE'} ${String(event.data.restore).padEnd(7)} ` +
-          `Δ${delta.toFixed(1).padStart(9)}  from ${Number(event.data.from).toFixed(0)}`,
+        `${label} ${String(event.data.restore).padEnd(7)} ` +
+          `Δ${delta.toFixed(1).padStart(9)}  room ${Number(event.data.room ?? 0).toFixed(0)}`,
       )
       if (lines.length > 10) lines.pop()
       hud.textContent =
         `writes ${String(taken)}  deferred ${String(deferredCount)}  ` +
-        `worst Δ ${worst.toFixed(1)}\n` +
+        `worst Δ ${worst.toFixed(1)}  held ${held.toFixed(0)}\n` +
         lines.join('\n')
     })
     Object.assign(window, {
@@ -89,6 +95,7 @@ if (CONFIG.trace) {
         taken = 0
         deferredCount = 0
         worst = 0
+        held = 0
         hud.textContent = 'reset'
       },
     })

@@ -173,7 +173,6 @@ const DEFAULT_EDGE_THRESHOLD = 600
  * outlasts the gap between frames of a fling.
  */
 const REPIN_QUIET_MS = 150
-
 /**
  * Whether a publish may move the scroll offset, and on whose authority.
  *
@@ -543,12 +542,38 @@ export function createEngine(initial: EngineOptions): Engine {
     edgeLatched.end = nearEnd
   }
 
-  /** Last applied carry, so an unchanged value is not re-written to the DOM. */
+  /**
+   * The two contributions to the item container's paint offset.
+   *
+   * `carry` is the fraction of a pixel a *completed* scroll write lost; `pendingShift`
+   * is the whole of a correction that has not been written at all, because iOS refuses
+   * to move the scroll offset during a touch gesture — writing it cancels a fling, and
+   * writing it under a finger is undone by the gesture's own baseline. Without the
+   * second one, deferring a correction meant the view lurched by all of it: 389px for a
+   * single row on a phone, since an estimate fitted at desktop width is wrong by
+   * hundreds of pixels once the text wraps three times as often.
+   *
+   * Held apart because the anchor arithmetic needs them separately and they end
+   * differently — the carry is replaced by the next landing, the shift is folded into
+   * `scrollTop` — but written together, because they share one `top`. Two independent
+   * writers would each clobber the other, which stays invisible until both are
+   * non-zero: a sub-pixel landing taken mid-gesture.
+   */
   let carry = 0
+  let pendingShift = 0
+  /** Last sum handed to the surface, so an unchanged value is not re-written. */
+  let paintOffset = 0
+
+  const writePaintOffset = (): void => {
+    const next = carry + pendingShift
+    if (next === paintOffset) return
+    paintOffset = next
+    surface.setPaintOffset(next)
+  }
+
   const applyCarry = (next: number): void => {
-    if (next === carry) return
     carry = next
-    surface.setCarry(next)
+    writePaintOffset()
   }
 
   const notifyVisibility = (events: VisibilityEvent[]): void => {
@@ -652,18 +677,26 @@ export function createEngine(initial: EngineOptions): Engine {
   const writeGate = createScrollWriteGate({ viewport })
 
   /**
+   * Where the content actually sits, in the coordinate space item offsets live in.
+   *
+   * `scrollTop` alone stops being the answer the moment either compensation is
+   * outstanding: the content has been moved without it. Every read that compares
+   * against an item offset goes through here — the anchor, the rendered range, the
+   * visibility band — or it describes a position the view is not at, and each momentum
+   * event then makes it worse rather than holding it still.
+   *
+   * The two reads that deliberately stay in scroll space are `getMaxScrollOffset` and
+   * the offset published to consumers: both are about the scrollbar, which is exactly
+   * the thing the shift is hiding from.
+   */
+  const contentOffset = (): number => viewport.getScrollOffset() + carry + pendingShift
+
+  /**
    * Whether a publish skipped a scroll write because the gate was shut.
    *
-   * A flag rather than a banked offset: the restore is a pure function of the anchor,
-   * the size cache and the geometry, so recomputing it when the gate reopens beats
-   * replaying a number that was only correct for one frame of a moving fling.
-   *
-   * Note what that means in practice for a real fling: the scroll listener re-derives
-   * `anchor` from the actual offset on every momentum event, so by the time the gate
-   * reopens the anchor already describes the uncorrected position and the replay finds
-   * nothing over the threshold. The correction is *dropped*, which is the right answer
-   * for a sub-pixel wobble the reader has already scrolled past. It genuinely replays
-   * only where no scroll intervened — a tap, or the hard cap.
+   * Distinct from {@link pendingShift}: that holds the view *now*, this remembers that
+   * the model should be re-examined once writing is allowed again. The re-publish is
+   * what turns the paint offset back into a real scroll offset.
    */
   let writeDeferred = false
 
@@ -679,45 +712,131 @@ export function createEngine(initial: EngineOptions): Engine {
    * the reader's. Returning a boolean makes both hazards structural — a caller that
    * does its bookkeeping outside the `if` cannot compile into something plausible.
    *
+   * `maxOffset` is passed rather than read, so the room the shift is bounded by shares
+   * the one measurement `publish` already takes.
+   *
    * @returns whether the platform took the write.
    */
-  const writeScroll = (offset: number, restore: Restore): boolean => {
+  const writeScroll = (offset: number, restore: Restore, maxOffset: number): boolean => {
+    // Against the *content* offset, not the raw scroll offset: with a shift
+    // outstanding the two differ by exactly the correction already applied to the
+    // content, so comparing against `scrollTop` would re-apply it every publish.
+    const delta = offset - contentOffset()
+
     // Nothing to do. Kept here so the callers do not each re-derive the threshold;
     // it exists to absorb the disagreement between an integer `clientHeight` and the
     // exact float offset it is compared against.
-    if (Math.abs(offset - viewport.getScrollOffset()) <= 0.01) return false
+    if (Math.abs(delta) <= 0.01) return false
 
     // A model change writes through a shut gate; a measurement waits. See the
     // `Restore` doc for why the two are not interchangeable — in short, a deferred
     // prepend teleports the reader and a deferred measurement does not.
     const deferred = restore !== 'model' && !writeGate.canWrite()
 
-    // The size of each correction, and whether it was taken. This is the number that
-    // says whether deferring one is invisible or a visible lurch: the design assumes
-    // sub-pixel, and a list whose estimate is fitted to a different viewport width
-    // produces hundreds of pixels per row.
+    // The size of each correction and whether it was taken — the pair that says whether
+    // a deferral is invisible or a visible lurch. See `pendingShift` for what that
+    // measured on a device.
     if (TRACING) {
       trace('scroll.write', () => ({
         restore,
         offset,
-        from: viewport.getScrollOffset(),
-        delta: offset - viewport.getScrollOffset(),
+        from: contentOffset(),
+        delta,
         deferred,
+        pendingShift,
+        room: Math.max(0, Math.min(viewport.getScrollOffset(), maxOffset - viewport.getScrollOffset())),
       }))
     }
 
-    if (deferred) {
+    // Hold the view by moving the content the distance `scrollTop` was going to move.
+    // The gesture never sees a scroll write, so nothing cancels it, and the reader sees
+    // the correction they would have seen anyway.
+    //
+    // Bounded by the scroll range on either side of where we are, because that is what
+    // the displacement actually costs. While a shift is outstanding the content shown at
+    // `scrollTop` is the content belonging at `scrollTop + shift`, so the last `shift`
+    // pixels in that direction are unreachable — the reader hits a wall short of the end
+    // — and the fold needs that much room to land. Both limits are the distance to the
+    // nearer end, so one expression covers them.
+    //
+    // Deliberately *not* a viewport multiple, which is what this was first written as and
+    // is unrelated to the thing being protected: two viewports is roughly 1300px, a fling
+    // through mis-estimated text accumulates that in a handful of rows, and the cap then
+    // fired mid-fling and took the write — cancelling exactly the momentum the gate
+    // exists to preserve. Measured on a device: 43 deferrals in one gesture. Deep in a
+    // list this bound is effectively unlimited, which is where flings happen and where
+    // the displacement is harmless; near either end it tightens to nothing, which is
+    // where it matters.
+    //
+    // Not the magnitude heuristic this file refuses elsewhere: both branches correct, and
+    // this only chooses which mechanism carries it — the same shape as `MAX_CARRY`, on the
+    // same CSS property, with the same "refusing is the safe failure" logic.
+    const held = pendingShift + delta
+    const room = Math.max(0, Math.min(viewport.getScrollOffset(), maxOffset - viewport.getScrollOffset()))
+    if (deferred && Math.abs(held) <= room) {
+      // Only here. Set on a path that went on to write, the flag would ask for a
+      // re-publish that has nothing left to do.
       writeDeferred = true
+      pendingShift = held
+      // Deliberately not written yet: `publish` flushes the paint offset in its single
+      // ordered pass, after the last read. A style write here would force a second
+      // synchronous layout on the hottest path in the file — every row measured during
+      // a fling.
       return false
     }
 
+    commitScroll(offset)
+    return true
+  }
+
+  /**
+   * Write a scroll offset and settle everything that has to move with it.
+   *
+   * Extracted so the two writers cannot disagree, which they did: the reconcile kept the
+   * remainder a clamped write could not take while the cap path dropped it, and dropping
+   * it is exactly how a reader ends up permanently displaced at the end of a list.
+   *
+   * Whatever the platform would not take goes to the carry, which is what the carry is
+   * for, bounded by `MAX_CARRY` as usual. On WebKit — which truncates a written offset to
+   * an integer — that is every fold. The shift itself always clears, which is what makes
+   * "nothing held while the gate is open" an invariant rather than an intention: a
+   * correction can never exceed the content above it, so the fold's target cannot leave
+   * the scrollable range and there is no larger residue to strand.
+   */
+  const commitScroll = (offset: number): void => {
     // Declare it first: the scroll event this produces must not be mistaken for the
     // user grabbing the scrollbar, which would cancel any in-flight programmatic
     // scroll and flip the tracked scroll direction.
     scroller.markSelfWrite(offset)
     // eslint-disable-next-line no-restricted-syntax -- the engine's single gated write
     viewport.setScrollOffset(offset)
-    return true
+
+    // Cleared *after* the write, so the two never both describe the same correction.
+    pendingShift = 0
+    applyCarry(carryFor(offset, viewport.getScrollOffset()))
+  }
+
+  /** Bound the queue at its one declared maximum, wherever an intent is recorded. */
+  const pushRestoreIntent = (offset: number): void => {
+    restoreIntents.push(offset)
+    if (restoreIntents.length > MAX_RESTORE_INTENTS) restoreIntents.shift()
+  }
+
+  /**
+   * Turn the outstanding paint offset back into a real scroll offset.
+   *
+   * Called when the gate reopens, which is the first moment the platform will take the
+   * write. Both halves happen in one task so no frame is painted between them — the
+   * content jumps back by the shift as `scrollTop` moves forward by it, and the visible
+   * result is that nothing moves at all.
+   */
+  const reconcileGestureShift = (): void => {
+    if (pendingShift === 0) return
+
+    const target = viewport.getScrollOffset() + pendingShift
+    pushRestoreIntent(target)
+    commitScroll(target)
+    writePaintOffset()
   }
 
   /**
@@ -750,6 +869,10 @@ export function createEngine(initial: EngineOptions): Engine {
     // writes are `scrollTop` and the sub-pixel carry, neither of which alters the
     // scroller's extent by more than the threshold exists to absorb.
     const maxOffset = viewport.getMaxScrollOffset()
+    // Hoisted for the same reason and read once for the same reason: the gesture-shift
+    // cap and the published state both want the same answer from the same moment, and
+    // `getViewportSize` is three layout reads on an element scroller.
+    const viewportSize = viewport.getViewportSize()
 
     // The anchor keeps the *user's* position stable. While a programmatic scroll
     // is in flight the scroller is authoritative instead — restoring an anchor
@@ -797,37 +920,35 @@ export function createEngine(initial: EngineOptions): Engine {
       // describing wherever the reader was before they were pinned, so the moment
       // following stops — the option flipping off, the reader scrolling back — the
       // next publish restores that stale position and the view jumps backwards.
-      if (writeScroll(maxOffset, restore)) {
+      if (writeScroll(maxOffset, restore, maxOffset)) {
         applyCarry(0)
         // Synchronously, rather than waiting for the scroll event: a publish later in
         // the same tick would otherwise resolve the old anchor and fight this write.
         // The event still arrives and derives the same value again.
-        anchor = deriveAnchor(viewport.getScrollOffset(), cache, geometry())
+        anchor = deriveAnchor(contentOffset(), cache, geometry())
       }
     } else if (restoreScroll && anchor && !scroller.isScrolling()) {
       const restored = resolveAnchorOffset(anchor, cache, geometry())
       // A null restore means the anchored key left the window. For a grows-only
       // window that cannot happen; if it does, holding position beats jumping.
-      if (restored !== null && writeScroll(restored, restore)) {
+      if (restored !== null && writeScroll(restored, restore, maxOffset)) {
         // Not `markSelfWrite`'s queue but the engine's own: do not re-derive the
         // anchor from this write's read-back, which may have been snapped to a whole
         // pixel. Absorbing that into `offsetWithinItem` re-introduces the residual
         // the carry just removed.
-        restoreIntents.push(restored)
-        if (restoreIntents.length > MAX_RESTORE_INTENTS) restoreIntents.shift()
-
-        // Recover the fraction the platform refused to take — the same treatment
-        // every scroller write gets. This path had been writing raw, which meant the
-        // *most frequent* correction (a measurement landing, a prepend) was the one
-        // place the carry did not apply. It went unnoticed only because a first-frame
-        // `clearAll()` used to force a fresh scroller write straight afterwards; with
-        // that gone, a cold-start deep link lands exactly 0.5px short without this.
-        applyCarry(carryFor(restored, viewport.getScrollOffset()))
+        pushRestoreIntent(restored)
       }
     }
 
+    // Two offsets, deliberately. The rendered range and the visibility band compare
+    // against item offsets, so they want where the content *is*: computing them from the
+    // raw offset while a shift is outstanding centres the mounted window up to two
+    // viewports away from the screen, which paints blank, and reports comments visible
+    // that never appeared. `atBottom` and the published offset are about the scrollbar,
+    // which is the one thing the shift is deliberately hiding from.
+    const contentAt = contentOffset()
     const scrollOffset = viewport.getScrollOffset()
-    const ranges = computeRanges(scrollOffset)
+    const ranges = computeRanges(contentAt)
     const items = itemsFor(ranges.rendered)
     const previous = store.getState()
     const atBottom = atBottomWithin(maxOffset, scrollOffset)
@@ -839,7 +960,7 @@ export function createEngine(initial: EngineOptions): Engine {
       visibleRange: ranges.visible,
       totalSize,
       scrollOffset,
-      viewportSize: viewport.getViewportSize(),
+      viewportSize,
       scrolling: scroller.isScrolling(),
       atBottom,
     })
@@ -851,6 +972,10 @@ export function createEngine(initial: EngineOptions): Engine {
     // Items not yet attached are positioned by `observeItem` the moment their element
     // exists, which is before paint.
     for (const item of items) surface.setItemOffset(item.key, item.start)
+    // Last, and once: both contributions to the container's offset are known by now,
+    // and holding the write until after every read keeps a deferred correction from
+    // forcing a second synchronous layout mid-fling.
+    writePaintOffset()
 
     // Keep the ref-callback cache bounded by what is rendered rather than by
     // everything ever scrolled past.
@@ -1198,6 +1323,10 @@ export function createEngine(initial: EngineOptions): Engine {
       // individually would write the same offset repeatedly.
       cleanups.push(
         writeGate.onOpen(() => {
+          // Before the re-publish, not after: the publish re-derives the offset from
+          // the anchor, and it has to be comparing against a `scrollTop` that already
+          // owns the correction rather than one a paint offset is standing in for.
+          reconcileGestureShift()
           if (!writeDeferred) return
           writeDeferred = false
           publish('measure')
@@ -1249,7 +1378,7 @@ export function createEngine(initial: EngineOptions): Engine {
             // shifting half a pixel on the first prepend after a landing. Invisible while
             // every inset was a whole number; a sticky header that wraps to 85.5px makes it
             // routine.
-            anchor = deriveAnchor(offset + carry, cache, geometry())
+            anchor = deriveAnchor(offset + carry + pendingShift, cache, geometry())
           } else {
             restoreIntents.splice(0, restoreIndex + 1)
           }
@@ -1323,7 +1452,7 @@ export function createEngine(initial: EngineOptions): Engine {
       // origin, and an anchor derived against an origin of zero and then resolved
       // against the real one is wrong by the whole spacer.
       syncLeadingSpace(cache.totalSize())
-      anchor = deriveAnchor(viewport.getScrollOffset(), cache, geometry())
+      anchor = deriveAnchor(contentOffset(), cache, geometry())
       publish('none')
 
       const teardown = (): void => {
@@ -1334,7 +1463,14 @@ export function createEngine(initial: EngineOptions): Engine {
         // since `attach()` is once-only, tearing the gate down on unmount would
         // leave a remounted engine writing `scrollTop` through nothing at all. It
         // goes in `dispose()`, with the scroller.
+        //
+        // The shift *is* cleared: it stands in for a scroll write, and an unmounted
+        // engine has no business holding the content away from the scroll offset. The
+        // surface is about to be torn down or re-attached either way.
         writeDeferred = false
+        pendingShift = 0
+        pendingShift = 0
+        writePaintOffset()
         if (unmount === teardown) unmount = null
       }
       unmount = teardown

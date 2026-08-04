@@ -145,7 +145,7 @@ const setup = (
       state.leadingSpace = px
       writes.push(`lead:${String(px)}`)
     },
-    setCarry: (px) => writes.push(`carry:${String(px)}`),
+    setPaintOffset: (px) => writes.push(`paint:${String(px)}`),
     setItemOffset: (key, offset) => writes.push(`item:${String(key)}@${String(offset)}`),
     attachItem: (key, element) => {
       elements.set(key, element)
