@@ -174,18 +174,6 @@ const DEFAULT_EDGE_THRESHOLD = 600
  */
 const REPIN_QUIET_MS = 150
 /**
- * How far the content may be held away from the scroll offset, in viewports.
- *
- * A safety valve on {@link Surface.setGestureShift}, not a tuning knob. While a shift
- * is outstanding the scrollbar, `atBottom` and both edge thresholds are reading a
- * position the content is no longer at, and the discrepancy is only recoverable while
- * there is scroll range left to absorb it. Two viewports is comfortably more than any
- * single gesture accumulates in practice — the measured worst case is one tall row —
- * and small enough that hitting either end of the list cannot snap by a screenful.
- */
-const MAX_GESTURE_SHIFT_VIEWPORTS = 2
-
-/**
  * Whether a publish may move the scroll offset, and on whose authority.
  *
  * The distinction exists because iOS refuses scroll writes during a fling and the two
@@ -724,12 +712,12 @@ export function createEngine(initial: EngineOptions): Engine {
    * the reader's. Returning a boolean makes both hazards structural — a caller that
    * does its bookkeeping outside the `if` cannot compile into something plausible.
    *
-   * `viewportSize` is passed rather than read, so the cap shares the one measurement
-   * `publish` already takes.
+   * `maxOffset` is passed rather than read, so the room the shift is bounded by shares
+   * the one measurement `publish` already takes.
    *
    * @returns whether the platform took the write.
    */
-  const writeScroll = (offset: number, restore: Restore, viewportSize: number): boolean => {
+  const writeScroll = (offset: number, restore: Restore, maxOffset: number): boolean => {
     // Against the *content* offset, not the raw scroll offset: with a shift
     // outstanding the two differ by exactly the correction already applied to the
     // content, so comparing against `scrollTop` would re-apply it every publish.
@@ -756,6 +744,7 @@ export function createEngine(initial: EngineOptions): Engine {
         delta,
         deferred,
         pendingShift,
+        room: Math.max(0, Math.min(viewport.getScrollOffset(), maxOffset - viewport.getScrollOffset())),
       }))
     }
 
@@ -763,14 +752,28 @@ export function createEngine(initial: EngineOptions): Engine {
     // The gesture never sees a scroll write, so nothing cancels it, and the reader sees
     // the correction they would have seen anyway.
     //
-    // Capped, because content and scroll offset drift apart while this accumulates:
-    // past the cap, taking the write — and losing the fling — beats holding a shift so
-    // large that reaching either end of the list snaps by a screenful. Not the
-    // magnitude heuristic this file refuses elsewhere: both branches correct, and the
-    // cap only chooses which mechanism carries it. Same shape as `MAX_CARRY`, on the
+    // Bounded by the scroll range on either side of where we are, because that is what
+    // the displacement actually costs. While a shift is outstanding the content shown at
+    // `scrollTop` is the content belonging at `scrollTop + shift`, so the last `shift`
+    // pixels in that direction are unreachable — the reader hits a wall short of the end
+    // — and the fold needs that much room to land. Both limits are the distance to the
+    // nearer end, so one expression covers them.
+    //
+    // Deliberately *not* a viewport multiple, which is what this was first written as and
+    // is unrelated to the thing being protected: two viewports is roughly 1300px, a fling
+    // through mis-estimated text accumulates that in a handful of rows, and the cap then
+    // fired mid-fling and took the write — cancelling exactly the momentum the gate
+    // exists to preserve. Measured on a device: 43 deferrals in one gesture. Deep in a
+    // list this bound is effectively unlimited, which is where flings happen and where
+    // the displacement is harmless; near either end it tightens to nothing, which is
+    // where it matters.
+    //
+    // Not the magnitude heuristic this file refuses elsewhere: both branches correct, and
+    // this only chooses which mechanism carries it — the same shape as `MAX_CARRY`, on the
     // same CSS property, with the same "refusing is the safe failure" logic.
     const held = pendingShift + delta
-    if (deferred && Math.abs(held) <= MAX_GESTURE_SHIFT_VIEWPORTS * viewportSize) {
+    const room = Math.max(0, Math.min(viewport.getScrollOffset(), maxOffset - viewport.getScrollOffset()))
+    if (deferred && Math.abs(held) <= room) {
       // Only here. Set on a path that went on to write, the flag would ask for a
       // re-publish that has nothing left to do.
       writeDeferred = true
@@ -917,7 +920,7 @@ export function createEngine(initial: EngineOptions): Engine {
       // describing wherever the reader was before they were pinned, so the moment
       // following stops — the option flipping off, the reader scrolling back — the
       // next publish restores that stale position and the view jumps backwards.
-      if (writeScroll(maxOffset, restore, viewportSize)) {
+      if (writeScroll(maxOffset, restore, maxOffset)) {
         applyCarry(0)
         // Synchronously, rather than waiting for the scroll event: a publish later in
         // the same tick would otherwise resolve the old anchor and fight this write.
@@ -928,7 +931,7 @@ export function createEngine(initial: EngineOptions): Engine {
       const restored = resolveAnchorOffset(anchor, cache, geometry())
       // A null restore means the anchored key left the window. For a grows-only
       // window that cannot happen; if it does, holding position beats jumping.
-      if (restored !== null && writeScroll(restored, restore, viewportSize)) {
+      if (restored !== null && writeScroll(restored, restore, maxOffset)) {
         // Not `markSelfWrite`'s queue but the engine's own: do not re-derive the
         // anchor from this write's read-back, which may have been snapped to a whole
         // pixel. Absorbing that into `offsetWithinItem` re-introduces the residual

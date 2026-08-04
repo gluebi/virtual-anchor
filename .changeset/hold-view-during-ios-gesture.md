@@ -33,10 +33,14 @@ Three details worth knowing:
   window up to two viewports from the screen — which paints blank — and reports comments
   visible that never appeared. `atBottom` and the offset published to consumers stay in
   scroll space, since both are about the scrollbar.
-- **The shift is capped at two viewports.** While it is outstanding the scrollbar, `atBottom`
-  and both edge thresholds are reading a position the content is no longer at, and the
-  discrepancy is only recoverable while scroll range remains to absorb it. Past the cap the
-  write is taken and the fling is sacrificed, which is the lesser harm.
+- **The shift is bounded by the scroll range on either side of where you are**, because that
+  is what the displacement actually costs: the content shown at `scrollTop` belongs at
+  `scrollTop + shift`, so the last `shift` pixels in that direction are unreachable and the
+  fold needs that much room to land. Deep in a list that bound is effectively unlimited,
+  which is where flings happen and where the displacement is harmless; near either end it
+  tightens to nothing, and the write is taken instead. Deliberately not a viewport multiple —
+  that was the first attempt, it is unrelated to the thing being protected, and at ~1300px it
+  fired part-way through a real fling and cancelled the momentum this exists to preserve.
 - **The carry and the shift share one `top`**, so the engine — which already holds both for
   its own arithmetic — sums them and the surface takes one number. `Surface.setCarry` is
   renamed `setPaintOffset` to say so: two writers of one property would each clobber the

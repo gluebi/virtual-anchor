@@ -541,10 +541,31 @@ describe('the engine on iOS WebKit', () => {
     expect(Math.abs(h.paintOffset())).toBeLessThanOrEqual(1)
   })
 
-  it('takes the write rather than holding a shift larger than the cap', () => {
-    // Past the cap the scrollbar, `atBottom` and both edge thresholds are reading a
-    // position the content is nowhere near, and only a shrinking amount of scroll range
-    // is left to absorb it. Losing the fling is the lesser harm.
+  it('holds a correction far larger than a viewport when deep in the list', () => {
+    // The regression that reached a device: the bound was first written as two viewports,
+    // roughly 1300px, and a fling through mis-estimated text accumulates that in a handful
+    // of rows — so it fired mid-fling and took the write, cancelling the momentum the gate
+    // exists to preserve. Deep in a list there is range on both sides and the displacement
+    // costs nothing, so it must be held however large it is.
+    const h = setup({ estimateSize: () => 100 })
+    h.scroll(500_000)
+    touch(h.scroller, 'touchstart')
+    touch(h.scroller, 'touchend')
+    vi.advanceTimersByTime(50)
+    h.scroll(500_000)
+    const scrollsBefore = h.scrollWrites().length
+
+    h.mountItem('c10', 100)
+    h.measure('c10', 20_000)
+
+    expect(h.scrollWrites().slice(scrollsBefore)).toEqual([])
+    expect(h.paintOffset()).toBeGreaterThan(15_000)
+  })
+
+  it('takes the write rather than holding a shift with no room to absorb it', () => {
+    // Near an end the displacement is unaffordable: the content shown at `scrollTop` is
+    // the content belonging at `scrollTop + shift`, so the last `shift` pixels are
+    // unreachable and the fold has nowhere to land. Losing the fling is the lesser harm.
     const h = setup({ count: 400 })
     fling(h, 5000)
     const scrollsBefore = h.scrollWrites().length
