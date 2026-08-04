@@ -260,6 +260,9 @@ export function App(): ReactNode {
       const key = String(event.key)
       entersRef.current.set(key, (entersRef.current.get(key) ?? 0) + 1)
     }
+    // The ref above still records everything, so the suite's assertions are unaffected;
+    // what `quiet` drops is only the React state that repaints the panel.
+    if (CONFIG.quiet) return
     setEvents((previous) => [...batch, ...previous].slice(0, 60))
     setSeen((previous) => {
       const next = new Set(previous)
@@ -666,7 +669,7 @@ export function App(): ReactNode {
             once: CONFIG.once,
           }}
           onVisibilityChange={onVisibilityChange}
-          onVisibleRangeChange={setVisibleRange}
+          {...(CONFIG.quiet ? {} : { onVisibleRangeChange: setVisibleRange })}
           onEdgeReached={onEdgeReached}
           followOutput={CONFIG.follow}
           alignToBottom={CONFIG.alignToBottom}

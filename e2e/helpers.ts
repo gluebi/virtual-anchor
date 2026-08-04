@@ -62,6 +62,12 @@ export interface DemoHandle {
 declare global {
   interface Window {
     __list: DemoHandle
+    /**
+     * Count of `scrollTop` writes to the scrollport, when a spec has installed the
+     * counting accessor. Declared here for the same reason `__list` is: so no spec
+     * needs a local cast, and so the write and the read cannot disagree about the type.
+     */
+    __scrollWrites?: number
   }
 }
 

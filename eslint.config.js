@@ -101,6 +101,39 @@ export default defineConfig(
   },
 
   {
+    // Every scroll write must go through the momentum gate.
+    //
+    // Structural, because the alternative failed: the guard against writing
+    // `scrollTop` during an iOS fling lived inside the scroller, and `engine.publish`
+    // acquired two writes of its own that simply did not consult it — for two
+    // releases, invisibly, because nothing on the iOS path was tested above the
+    // scroller. A grep-shaped rule is not elegant, but it is the only thing that
+    // makes a *third* such site fail the build rather than ship.
+    //
+    // Scoped to the whole library, not to the two files that already write. The bug
+    // it exists for was `engine.ts` *acquiring* writes that `scroller.ts`'s guard did
+    // not cover, so a rule listing exactly those two files cannot catch the next one —
+    // a write added to `resizer.ts`, or to a module that does not exist yet, would be
+    // unrestricted. `viewport.ts` is where `setScrollOffset` is defined and the tests
+    // are where it is faked, so both are exempted below.
+    files: ['packages/virtual-anchor/src/**/*.{ts,tsx}'],
+    ignores: [
+      'packages/virtual-anchor/src/viewport.ts',
+      'packages/virtual-anchor/src/**/*.test.*',
+    ],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        {
+          selector: "CallExpression[callee.property.name='setScrollOffset']",
+          message:
+            'Route scroll writes through the momentum gate: check writeGate.canWrite() first, or defer. See issue #26.',
+        },
+      ],
+    },
+  },
+
+  {
     files: ['scripts/**/*.mjs'],
     rules: {
       // Release scripts are command-line tools: reporting what they did on stdout is the

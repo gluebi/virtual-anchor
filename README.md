@@ -452,8 +452,15 @@ Coverage thresholds are per-file floors set at what the suite actually reaches, 
 they cannot quietly slip. They were enforced on three files once, which is how the
 integration layer and the whole React adapter came to sit at 0% behind a green build.
 
-**Not verified here:** the iOS momentum path, which needs a real device — a
-simulator's scrolling does not reproduce WebKit's deferred-write behaviour.
+The `mobile-webkit` project runs the same WebKit behind an iPhone descriptor, so
+`isIOSWebKit()` is genuinely true and the momentum write gate is live. That is what
+verifies the gate's *wiring* — that no `scrollTop` write escapes while a gesture is in
+flight, and that a prepend still writes anyway.
+
+**Still not verified here:** that momentum itself survives. Playwright dispatches touch
+events but produces no fling, and a simulator's scrolling does not reproduce WebKit's
+deferred-write behaviour either — so the symptom needs a real device even though the
+defect behind it no longer does.
 
 ## License
 

@@ -170,11 +170,16 @@ test.describe('followOutput', () => {
     expect(await distanceFromBottom(page)).toBeLessThanOrEqual(TOLERANCE)
   })
 
-  test('survives a momentum fling on WebKit', async ({ page, browserName }) => {
-    // iOS defers scroll writes during touch and momentum, banking them in
-    // `deferredCorrection`. A follow write lands in exactly that path, so the one
-    // engine that truncates scroll offsets is the one to check it against.
-    test.skip(browserName !== 'webkit', 'the deferred-write path is WebKit’s')
+  test('survives a hard wheel fling on WebKit', async ({ page, browserName }) => {
+    // Renamed, because the old name claimed more than the test does: this drives a
+    // wheel on *desktop* WebKit, where `isIOSWebKit()` is false and the momentum write
+    // gate is inert, so it never touched the deferred-write path at all. What it does
+    // check is still worth checking — that following re-pins after a violent scroll on
+    // the one engine that truncates scroll offsets to integers.
+    //
+    // The gate itself is covered by `ios-momentum.spec.ts` under the `mobile-webkit`
+    // project, and by `engine.ios.dom.test.ts`.
+    test.skip(browserName !== 'webkit', 'integer-only scroll offsets are WebKit’s')
 
     await open(page, FOLLOWING)
     await page.locator('.scroller').hover()

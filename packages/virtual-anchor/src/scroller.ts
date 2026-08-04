@@ -5,7 +5,9 @@ import {
   offsetForIndex,
 } from './anchor.js'
 import { visibleSizeOf, type ListInsets } from './listGeometry.js'
-import { isIOSWebKit, prefersReducedMotion, supportsScrollEnd } from './env.js'
+import { prefersReducedMotion } from './env.js'
+import { createScrollWriteGate, type ScrollWriteGate } from './momentum.js'
+import { onScrollSettled } from './settle.js'
 import { isTracing, TRACING, trace } from './trace.js'
 import type { SizeCache } from './sizeCache.js'
 import type {
@@ -41,8 +43,6 @@ const STABLE_FRAMES = 2
 const SOFT_DEADLINE_MS = 2000
 /** Hard safety valve, so a pathologically unstable list cannot hang a promise. */
 const HARD_DEADLINE_MS = 5000
-/** Fallback settle timeout where `scrollend` is unavailable. */
-const SCROLL_END_FALLBACK_MS = 150
 /** Time constant for the self-driven smooth approach. */
 const SMOOTH_TAU_MS = 120
 /**
@@ -55,8 +55,6 @@ const SMOOTH_TAU_MS = 120
  * is imperceptible anyway.
  */
 const SMOOTH_MIN_STEP = 1
-/** iOS only fires touch events at the start of momentum, so a timer is needed. */
-const IOS_TOUCH_GRACE_MS = 150
 
 export interface ScrollerOptions {
   viewport: Viewport
@@ -101,6 +99,15 @@ export interface ScrollerOptions {
   now?: () => number
   requestFrame?: (callback: () => void) => number
   cancelFrame?: (handle: number) => void
+  /**
+   * The momentum-aware write gate, shared with whoever else writes scroll offsets.
+   *
+   * Optional so a standalone `createScroller` still guards itself; the engine passes
+   * its own in, because its two direct writes have to consult the same answer. They
+   * did not, which is the whole of issue #26: a measurement landing mid-fling wrote
+   * `scrollTop` straight past this module and cancelled the fling.
+   */
+  writeGate?: ScrollWriteGate
 }
 
 export interface Scroller {
@@ -198,6 +205,14 @@ interface PendingScroll {
   lastModelChangeAt: number
   /** When `step` last ran, so the smooth approach can advance by elapsed time. */
   lastStepAt: number
+  /**
+   * When `step` last ran at all, including frames the write gate blocked.
+   *
+   * Separate from {@link lastStepAt} because it answers a different question: that
+   * one is "how far should the easing advance", this one is "how much time should
+   * the deadline not be charged for".
+   */
+  lastTickAt: number
   iterations: number
   resolve: (result: ScrollResult) => void
 }
@@ -255,10 +270,12 @@ export function createScroller(options: ScrollerOptions): Scroller {
   }
 
   // iOS WebKit: writing scrollTop during momentum cancels the fling, so
-  // corrections are banked until the gesture is demonstrably over.
-  const isIOS = isIOSWebKit()
-  let iosTouching = false
-  let iosGraceUntil = 0
+  // corrections are banked until the gesture is demonstrably over. The decision of
+  // *when* that is lives in the gate, which the engine shares so its own writes
+  // cannot bypass it.
+  const gate = options.writeGate ?? createScrollWriteGate({ viewport })
+  /** Whether this scroller built the gate and must therefore dispose of it. */
+  const ownsGate = options.writeGate === undefined
   let deferredCorrection = 0
 
   const cleanups: (() => void)[] = []
@@ -297,6 +314,30 @@ export function createScroller(options: ScrollerOptions): Scroller {
     if (attached || disposed) return
     attached = true
 
+    // First, and unconditionally. The gate's listeners must be registered ahead of
+    // the engine's scroll and settle handlers — `engine.mount()` calls this before
+    // binding either — so that by the time the engine asks `canWrite()` the gate has
+    // already seen the same event and transitioned.
+    gate.attach()
+    // Two things wait on the gate reopening.
+    //
+    // The banked correction needs somewhere to go once the fling is over. It used to
+    // ride on the next scroll event, which worked only because the guard reopened
+    // *during* momentum while events were still arriving. Now that it stays shut
+    // until settle, the reopening is the last thing that happens — so the flush has
+    // to hang off that rather than off an event that will never come.
+    //
+    // And the convergence loop parks itself rather than spinning through a fling, so
+    // this is what wakes it. Guarded on `pending` because the scroll it was running for
+    // may have been replaced or cancelled while it slept, and on `frame` because a
+    // `notifyModelChanged` may already have restarted it.
+    cleanups.push(
+      gate.onOpen(() => {
+        flushDeferredCorrection()
+        schedule()
+      }),
+    )
+
     // `scrollend` is corroboration, not the primary mechanism: the rAF loop is what
     // establishes that the *target* has stopped moving, which no scroll event can tell
     // you. What this adds is latency — once the platform says scrolling has ended and we
@@ -322,33 +363,21 @@ export function createScroller(options: ScrollerOptions): Scroller {
       for (const type of events) element.removeEventListener(type, cancelOnInput)
     })
 
-    if (isIOS) {
-      const onTouchStart = (): void => {
-        iosTouching = true
-      }
-      const onTouchEnd = (): void => {
-        iosTouching = false
-        iosGraceUntil = now() + IOS_TOUCH_GRACE_MS
-      }
-      element.addEventListener('touchstart', onTouchStart, { passive: true })
-      element.addEventListener('touchend', onTouchEnd, { passive: true })
-      element.addEventListener('touchcancel', onTouchEnd, { passive: true })
-      cleanups.push(() => {
-        element.removeEventListener('touchstart', onTouchStart)
-        element.removeEventListener('touchend', onTouchEnd)
-        element.removeEventListener('touchcancel', onTouchEnd)
-      })
-    }
   }
 
   /** Whether it is currently safe to write a scroll offset. */
   const canWriteScroll = (): boolean => {
-    if (!isIOS) return true
-    if (iosTouching) return false
-    if (now() < iosGraceUntil) return false
+    if (!gate.canWrite()) return false
+    // iOS only, like everything else here. Applying the range test on every platform
+    // was a regression caught by the demo's e2e suite: Chromium reports an offset
+    // outside `[0, max]` often enough — mid-clamp, while content is growing — that
+    // refusing those writes stalled an ordinary `scrollTop` nudge outright.
+    if (!gate.isActive()) return true
 
     // Refuse while in rubber-band overscroll: a write there snaps the page to the
-    // clamped value the moment the bounce ends.
+    // clamped value the moment the bounce ends. Kept here rather than in the gate
+    // because it is a *position* test, not a time one — the gate answers "is a
+    // gesture in flight", runs on every publish, and reads no geometry.
     const offset = viewport.getScrollOffset()
     return offset >= 0 && offset <= viewport.getMaxScrollOffset()
   }
@@ -439,10 +468,37 @@ export function createScroller(options: ScrollerOptions): Scroller {
       return
     }
     rememberIntent(offset)
+    // eslint-disable-next-line no-restricted-syntax -- gated by canWriteScroll above
     viewport.setScrollOffset(offset)
 
     // Recover the fraction the platform refused to take, as a visual offset.
     applyCarry(carryFor(offset, viewport.getScrollOffset()))
+  }
+
+  /**
+   * Apply a correction banked while writing was refused.
+   *
+   * A *delta*, not a destination: what was banked is how far the view needed to move,
+   * and by the time it can be applied the fling has carried the scroller somewhere
+   * else entirely. Replaying the original absolute offset would undo the gesture.
+   *
+   * Reached from two places, because there are two reasons a write gets refused and
+   * they end differently. A gesture-driven refusal ends when the gate reopens, and
+   * there may be no scroll event after that. A rubber-band refusal never moves the
+   * gate at all — the bounce simply comes back into range — so the next scroll event
+   * is the only signal it is over.
+   */
+  const flushDeferredCorrection = (): void => {
+    if (deferredCorrection === 0 || !canWriteScroll()) return
+
+    const offset = viewport.getScrollOffset()
+    const next = offset + deferredCorrection
+    // At the bottom clamp a negative correction has already been absorbed by the
+    // browser; replaying it would lift the list off the end.
+    const max = viewport.getMaxScrollOffset()
+    deferredCorrection = 0
+    if (offset >= max && next < offset) return
+    write(Math.min(Math.max(next, 0), max))
   }
 
   const finish = (settled: boolean, reason: ScrollEndReason): void => {
@@ -484,7 +540,38 @@ export function createScroller(options: ScrollerOptions): Scroller {
     const current = pending
     if (!current || disposed) return
 
-    const elapsed = now() - current.startedAt
+    // A scroll that is not allowed to move must not be allowed to time out either.
+    // The gate can now stay shut for the length of a fling — seconds, not the 150ms
+    // it used to be — and a loop whose clock kept running through that would burn
+    // `SOFT_DEADLINE_MS` and resolve `deadline` with a large deviation for a scroll
+    // that was never given a single chance to write. So the deadline clock is
+    // suspended: carry its origins forward by the time that just passed.
+    //
+    // `lastTickAt` rather than `lastStepAt`, which belongs to the smooth integrator
+    // and is only touched on frames that actually advance. Measuring the suspension
+    // against that would bill the first blocked frame for every open frame before it.
+    //
+    // Gated on the *gesture*, not on `canWriteScroll()`, which also refuses during
+    // rubber-band overscroll. Two reasons: a bounce is ~300ms and well inside every
+    // deadline, so it needs no suspension; and the positional half of that predicate
+    // reads `scrollTop` and `scrollHeight`, which has no business running at the top of
+    // every frame of every ordinary scroll.
+    const tick = now()
+    const sinceTick = Math.max(tick - current.lastTickAt, 0)
+    current.lastTickAt = tick
+    if (!gate.canWrite()) {
+      current.startedAt += sinceTick
+      current.lastModelChangeAt += sinceTick
+      current.lastStepAt += sinceTick
+      // Sleep rather than spin. The gate stays shut for the length of a fling, so
+      // re-requesting here would schedule a main-thread wakeup every frame for up to
+      // `MOMENTUM_MAX_MS` — hundreds of them, all guaranteed to do nothing — during the
+      // one moment on iOS where contention is most visible. `attach` subscribes the
+      // resume to `gate.onOpen`, which is the event that ends the wait.
+      return
+    }
+
+    const elapsed = tick - current.startedAt
     if (elapsed > HARD_DEADLINE_MS) {
       finish(false, 'deadline')
       return
@@ -515,8 +602,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // Either the model has been still for long enough, or the platform has told us the
     // scrolling itself is over. The second is strictly better information when it
     // arrives, and it usually arrives sooner.
-    const quiet =
-      settledExternally || now() - current.lastModelChangeAt > MODEL_QUIET_MS
+    const quiet = settledExternally || tick - current.lastModelChangeAt > MODEL_QUIET_MS
 
     if (isTracing()) {
       traceStep({
@@ -563,7 +649,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
           // takes the same wall clock at any frame rate.
           const from = viewport.getScrollOffset()
           const elapsedSinceStep = Math.min(
-            Math.max(now() - current.lastStepAt, 0),
+            Math.max(tick - current.lastStepAt, 0),
             MAX_STEP_MS,
           )
           const k = 1 - Math.exp(-elapsedSinceStep / SMOOTH_TAU_MS)
@@ -574,7 +660,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
           // the platform will accept the offset simply stops changing — the next
           // frame computes the same advance and the animation stalls short of its
           // target forever. See SMOOTH_MIN_STEP.
-          current.lastStepAt = now()
+          current.lastStepAt = tick
           write(Math.abs(advance) <= SMOOTH_MIN_STEP ? target : from + advance)
         } else {
           write(target)
@@ -638,6 +724,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
         stableFrames: 0,
         lastModelChangeAt: startedAt,
         lastStepAt: startedAt,
+        lastTickAt: startedAt,
         iterations: 0,
         resolve,
       }
@@ -700,16 +787,11 @@ export function createScroller(options: ScrollerOptions): Scroller {
       // treated as a cancellation signal. See `cancelOnInput` for why.
       const self = consumeIntent(offset)
 
-      // Flush a correction banked during iOS momentum, now that scrolling has
-      // demonstrably continued past it.
-      if (deferredCorrection !== 0 && canWriteScroll()) {
-        const next = offset + deferredCorrection
-        // At the bottom clamp a negative correction has already been absorbed by
-        // the browser; replaying it would lift the list off the end.
-        const max = viewport.getMaxScrollOffset()
-        deferredCorrection = 0
-        if (!(offset >= max && next < offset)) write(Math.min(Math.max(next, 0), max))
-      }
+      // Covers the refusal the gate knows nothing about: a rubber-band bounce, which
+      // ends by coming back into range rather than by any state change. A correction
+      // banked during a *fling* has normally been flushed by `gate.onOpen` before this
+      // runs, and finds nothing left to do.
+      flushDeferredCorrection()
 
       return self
     },
@@ -736,34 +818,11 @@ export function createScroller(options: ScrollerOptions): Scroller {
       }
       for (const cleanup of cleanups) cleanup()
       cleanups.length = 0
+      // Only the gate we built. One handed in belongs to the engine, which disposes
+      // of it alongside everything else `mount()` attached — tearing it down from
+      // here would leave a still-mounted engine with an unguarded write path.
+      if (ownsGate) gate.dispose()
     },
   }
 }
 
-/**
- * Settle detection: the native `scrollend` event where available, a timeout
- * otherwise.
- *
- * `scrollend` became baseline when Safari 26.2 joined Chrome/Edge 114 and
- * Firefox 109. Two things make a fallback mandatory regardless: it does not fire
- * at all when the scroll position did not change, and older Safari lacks it
- * entirely. The README points those consumers at the optional `scrollyfills`
- * peer dependency.
- */
-export function onScrollSettled(viewport: Viewport, callback: () => void): () => void {
-  if (supportsScrollEnd()) {
-    return viewport.addEventListener('scrollend', callback)
-  }
-
-  let timer: ReturnType<typeof setTimeout> | null = null
-
-  const off = viewport.addEventListener('scroll', () => {
-    if (timer !== null) clearTimeout(timer)
-    timer = setTimeout(callback, SCROLL_END_FALLBACK_MS)
-  })
-
-  return () => {
-    if (timer !== null) clearTimeout(timer)
-    off()
-  }
-}

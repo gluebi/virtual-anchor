@@ -30,6 +30,69 @@ if (CONFIG.trace) {
       buffer.length = 0
     },
   })
+
+  /**
+   * A plain DOM overlay of the last few scroll corrections.
+   *
+   * Deliberately not React: it updates on every correction, and re-rendering the app to
+   * show diagnostics would change the very thing being diagnosed. Written straight to
+   * the DOM outside the root, so it costs the list nothing.
+   */
+  if (CONFIG.hud) {
+    const hud = document.createElement('div')
+    hud.style.cssText = [
+      'position:fixed',
+      'left:0',
+      'right:0',
+      'bottom:0',
+      'z-index:9999',
+      'background:rgba(0,0,0,.82)',
+      'color:#0f0',
+      'font:11px/1.35 ui-monospace,monospace',
+      'padding:6px 8px',
+      'white-space:pre',
+      'pointer-events:none',
+      'max-height:38vh',
+      'overflow:hidden',
+    ].join(';')
+    document.body.appendChild(hud)
+
+    const lines: string[] = []
+    let taken = 0
+    let deferredCount = 0
+    let worst = 0
+
+    setTraceSink((event) => {
+      buffer.push(event)
+      if (buffer.length > 3000) buffer.shift()
+      if (event.topic !== 'scroll.write') return
+
+      const delta = Number(event.data.delta)
+      const deferred = event.data.deferred === true
+      if (deferred) deferredCount++
+      else taken++
+      if (Math.abs(delta) > Math.abs(worst)) worst = delta
+
+      lines.unshift(
+        `${deferred ? 'DEFER' : 'WRITE'} ${String(event.data.restore).padEnd(7)} ` +
+          `Δ${delta.toFixed(1).padStart(9)}  from ${Number(event.data.from).toFixed(0)}`,
+      )
+      if (lines.length > 10) lines.pop()
+      hud.textContent =
+        `writes ${String(taken)}  deferred ${String(deferredCount)}  ` +
+        `worst Δ ${worst.toFixed(1)}\n` +
+        lines.join('\n')
+    })
+    Object.assign(window, {
+      __hudReset: () => {
+        lines.length = 0
+        taken = 0
+        deferredCount = 0
+        worst = 0
+        hud.textContent = 'reset'
+      },
+    })
+  }
 }
 
 const root = document.getElementById('root')
