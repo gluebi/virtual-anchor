@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   devicePixelRatioOf,
   isIOSWebKit,
+  observeResolution,
   prefersReducedMotion,
   supportsScrollEnd,
 } from './env.js'
@@ -161,5 +162,117 @@ describe('devicePixelRatioOf', () => {
     expect(devicePixelRatioOf({ devicePixelRatio: 0 } as Window)).toBe(1)
     expect(devicePixelRatioOf({ devicePixelRatio: -1 } as Window)).toBe(1)
     expect(devicePixelRatioOf({} as Window)).toBe(1)
+  })
+})
+
+describe('observeResolution', () => {
+  /**
+   * A `matchMedia` whose queries the test can fire.
+   *
+   * Richer than the `prefersReducedMotion` stub above, which returns `{ matches }` and
+   * nothing else: this one has to record the query string and its listeners, because the
+   * whole mechanism is that a resolution query answers "has this changed" exactly once and
+   * then has to be replaced.
+   */
+  const installMatchMedia = (): {
+    queries: { query: string; listeners: Set<() => void> }[]
+    fire: () => void
+  } => {
+    const queries: { query: string; listeners: Set<() => void> }[] = []
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      writable: true,
+      value: (query: string) => {
+        const record = { query, listeners: new Set<() => void>() }
+        queries.push(record)
+        return {
+          matches: true,
+          media: query,
+          addEventListener: (_: string, listener: () => void) => {
+            record.listeners.add(listener)
+          },
+          removeEventListener: (_: string, listener: () => void) => {
+            record.listeners.delete(listener)
+          },
+        } as unknown as MediaQueryList
+      },
+    })
+    return {
+      queries,
+      // Only the newest query is armed; the older ones have been unsubscribed.
+      fire: () => {
+        for (const listener of [...(queries[queries.length - 1]?.listeners ?? [])]) listener()
+      },
+    }
+  }
+
+  const setRatio = (ratio: number): void => {
+    Object.defineProperty(window, 'devicePixelRatio', {
+      configurable: true,
+      writable: true,
+      value: ratio,
+    })
+  }
+
+  afterEach(() => {
+    Reflect.deleteProperty(window, 'matchMedia')
+    Reflect.deleteProperty(window, 'devicePixelRatio')
+  })
+
+  it('arms a query against the current ratio', () => {
+    const media = installMatchMedia()
+    setRatio(2)
+
+    const stop = observeResolution(window, vi.fn())
+    expect(media.queries[0]?.query).toBe('(resolution: 2dppx)')
+
+    stop()
+  })
+
+  it('reports a change, and re-arms against the ratio it changed to', () => {
+    const media = installMatchMedia()
+    setRatio(1)
+    const onChange = vi.fn()
+
+    const stop = observeResolution(window, onChange)
+    // Page zoom to 125%, which is where WebKit's row heights stop agreeing with the others.
+    setRatio(1.25)
+    media.fire()
+
+    expect(onChange).toHaveBeenCalledOnce()
+    // Re-armed, because a query that names 1dppx can never report a second change: it is
+    // already not matching. Without this the first zoom would be the only one ever seen.
+    expect(media.queries[1]?.query).toBe('(resolution: 1.25dppx)')
+
+    setRatio(2)
+    media.fire()
+    expect(onChange).toHaveBeenCalledTimes(2)
+    expect(media.queries[2]?.query).toBe('(resolution: 2dppx)')
+
+    stop()
+  })
+
+  it('stops reporting once detached', () => {
+    const media = installMatchMedia()
+    setRatio(1)
+    const onChange = vi.fn()
+
+    const stop = observeResolution(window, onChange)
+    stop()
+    media.fire()
+
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
+  it('does nothing where matchMedia is unavailable', () => {
+    // jsdom implements none of it, which is also every non-browser host.
+    const onChange = vi.fn()
+    expect(() => {
+      observeResolution(window, onChange)()
+    }).not.toThrow()
+    expect(onChange).not.toHaveBeenCalled()
+    expect(() => {
+      observeResolution(null, onChange)()
+    }).not.toThrow()
   })
 })

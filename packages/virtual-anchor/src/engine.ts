@@ -4,6 +4,7 @@ import {
   isSelfWrite,
   resolveAnchorOffset,
 } from './anchor.js'
+import { observeResolution } from './env.js'
 import { composeInsets, ListGeometry, type ListInsets } from './listGeometry.js'
 import { createScrollerGate, type ScrollerGate } from './gate.js'
 import { createResizer, type Resizer } from './resizer.js'
@@ -1428,6 +1429,16 @@ export function createEngine(initial: EngineOptions): Engine {
       // viewport resize and discarded the whole measurement cache.
       cleanups.push(viewport.observeSize(onViewportResize))
 
+      // The third term of the layout signature, and the one with no layout consequence to
+      // piggyback on: a device pixel ratio change need not resize the scrollport or re-lay-out
+      // a single row, so neither of the other two triggers can see it. `observeResolution`
+      // holds both the mechanism and the measurement that says it is worth having.
+      //
+      // Straight to `onViewportResize`, because what it does is re-read the signature and
+      // publish accordingly, which is the whole of what is wanted here. The name is about its
+      // first caller rather than its job.
+      cleanups.push(observeResolution(viewport.getWindow(), onViewportResize))
+
       const gateTarget = viewport.getGateTarget()
       if (gateTarget) {
         gate = createScrollerGate({
@@ -1765,6 +1776,10 @@ export type { VirtualItem, VirtualState }
  * pixel ratio is not stale, it is *wrong* — restoring it would place the list
  * confidently in the wrong position. Including these in the key means a
  * responsive change or a browser zoom discards the snapshot instead.
+ *
+ * The device pixel ratio earns its place by measurement rather than by argument, since CSS
+ * pixel layout is *nominally* independent of it. See `observeResolution` in `env.ts`, which
+ * carries the numbers and is what notices a change at runtime.
  */
 export function layoutSignatureFor(element: HTMLElement | null): string {
   if (!element) return ''
