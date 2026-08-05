@@ -1415,18 +1415,21 @@ export function createEngine(initial: EngineOptions): Engine {
       // `gate`, orphaning the first behind a teardown closure nobody holds.
       if (unmount) return unmount
 
-      // The scroller binds its input listeners here rather than at construction, so
-      // that building an engine has no side effects and a speculatively-constructed one
-      // cannot leak them. It also attaches the shared write gate, which is why this
-      // comes first: the gate's listeners must precede the scroll and settle handlers
-      // below, so that both of those see an already-transitioned gate.
-      scroller.attach()
-
       const cleanups: (() => void)[] = []
 
       // Whatever the fling refused, once it is over. One publish, not one per skipped
       // correction: they all resolve to the same anchor, so replaying them
       // individually would write the same offset repeatedly.
+      //
+      // **First of the gate's open listeners, and that is the point.** `onOpen` fires
+      // them in registration order, so registering here — before `scroller.attach()`
+      // below registers its own — is what makes "nothing held while the gate is open"
+      // true for *every* later listener rather than only for the code after this one.
+      // The scroller's is waiting on this same reopening: it replays a banked delta
+      // against `scrollTop` and wakes the convergence loop, both from an offset the
+      // shift would otherwise still be standing in for. So a re-order does not lose the
+      // correction — it applies it twice, once in the stale delta and once in the fold,
+      // and silently, since every deviation is then measured post-fold.
       cleanups.push(
         writeGate.onOpen(() => {
           // Before the re-publish, not after: the publish re-derives the offset from
@@ -1438,6 +1441,15 @@ export function createEngine(initial: EngineOptions): Engine {
           publish('measure')
         }),
       )
+
+      // The scroller binds its input listeners here rather than at construction, so
+      // that building an engine has no side effects and a speculatively-constructed one
+      // cannot leak them. It also attaches the shared write gate, which is why this
+      // comes before the scroll and settle handlers below: the gate's *DOM* listeners
+      // must precede them, so that both of those see an already-transitioned gate. The
+      // `onOpen` registration above is unaffected by that ordering — it only adds to a
+      // set, and nothing can fire it until `gate.attach()` binds those listeners here.
+      scroller.attach()
 
       // The viewport owns knowing what to watch. The engine used to observe
       // `getElement()`, and for a document scroller that is `documentElement`, whose
