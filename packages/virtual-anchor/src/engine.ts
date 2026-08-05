@@ -616,7 +616,7 @@ export function createEngine(initial: EngineOptions): Engine {
     previous[0] === from && previous[1] === to ? previous : [from, to]
 
   const computeRanges = (
-    scrollOffset: number,
+    contentAt: number,
   ): { rendered: readonly [number, number]; visible: readonly [number, number] } => {
     // Through the shared constant, not a fresh `[0, -1]`: an empty list must keep publishing the
     // same reference, or emptying and staying empty reads as a change.
@@ -627,8 +627,8 @@ export function createEngine(initial: EngineOptions): Engine {
     }
 
     const g = syncGeometry()
-    const visible = g.visibleBand(scrollOffset)
-    const buffered = g.bufferedBand(scrollOffset, options.buffer ?? DEFAULT_BUFFER)
+    const visible = g.visibleBand(contentAt)
+    const buffered = g.bufferedBand(contentAt, options.buffer ?? DEFAULT_BUFFER)
 
     // The pinned scroll target is deliberately *not* unioned in here. Widening the
     // contiguous span to reach a distant target mounts every item in between: a smooth
@@ -706,9 +706,9 @@ export function createEngine(initial: EngineOptions): Engine {
    * visibility band — or it describes a position the view is not at, and each momentum
    * event then makes it worse rather than holding it still.
    *
-   * The two reads that deliberately stay in scroll space are `getMaxScrollOffset` and
-   * the offset published to consumers: both are about the scrollbar, which is exactly
-   * the thing the shift is hiding from.
+   * Which reads deliberately stay in scroll space is said once, in `publish`, where both
+   * offsets are taken. Deliberately not repeated here: two copies of that list is how the
+   * visibility band came to be *described* as reading content space while it did not.
    */
   const contentOffset = (): number => viewport.getScrollOffset() + carry + pendingShift
 
@@ -961,12 +961,22 @@ export function createEngine(initial: EngineOptions): Engine {
       }
     }
 
-    // Two offsets, deliberately. The rendered range and the visibility band compare
-    // against item offsets, so they want where the content *is*: computing them from the
-    // raw offset while a shift is outstanding centres the mounted window up to two
-    // viewports away from the screen, which paints blank, and reports comments visible
-    // that never appeared. `atBottom` and the published offset are about the scrollbar,
-    // which is the one thing the shift is deliberately hiding from.
+    // Two offsets, deliberately, and every read below belongs to exactly one of them.
+    //
+    // `contentAt` — the anchor, the rendered range and the visibility band. All three
+    // compare against item offsets, so all three want where the content *is*. Computing
+    // the range from the raw offset while a shift is outstanding centres the mounted
+    // window up to the remaining scroll range away from the screen, which paints blank;
+    // computing the *band* from it hands `tracker.sample` a strip of list coordinates
+    // the reader is not looking at, so every visibility event fired during the hold
+    // names rows that never appeared. The band was the one missed when the space was
+    // split, and it is the one nothing gives away: the render stays correct, only the
+    // reporting is wrong.
+    //
+    // `scrollOffset` — the offset published to consumers, `atBottom` and `notifyEdges`.
+    // All three are about the scrollbar, and the scrollbar is the one thing the shift is
+    // deliberately hiding from: it is precisely the part of the view that has *not*
+    // moved with the content.
     const contentAt = contentOffset()
     const scrollOffset = viewport.getScrollOffset()
     const ranges = computeRanges(contentAt)
@@ -1007,7 +1017,7 @@ export function createEngine(initial: EngineOptions): Engine {
       }
     }
 
-    sampleVisibility(ranges.visible, scrollOffset)
+    sampleVisibility(ranges.visible, contentAt)
   }
 
   let visibilityTimer: ReturnType<typeof setTimeout> | null = null
@@ -1047,8 +1057,10 @@ export function createEngine(initial: EngineOptions): Engine {
       () => {
         visibilityTimer = null
         armedFor = null
-        const scrollOffset = viewport.getScrollOffset()
-        sampleVisibility(computeRanges(scrollOffset).visible, scrollOffset)
+        // Content space, like every other sample: this fires when nothing else is
+        // happening, so during a held correction it is usually the *only* sample taken.
+        const contentAt = contentOffset()
+        sampleVisibility(computeRanges(contentAt).visible, contentAt)
       },
       Math.max(0, due - stamp),
     )
@@ -1060,15 +1072,19 @@ export function createEngine(initial: EngineOptions): Engine {
    * The arming used to sit at each of the three early returns below, which made "every
    * sample re-arms" an invariant maintained by hand: a fourth early return would silently
    * stop the clock and bring back the dwell that never completes.
+   *
+   * @param contentAt Content space, from {@link contentOffset}. The band built from it is
+   * compared against `cache.offsetOf`, so a raw scroll offset here reports rows the reader
+   * never saw for as long as a correction is held.
    */
-  const sampleVisibility = (visible: readonly [number, number], scrollOffset: number): void => {
-    sampleVisibilityOnce(visible, scrollOffset)
+  const sampleVisibility = (visible: readonly [number, number], contentAt: number): void => {
+    sampleVisibilityOnce(visible, contentAt)
     armVisibilityTimer()
   }
 
   const sampleVisibilityOnce = (
     visible: readonly [number, number],
-    scrollOffset: number,
+    contentAt: number,
   ): void => {
     const g = syncGeometry()
 
@@ -1088,10 +1104,10 @@ export function createEngine(initial: EngineOptions): Engine {
     // The conversion from the gate's scrollport-relative band into list coordinates is
     // `ListGeometry`'s job: doing it by hand in a second place is what let the document
     // scroller apply its offset twice.
-    const visibleBand = g.visibleBand(scrollOffset)
+    const visibleBand = g.visibleBand(contentAt)
     const onScreen = gate?.getVisibleBand() ?? null
     const band =
-      onScreen === null ? visibleBand : g.clampToOnScreen(scrollOffset, visibleBand, onScreen)
+      onScreen === null ? visibleBand : g.clampToOnScreen(contentAt, visibleBand, onScreen)
 
     if (band === null) {
       notifyVisibility(tracker.flushLeaves(now()))
@@ -1564,7 +1580,6 @@ export function createEngine(initial: EngineOptions): Engine {
         // engine has no business holding the content away from the scroll offset. The
         // surface is about to be torn down or re-attached either way.
         writeDeferred = false
-        pendingShift = 0
         pendingShift = 0
         writePaintOffset()
         if (unmount === teardown) unmount = null

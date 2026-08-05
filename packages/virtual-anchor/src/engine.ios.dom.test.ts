@@ -523,6 +523,110 @@ describe('the engine on iOS WebKit', () => {
     expect(shown).toBeLessThanOrEqual(last)
   })
 
+  describe('the visibility band while a shift is held', () => {
+    // The other half of the split, and the half #29 left behind: the band was still
+    // built from the raw offset while the candidates it is measured against came from
+    // `cache.offsetOf`, i.e. content space. Nothing paints wrong — the rendered range
+    // above is computed correctly — but every visibility event fired during a hold
+    // describes a strip of content the reader is not looking at.
+    //
+    // All three cases use a correction wider than the viewport plus the buffer, so the
+    // scroll-space window and the content-space window do not overlap. With a smaller
+    // one both spaces name some of the same rows and the assertions pass either way.
+    const record = (events: string[]): Partial<Parameters<typeof createEngine>[0]> => ({
+      onVisibilityChange: (batch) => {
+        for (const event of batch) events.push(`${event.phase}:${String(event.key)}`)
+      },
+    })
+
+    /**
+     * The row under the viewport top at `offset`, named rather than hard-coded.
+     *
+     * Which row that is depends on the estimate, the viewport height and how far the
+     * fling went, so a literal would quietly stop being the row under test. The sentinel
+     * is never visible, so a missing key fails the assertion rather than satisfying it.
+     */
+    const rowAt = (h: Harness, offset: number): ItemKey =>
+      h.engine.keyAt(h.engine.cache.indexAt(offset)) ?? 'no-such-row'
+
+    it('reports the items the content is showing, not the ones scrollTop implies', () => {
+      const events: string[] = []
+      const h = setup({ estimateSize: () => 100, ...record(events) })
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      expect(h.engine.getVisibility(rowAt(h, h.offset())).visible).toBe(true)
+
+      events.length = 0
+      h.measure('c10', 1500)
+
+      // The correction is held, so the content moved and `scrollTop` did not.
+      const held = h.paintOffset()
+      expect(held).toBeGreaterThan(1200)
+      const shown = rowAt(h, h.offset() + held)
+      // Or the two spaces name the same row and nothing below discriminates.
+      expect(shown).not.toBe(rowAt(h, h.offset()))
+
+      // The row the shift is keeping under the viewport top is still on screen, so it has
+      // neither left nor been replaced by the row sitting at the raw offset — one the
+      // reader scrolled past before the measurement landed. Reading the band in scroll
+      // space reports the opposite: the candidates are a viewport and a half past the
+      // band, so *nothing* overlaps it and all eight visible rows report a leave.
+      expect(events).toEqual([])
+      expect(h.engine.getVisibility(shown).visible).toBe(true)
+    })
+
+    it('reports the same row off iOS, where the two spaces coincide', () => {
+      // The inertness guard. Off iOS the correction is written rather than held, so the
+      // raw offset *is* where the content is and the fix must cost nothing. It cannot
+      // fail against this bug — no shift is ever outstanding for the two spaces to
+      // disagree by — which is the statement being made.
+      unpretendIPhone()
+      const events: string[] = []
+      const h = setup({ estimateSize: () => 100, ...record(events) })
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+
+      events.length = 0
+      h.measure('c10', 1500)
+
+      expect(h.paintOffset()).toBe(0)
+      expect(h.engine.getVisibility(rowAt(h, h.offset())).visible).toBe(true)
+      expect(events).toEqual([])
+    })
+
+    it('samples the visibility deadline in content space too', () => {
+      // The deadline timer re-samples on its own, and read both its candidate range and
+      // its band from the raw offset. It is also the sample most likely to be the *only*
+      // one taken during a hold: it fires when nothing else is happening, which is
+      // exactly the reader who has stopped scrolling and is dwelling on a comment.
+      //
+      // `dwellMs` is what makes a deadline exist at all — with none, every enter is
+      // reported on the sample that observes it and no timer is ever armed.
+      const events: string[] = []
+      const h = setup({
+        estimateSize: () => 100,
+        visibility: { dwellMs: 500 },
+        ...record(events),
+      })
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      h.measure('c10', 1500)
+      const held = h.paintOffset()
+      expect(held).toBeGreaterThan(1200)
+      // Nothing yet: the dwell has only just started.
+      expect(events).toEqual([])
+      expect(vi.getTimerCount()).toBeGreaterThan(0)
+
+      // Only time passing — no scroll, no measurement, no resize. Short of both the
+      // gate's 3s cap and any settle, so the shift is still outstanding.
+      vi.advanceTimersByTime(600)
+
+      // Reading the band in scroll space instead starts the dwell over on the rows at the
+      // raw offset, so this deadline reports nothing at all.
+      expect(events).toContain(`enter:${String(rowAt(h, h.offset() + held))}`)
+    })
+  })
+
   it('sends what a truncating platform refuses to the carry, and holds nothing', () => {
     // WebKit truncates a written scroll offset to an integer, so on the one platform this
     // runs on the fold is never exact. The shortfall is what the carry is *for*, so it
