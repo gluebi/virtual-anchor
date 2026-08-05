@@ -108,6 +108,17 @@ export interface ScrollerOptions {
    * `scrollTop` straight past this module and cancelled the fling.
    */
   writeGate?: ScrollWriteGate
+  /**
+   * Where the content sits, in the space item offsets live in.
+   *
+   * Optional so a standalone `createScroller` still works; the engine passes its own
+   * `contentOffset()` in, because since #29 `getScrollOffset()` is where the *scrollbar* is
+   * and every comparison against an item offset wants the other one.
+   *
+   * Defaults to the scroll offset plus the carry this scroller last applied, which is the
+   * whole of the difference when no engine is holding a gesture shift.
+   */
+  getContentOffset?: () => number
 }
 
 export interface Scroller {
@@ -154,8 +165,10 @@ interface StepTrace extends Record<string, unknown> {
   key: ItemKey
   index: number
   target: number
+  /** Where the content is — the space `target` is in, not the raw scroll offset. */
   actual: number
-  uncarried: number
+  /** Signed distance still to travel, after everything already moving the content. */
+  remaining: number
   arrived: boolean
   targetMoved: boolean
   quiet: boolean
@@ -278,6 +291,20 @@ export function createScroller(options: ScrollerOptions): Scroller {
   const ownsGate = options.writeGate === undefined
   let deferredCorrection = 0
 
+  /** The visual carry last handed to `applyCarry`; see the default below for its one reader. */
+  let appliedCarry = 0
+  /**
+   * Where the content is, resolved once rather than at each of its readers.
+   *
+   * The default is `scrollTop` plus the carry, because a standalone scroller has no engine
+   * holding a gesture shift for it and the carry is then the whole of the difference — and
+   * this module applied that carry itself, so it is the one thing here that can know. The
+   * term is load-bearing rather than tidy: without it the arrival test cannot accept a
+   * truncation the carry has already made good, for the reason spelled out there.
+   */
+  const getContentOffset =
+    options.getContentOffset ?? (() => viewport.getScrollOffset() + appliedCarry)
+
   const cleanups: (() => void)[] = []
 
   /**
@@ -378,6 +405,10 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // clamped value the moment the bounce ends. Kept here rather than in the gate
     // because it is a *position* test, not a time one — the gate answers "is a
     // gesture in flight", runs on every publish, and reads no geometry.
+    //
+    // The raw offset, deliberately, where everything else in this file now reads content
+    // space: the question is whether the *scrollbar* has been dragged outside its own
+    // range, and a paint offset moves the content without moving the scrollbar at all.
     const offset = viewport.getScrollOffset()
     return offset >= 0 && offset <= viewport.getMaxScrollOffset()
   }
@@ -449,7 +480,11 @@ export function createScroller(options: ScrollerOptions): Scroller {
         target = start + size / 2 - visibleSize / 2
         break
       case 'auto': {
-        const current = viewport.getScrollOffset()
+        // Where the content is, not where the scrollbar is: "is this item already on
+        // screen" is a question about the screen. Two problems in one read, in fact — the
+        // `else` branch returns this value as the target, and every other branch here
+        // returns a content-space offset.
+        const current = getContentOffset()
         if (start < current) target = start
         else if (start + size - visibleSize > current) target = start + size - visibleSize
         // Already fully visible: the right amount of scrolling is none at all.
@@ -458,21 +493,42 @@ export function createScroller(options: ScrollerOptions): Scroller {
       }
     }
 
+    // Two scroll-space numbers in an otherwise content-space function, both deliberate and
+    // both only correct because nothing is held when a target is written: `maxOffset` above
+    // is the browser's own answer to "as far down as this goes", and the clamp here is the
+    // range the write has to land in. While a shift is outstanding the reachable content
+    // range is that window displaced by it — which is what bounds the shift in the first
+    // place, in the engine, so a target clamped here cannot be outside it once it is folded.
     return Math.min(Math.max(target + extra, 0), maxOffset)
   }
 
-  /** Write an offset, remembering the intent so the echo is recognisable. */
+  /**
+   * Write an offset, remembering the intent so the echo is recognisable.
+   *
+   * Takes a **content-space** offset, like everything else built from item offsets here,
+   * and hands it to a scroll-space setter. Exact rather than approximate, and it rests on
+   * one invariant this module *requires* rather than merely observes: nothing is ever held
+   * while the gate is open. A gesture shift is only accumulated while writing is refused,
+   * and the engine folds an outstanding one into `scrollTop` ahead of every other reopen
+   * listener — so at the moment of a write the two spaces coincide. Flush a banked
+   * content-space distance before that fold and the shift is applied twice.
+   */
   const write = (offset: number): void => {
     if (!canWriteScroll()) {
-      deferredCorrection = offset - viewport.getScrollOffset()
+      // A content-space *distance*: both terms are content space, and replaying it later
+      // against wherever the content has got to is the whole point of banking a delta.
+      deferredCorrection = offset - getContentOffset()
       return
     }
     rememberIntent(offset)
     // eslint-disable-next-line no-restricted-syntax -- gated by canWriteScroll above
     viewport.setScrollOffset(offset)
 
-    // Recover the fraction the platform refused to take, as a visual offset.
-    applyCarry(carryFor(offset, viewport.getScrollOffset()))
+    // Recover the fraction the platform refused to take, as a visual offset. The raw
+    // offset, because the question is what the platform did with the number just handed
+    // to it — which is about `scrollTop` and nothing else.
+    appliedCarry = carryFor(offset, viewport.getScrollOffset())
+    applyCarry(appliedCarry)
   }
 
   /**
@@ -481,6 +537,12 @@ export function createScroller(options: ScrollerOptions): Scroller {
    * A *delta*, not a destination: what was banked is how far the view needed to move,
    * and by the time it can be applied the fling has carried the scroller somewhere
    * else entirely. Replaying the original absolute offset would undo the gesture.
+   *
+   * Measured and replayed in the same space — where the content is, at both ends. Doing
+   * both against `scrollTop` looks equally symmetrical and is not: the gesture shift
+   * changes in between, either because another correction accumulated into it or because
+   * the gate reopening folded it away, so the raw offset means a different thing at each
+   * end and the replay lands off by the difference.
    *
    * Reached from two places, because there are two reasons a write gets refused and
    * they end differently. A gesture-driven refusal ends when the gate reopens, and
@@ -491,7 +553,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
   const flushDeferredCorrection = (): void => {
     if (deferredCorrection === 0 || !canWriteScroll()) return
 
-    const offset = viewport.getScrollOffset()
+    const offset = getContentOffset()
     const next = offset + deferredCorrection
     // At the bottom clamp a negative correction has already been absorbed by the
     // browser; replaying it would lift the list off the end.
@@ -512,12 +574,13 @@ export function createScroller(options: ScrollerOptions): Scroller {
     }
     onScrollingChange?.(false)
 
-    // What the sub-pixel carry could not absorb. For a settled scroll this is
-    // normally exactly zero — the carry recovers the fraction the platform
-    // refused — and for an unsettled one it is the honest remaining gap.
+    // How far the content is from where the caller asked it to be. For a settled scroll
+    // this is normally exactly zero — the carry recovers the fraction the platform
+    // refused, and it is part of where the content is — and for an unsettled one it is
+    // the honest remaining gap.
     const finalTarget = targetFor(indexFor(current), current.align, current.offset)
-    const actual = viewport.getScrollOffset()
-    const deviation = finalTarget - actual - carryFor(finalTarget, actual)
+    const actual = getContentOffset()
+    const deviation = finalTarget - actual
 
     if (TRACING) {
       trace('scroll.finish', () => ({
@@ -591,14 +654,18 @@ export function createScroller(options: ScrollerOptions): Scroller {
     const targetMoved = Math.abs(target - current.lastTarget) > tolerance
 
     // Arrival is judged on where the content *appears*, not on the raw scroll
-    // offset. The carry is what makes the visual position exact on an engine that
-    // will not accept a fractional offset, so ignoring it here asks the scroller
-    // to achieve something the platform has already refused — on WebKit at dPR 2
-    // a 0.75px truncation the carry fully absorbs would never satisfy a 0.5px
-    // tolerance, and the loop runs to its deadline reporting a deviation of zero.
-    const actual = viewport.getScrollOffset()
-    const uncarried = target - actual - carryFor(target, actual)
-    const arrived = Math.abs(uncarried) <= tolerance
+    // offset. Both compensations move it there: the carry is what makes the visual
+    // position exact on an engine that will not accept a fractional offset — on WebKit
+    // at dPR 2 a 0.75px truncation the carry fully absorbs would never satisfy a 0.5px
+    // tolerance, and the loop would run to its deadline reporting a deviation of zero —
+    // and the gesture shift is hundreds of pixels of the same thing.
+    //
+    // This read is what the comment above it has always claimed, which is the irony in
+    // #33: it compensated for one contributor to the container's paint offset and not
+    // the other, from the moment the second one existed.
+    const actual = getContentOffset()
+    const remaining = target - actual
+    const arrived = Math.abs(remaining) <= tolerance
     // Either the model has been still for long enough, or the platform has told us the
     // scrolling itself is over. The second is strictly better information when it
     // arrives, and it usually arrives sooner.
@@ -610,7 +677,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
         index,
         target,
         actual,
-        uncarried,
+        remaining,
         arrived,
         targetMoved,
         quiet,
@@ -647,13 +714,15 @@ export function createScroller(options: ScrollerOptions): Scroller {
           // four WebKit landings on a loaded CI runner ended 300–580px short, reporting
           // `deadline` honestly for a scroll that simply ran out of frames. Time-based, it
           // takes the same wall clock at any frame rate.
-          const from = viewport.getScrollOffset()
+          //
+          // Interpolated from `actual` rather than a fresh read: nothing since it writes a
+          // scroll offset, so one position serves the whole frame's decision.
           const elapsedSinceStep = Math.min(
             Math.max(tick - current.lastStepAt, 0),
             MAX_STEP_MS,
           )
           const k = 1 - Math.exp(-elapsedSinceStep / SMOOTH_TAU_MS)
-          const advance = (target - from) * k
+          const advance = (target - actual) * k
 
           // Snap the last stretch rather than easing into it. An exponential
           // approach's step shrinks without limit, and once it falls below what
@@ -661,7 +730,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
           // frame computes the same advance and the animation stalls short of its
           // target forever. See SMOOTH_MIN_STEP.
           current.lastStepAt = tick
-          write(Math.abs(advance) <= SMOOTH_MIN_STEP ? target : from + advance)
+          write(Math.abs(advance) <= SMOOTH_MIN_STEP ? target : actual + advance)
         } else {
           write(target)
         }
@@ -744,7 +813,9 @@ export function createScroller(options: ScrollerOptions): Scroller {
           align,
           smooth,
           target,
-          actual: viewport.getScrollOffset(),
+          // The same space as `target`: a diagnostic reporting two coordinate systems in
+          // one line would be reading the bug rather than exposing it.
+          actual: getContentOffset(),
         }))
       }
 
@@ -754,13 +825,19 @@ export function createScroller(options: ScrollerOptions): Scroller {
       // is nothing to converge towards and waiting out the quiet period would
       // only delay the settle promise — and with it the caller's highlight.
       //
+      // The proximity test is in content space, like the arrival test it stands in for.
+      // Against the raw offset it resolves `settled: true` while a gesture shift is
+      // outstanding: the scrollbar is at the target, the content is a shift away from it,
+      // the write above was refused and banked, and the loop that would have corrected
+      // both has just been told there is nothing to do.
+      //
       // Note this loop is driven by animation frames, not by scroll events, so it
       // does not need the "synthesise a completion when the write is a no-op"
       // guard that event-driven implementations hang without. Frames keep coming
       // whether or not the offset changed.
       const tolerance = convergenceTolerance(viewport.getDevicePixelRatio())
       const fullyMeasured = cache.measuredCount === cache.length
-      if (!smooth && fullyMeasured && Math.abs(viewport.getScrollOffset() - target) <= tolerance) {
+      if (!smooth && fullyMeasured && Math.abs(getContentOffset() - target) <= tolerance) {
         write(target)
         finish(true, 'converged')
         return promise

@@ -1289,6 +1289,7 @@ export function createEngine(initial: EngineOptions): Engine {
   const scroller: Scroller = createScroller({
     viewport,
     writeGate,
+    getContentOffset: contentOffset,
     getCache: () => cache,
     getGeometry: geometry,
     applyCarry,

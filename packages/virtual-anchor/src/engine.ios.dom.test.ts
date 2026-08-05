@@ -557,6 +557,60 @@ describe('the engine on iOS WebKit', () => {
     expect(h.scrollWrites().slice(before)[0]).toBeCloseTo(offsetBefore + shift, 5)
   })
 
+  describe('a programmatic scroll issued mid-gesture', () => {
+    // Issue #33, at the seam the two iOS suites left uncovered between them: the scroller
+    // suite can drive a scroll during a gesture but has no engine holding a shift, and this
+    // one holds a shift but never drove a scroll through it. Both halves are needed for the
+    // destination and the coordinate it is compared against to disagree.
+
+    it('measures the scroll against where the content is', async () => {
+      const h = setup({ estimateSize: () => 100 })
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      // 600px of correction, held on the container rather than written: `scrollTop` says
+      // 5000 and the reader is looking at 5600.
+      h.measure('c10', 700)
+      expect(h.paintOffset()).toBeCloseTo(600, 5)
+
+      const promise = h.engine.scrollToKey('c100')
+      // Cancelled rather than settled, so it resolves where it stood — and what it reports
+      // is the caller's only account of where the content had got to. c100 sits at 10_600
+      // once c10 is 600px taller than its estimate, so the content has 5000 left to travel;
+      // measured against `scrollTop` it claims 5600, which is the shift over again.
+      h.engine.cancelScroll()
+
+      const result = await promise
+      expect(result.reason).toBe('cancelled')
+      expect(result.deviation).toBeCloseTo(5000, 5)
+    })
+
+    it('lands on the item once the gesture is over', async () => {
+      // The end-to-end guard, and honest about its reach: both reopen orderings converge
+      // here, so it asserts the landing rather than the writes that reach it. Flushing the
+      // banked distance before the shift is folded steps the list 600px past the item and
+      // the loop pulls it back a frame later; folding first makes it a single write.
+      const h = setup({ estimateSize: () => 100 })
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      h.measure('c10', 700)
+
+      const promise = h.engine.scrollToKey('c100')
+      // Nothing was written while the fling ran; the destination was banked as a distance
+      // the content still had to cover.
+      expect(h.scrollWrites()).toEqual([])
+
+      h.scrollSettled()
+      // Real animation frames, which the fake clock drives — the only case in the file
+      // that needs the convergence loop to run.
+      await vi.advanceTimersByTimeAsync(120)
+
+      const result = await promise
+      expect(result.settled).toBe(true)
+      expect(h.offset()).toBeCloseTo(10_600, 5)
+      expect(h.paintOffset()).toBe(0)
+    })
+  })
+
   it('mounts the range the content is showing, not the one scrollTop implies', () => {
     // With a shift outstanding, `scrollTop` and the visible content differ by it. Compute
     // the rendered window from the raw offset and it is centred up to two viewports from

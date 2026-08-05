@@ -23,6 +23,8 @@ const fakeViewport = (
     max?: number
     getMax?: () => number
     snap?: number
+    /** Raised where the half-pixel convergence tolerance is the point of the test. */
+    devicePixelRatio?: number
   } = {},
 ): FakeViewport => {
   const state = {
@@ -53,7 +55,7 @@ const fakeViewport = (
     getElement: () => null,
     getScrollportElement: () => null,
     getWindow: () => null,
-    getDevicePixelRatio: () => 1,
+    getDevicePixelRatio: () => options.devicePixelRatio ?? 1,
   }
   return viewport
 }
@@ -463,6 +465,28 @@ describe('scrollToIndex sub-pixel landing', () => {
     expect(h.carries.at(-1)).toBe(0)
   })
 
+  it('converges on a truncating engine at dPR 2, where the carry is all of the landing', async () => {
+    // Why the default content offset includes the carry this scroller applied. The arrival
+    // test no longer re-derives it from the residual — `carryFor` returns the whole residual
+    // below `MAX_CARRY` and zero above it, so that form accepted anything within a pixel
+    // whatever the tolerance said — and reads where the content is instead. Drop the carry
+    // from that read and a 0.75px truncation it has already made good cannot satisfy a
+    // 0.5px tolerance: this resolves `deadline` rather than converging.
+    const viewport = fakeViewport({ snap: 1, devicePixelRatio: 2 })
+    const h = harness({ viewport, itemSize: 100.75 })
+    // All but the last, so the fully-measured fast path does not resolve this before the
+    // convergence loop has run a frame — the arrival test is the read under examination.
+    for (let i = 0; i < 999; i++) h.cache.setSize(i, 100.75)
+
+    const result = await settle(h, h.scroller.scrollToIndex(1, { align: 'start' }))
+
+    expect(result.reason).toBe('converged')
+    expect(result.deviation).toBe(0)
+    // The platform took 100 and the carry moved the content the remaining 0.75.
+    expect(h.viewport.offset).toBe(100)
+    expect(h.carries.at(-1)).toBeCloseTo(0.75, 6)
+  })
+
   it('refuses to carry a whole-pixel discrepancy', async () => {
     // A large difference means something else moved the scroll — usually a clamp
     // against a sizer that has not grown yet. Carrying it would shove the content.
@@ -691,6 +715,10 @@ describe('the convergence trace', () => {
       key: 'c80',
       index: 80,
       target: 8000,
+      // Both in the space `target` is in: where the content is, and how far it still has
+      // to go from there.
+      actual: expect.any(Number),
+      remaining: expect.any(Number),
       arrived: expect.any(Boolean),
       targetMoved: expect.any(Boolean),
       quiet: expect.any(Boolean),
