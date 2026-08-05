@@ -210,10 +210,20 @@ const SIGNATURE_RECHECK_MS = 250
  * By cause, not by magnitude: a size threshold here would be the first compensation
  * heuristic in a file whose whole design is not having one.
  *
- * The honest caveat, since it is not obvious from the names: what the two buckets are
- * really proxying is *whether content above the anchor moved*, and the proxy is not
- * exact. A measured `header` or `stickyHeader` slot moves the list's origin, so it is a
- * `'model'` change wearing a `'measure'` label — see `onSlotGeometryChange`.
+ * What the two buckets are really proxying is *whether content above the anchor moved*,
+ * and one case looks like a mismatch: a measured `header` or `stickyHeader` slot moves
+ * the list's origin via `scrollMargin`, yet `onSlotGeometryChange` publishes `'measure'`.
+ * That is deliberate, and it is not obvious from the names, so:
+ *
+ * - A deferred correction is *held* as a paint offset rather than dropped, so the content
+ *   sits exactly where `'model'` would have put it. The label only chooses which mechanism
+ *   carries the correction — the same argument the `room` bound makes in `writeScroll`.
+ * - Once the correction exceeds `room` the write is taken and the fling cancelled anyway,
+ *   so near an end `'measure'` takes exactly the write `'model'` would have. Which end
+ *   depends on the sign, and not symmetrically: a header that *grows* pushes the bottom
+ *   away by the same amount it displaces the content, so only the space above can run out.
+ * - `'model'` would cancel the fling on *every* slot resize, including the ones that
+ *   repeat through a gesture: an animated composer, a sticky header rewrapping on rotate.
  */
 type Restore = 'none' | 'measure' | 'model'
 
@@ -446,18 +456,31 @@ export function createEngine(initial: EngineOptions): Engine {
   }
 
   /**
-   * A slot changed height, so the list's origin moved.
+   * A slot changed height, so the composed insets moved — and with a `header`, a
+   * `stickyHeader`, or the `leadingSpace` a footer moves under `alignToBottom`, the
+   * list's origin along with them.
    *
    * The same treatment as a measurement landing, and for the same reason: the
    * anchor names an item, `resolveAnchorOffset` re-derives `scrollTop` from it
-   * against the new geometry, and the two movements cancel exactly. This is the
-   * bug every other library has — a header that loads an image and shoves the
-   * view down — not being written here rather than being fixed here.
+   * against the new geometry, and the two movements cancel exactly. That is why a
+   * header which loads an image does not shove the view down here — the bug every
+   * other library has.
+   *
+   * Which is why this does not need to know *which* slot changed, though the three
+   * call sites could all say. Only a header moves the origin during an ordinary
+   * gesture, and `'measure'` already handles that correctly (see {@link Restore}).
+   * The one case left over — a `footer` moving `leadingSpace` under `alignToBottom`
+   * — arises only when the content is shorter than the viewport, which is where
+   * `syncLeadingSpace` produces anything at all, and there the scroll range is
+   * empty: `room` is the distance to the *nearer* end, so it is 0 whenever the
+   * offset is 0, and the write is taken whatever the label says.
    */
   const onSlotGeometryChange = (): void => {
     if (TRACING) trace('slot.resize', () => ({ ...slotSizes }))
-    // A measurement, not a model change: an animated sticky footer resizing under a
-    // fling is exactly the wobble the gate exists to postpone.
+    // A measurement, not a model change, at both ends of the list: an animated sticky
+    // footer resizing under a fling is exactly the wobble the gate exists to postpone,
+    // and a header's correction is *held* rather than dropped. See the `Restore` doc for
+    // why holding it is indistinguishable from writing it.
     publish('measure')
     scroller.notifyModelChanged()
   }

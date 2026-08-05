@@ -3,7 +3,7 @@ import { pretendIPhone, touch, unpretendIPhone } from './iosPlatform.test.helper
 import { createEngine, layoutSignatureFor, type Engine } from './engine.js'
 import { setTraceSink, type TraceEvent } from './trace.js'
 import type { Surface } from './surface.js'
-import type { ItemKey } from './types.js'
+import type { ItemKey, SlotName } from './types.js'
 import type { Viewport } from './viewport.js'
 
 /**
@@ -847,6 +847,140 @@ describe('the engine on iOS WebKit', () => {
     h.measure('c10', 700)
 
     expect(h.scrollWrites().slice(before)).not.toEqual([])
+  })
+})
+
+/**
+ * Mount a slot element, as the React adapter's ref callback would.
+ *
+ * `resize` drives both halves of what a real resize is — the box the element reports and
+ * the observer callback announcing it — because the engine measures synchronously on
+ * attach and then trusts the observer for everything after. Copied from
+ * `engine.dom.test.ts`, as the rest of this file's harness already is, and which is where
+ * the off-iOS baseline for the first case below lives.
+ */
+const mountSlot = (
+  h: Harness,
+  slot: SlotName,
+  height: number,
+): { resize: (next: number) => void } => {
+  const element = document.createElement('div')
+  const rect = vi
+    .spyOn(element, 'getBoundingClientRect')
+    .mockReturnValue(new DOMRect(0, 0, 600, height))
+  document.body.appendChild(element)
+
+  h.engine.observeSlot(element, slot)
+  return {
+    resize: (next) => {
+      rect.mockReturnValue(new DOMRect(0, 0, 600, next))
+      FakeResizeObserver.deliverTo(element, next)
+    },
+  }
+}
+
+/**
+ * Measured slots during a gesture — issue #32.
+ *
+ * No slot was observed anywhere in this file before, which is why the classification could
+ * be argued either way: `onSlotGeometryChange` publishes `'measure'`, yet a measured
+ * `header` moves the list's *origin*, so on the face of it that is a `'model'` change
+ * wearing a `'measure'` label. The argument for keeping it is in `Restore`'s doc; these
+ * cases pin the two claims it rests on.
+ */
+describe('the engine’s measured slots on iOS WebKit', () => {
+  it('holds the view when the header grows mid-fling, instead of writing it', () => {
+    // The off-iOS baseline is `engine.dom.test.ts`'s "holds the view when the header
+    // grows", where the same 400px of growth moves `scrollTop` by 400. Here the write is
+    // refused and the paint offset carries the identical 400 — same visible result, and
+    // the fling survives it.
+    const h = setup()
+    const header = mountSlot(h, 'header', 300)
+    fling(h, 5000)
+    const scrollsBefore = h.scrollWrites().length
+    const anchorBefore = h.engine.getAnchor()
+
+    header.resize(700)
+
+    expect(h.scrollWrites().slice(scrollsBefore)).toEqual([])
+    expect(h.paintOffset()).toBeCloseTo(400, 5)
+    // Not merely compensated back — never disturbed. The anchor is the position of record,
+    // and a geometry change is not a position change.
+    expect(h.engine.getAnchor()).toEqual(anchorBefore)
+  })
+
+  it('takes the write when the header grows near the top of the list', () => {
+    // The second claim, as a fact rather than an assertion: past `room` the write is taken
+    // and the fling lost, so `'measure'` there does exactly what `'model'` would have.
+    //
+    // The top, and not the bottom, is the end that binds a *growth* — which is the whole
+    // reason the classification is a judgement call and not a bug. A growing header pushes
+    // the bottom away by the same 400px it displaces the content by, so the distance to the
+    // bottom never shrinks; only the 100px above the reader can run out. Asserting this at
+    // the bottom instead passes only because this harness leaves slot heights out of
+    // `getMaxScrollOffset`, and fails the moment it does not.
+    const h = setup()
+    const header = mountSlot(h, 'header', 300)
+    fling(h, 100)
+    const scrollsBefore = h.scrollWrites().length
+
+    header.resize(700)
+
+    expect(h.scrollWrites().slice(scrollsBefore)).not.toEqual([])
+    // Nothing held: `paintOffsets` rather than the last one, so "held nothing" is not
+    // satisfied by "never wrote a paint offset at all". Anything under a pixel is the carry.
+    expect(h.paintOffsets().filter((px) => Math.abs(px) > 1)).toEqual([])
+  })
+
+  it('leaves the view alone when a sticky footer resizes mid-fling', () => {
+    // The case the classification was never in doubt for, and the reason it is not: a
+    // sticky footer feeds `scrollPaddingEnd` and `spaceAfter`, neither of which enters the
+    // conversion to scroller space, so `resolveAnchorOffset` returns the offset the list is
+    // already at. `writeScroll` leaves at its sub-pixel early return, *before* the gate is
+    // consulted — so an animated sticky footer under a fling is free by construction rather
+    // than by deferral, and the label could not matter to it either way.
+    const h = setup()
+    const footer = mountSlot(h, 'stickyFooter', 100)
+    fling(h, 5000)
+    const scrollsBefore = h.scrollWrites().length
+    const visibleEndBefore = h.engine.store.getState().visibleRange[1]
+
+    footer.resize(300)
+
+    expect(h.scrollWrites().slice(scrollsBefore)).toEqual([])
+    expect(h.paintOffsets().filter((px) => Math.abs(px) > 1)).toEqual([])
+    // A guard, not the assertion: without it every expectation above is satisfied by a
+    // resize that never reached the engine. 200px more sticky footer is 200px less of the
+    // scrollport for items to be visible in.
+    expect(h.engine.store.getState().visibleRange[1]).toBeLessThan(visibleEndBefore)
+  })
+
+  it('takes the write when an alignToBottom footer moves the leading space', () => {
+    // The one case a per-slot rule would classify differently — `leadingSpace` reaches
+    // `scrollMargin` through `composeInsets`, so this resize really does move the origin —
+    // coming out the same anyway, for the reason `onSlotGeometryChange`'s doc gives.
+    //
+    // `count: 3` is what puts 300px of content in an 800px viewport, which is what makes
+    // `leadingSpace` non-zero at all; `trackContent` is what has the harness report the
+    // empty scroll range that follows from it.
+    const h = setup({ count: 3, alignToBottom: true, trackContent: true })
+    const footer = mountSlot(h, 'footer', 100)
+    // The only momentum frame this list can produce. 300px of content in an 800px viewport
+    // has no scroll range, so every gesture frame reports the same offset.
+    touch(h.scroller, 'touchstart')
+    touch(h.scroller, 'touchend')
+    vi.advanceTimersByTime(50)
+    h.scroll(0)
+    expect(h.maxOffset()).toBe(0)
+    const scrollsBefore = h.scrollWrites().length
+
+    footer.resize(300)
+
+    // The exact origin move: 200px more footer is 200px less `leadingSpace`, and therefore
+    // 200px less `scrollMargin`. Written, not held — a browser then clamps it to 0, which is
+    // the point: there was never anywhere for a shift to go.
+    expect(h.scrollWrites().slice(scrollsBefore)).toEqual([-200])
+    expect(h.paintOffsets().filter((px) => Math.abs(px) > 1)).toEqual([])
   })
 })
 
