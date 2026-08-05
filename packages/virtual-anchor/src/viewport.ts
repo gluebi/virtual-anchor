@@ -127,24 +127,34 @@ export function createElementViewport(element: HTMLElement): Viewport {
       if (!view) return () => {}
 
       /**
-       * Last reported size, so the synthetic first entry is not reported as a change.
+       * The last border box delivered, so a delivery that changed nothing is dropped.
        *
-       * `observe()` always delivers an entry for a newly observed element. Reported as a
-       * resize it looks like the scrollport changing size one frame after mount — and a
-       * consumer that reads a scrollport resize as a reflow then discards every
-       * measurement it has, including any restored from a snapshot. That is how the
-       * whole `sizeSnapshot` feature came to do nothing at all.
+       * Both axes, because `observe(element, { box: 'border-box' })` delivers on either
+       * and a consumer reads any resize as "the layout may have changed" — which it
+       * answers by re-reading a fingerprint of the scrollport's *width*, the thing that
+       * decides where text wraps. Comparing the block size alone therefore swallowed
+       * exactly the deliveries that mattered: a scrollport that changed width without
+       * changing height kept every row height measured under the old width (#34).
+       *
+       * The first delivery is forwarded, since there is nothing yet to compare it
+       * against. Not reading *that* one as a change is the consumer's job — one frame
+       * after mount it looks like the scrollport resizing, and a consumer that reads a
+       * resize as a reflow discards every measurement it has, including any restored from
+       * a snapshot. That is how the whole `sizeSnapshot` feature came to do nothing.
        */
-      let last: number | null = null
+      let last: { block: number; inline: number } | null = null
 
       const observer = new view.ResizeObserver((entries) => {
         const entry = entries[entries.length - 1]
         if (!entry) return
         const box = entry.borderBoxSize[0]
-        const size = box ? box.blockSize : entry.contentRect.height
-        if (size === last) return
-        last = size
-        onResize(size)
+        const block = box ? box.blockSize : entry.contentRect.height
+        const inline = box ? box.inlineSize : entry.contentRect.width
+        // A null `last` compares unequal on the first term, which is the first delivery
+        // going through. Written as an optional chain because eslint asks for one here.
+        if (last?.block === block && last.inline === inline) return
+        last = { block, inline }
+        onResize(block)
       })
       observer.observe(element, { box: 'border-box' })
       return () => {

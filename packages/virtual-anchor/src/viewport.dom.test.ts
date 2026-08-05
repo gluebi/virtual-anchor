@@ -275,14 +275,24 @@ describe('viewport size observation', () => {
       this.disconnected = true
     }
 
-    deliver(target: Element, blockSize: number): void {
+    deliver(target: Element, blockSize: number, inlineSize: number): void {
+      this.emit(target, blockSize, inlineSize, [{ blockSize, inlineSize }])
+    }
+
+    /** As older Safari delivers it: `borderBoxSize` is an empty list. */
+    deliverWithoutBorderBox(target: Element, blockSize: number, inlineSize: number): void {
+      this.emit(target, blockSize, inlineSize, [])
+    }
+
+    private emit(
+      target: Element,
+      blockSize: number,
+      inlineSize: number,
+      borderBoxSize: { blockSize: number; inlineSize: number }[],
+    ): void {
       this.callback(
         [
-          {
-            target,
-            borderBoxSize: [{ blockSize, inlineSize: 0 }],
-            contentRect: new DOMRect(0, 0, 0, blockSize),
-          },
+          { target, borderBoxSize, contentRect: new DOMRect(0, 0, inlineSize, blockSize) },
         ] as unknown as ResizeObserverEntry[],
         this,
       )
@@ -298,28 +308,65 @@ describe('viewport size observation', () => {
     })
   })
 
-  it('does not report the synthetic first entry as a resize', () => {
-    // `observe()` always delivers an entry for a newly observed element. Reported as a
-    // resize it reads as the scrollport changing size one frame after mount, and a
-    // consumer that treats that as a reflow discards every measurement it holds —
-    // which is exactly how the `sizeSnapshot` feature came to do nothing.
+  /** An observed element, with the observer that feeds it and the callback it feeds. */
+  const observeElement = () => {
     const element = document.createElement('div')
     document.body.appendChild(element)
     const onResize = vi.fn()
-
     createElementViewport(element).observeSize(onResize)
-    const observer = FakeResizeObserver.latest!
+    return { element, observer: FakeResizeObserver.latest!, onResize }
+  }
 
-    observer.deliver(element, 800)
+  it('drops a delivery that changed nothing, and reports the block size for one that did', () => {
+    // The synthetic first entry `observe()` delivers for a newly observed element *is*
+    // reported — there is nothing yet to compare it against. Not reading that one as a
+    // change is the consumer's job: read as a reflow it discards every measurement one
+    // frame after mount, which is how the `sizeSnapshot` feature came to do nothing.
+    const { element, observer, onResize } = observeElement()
+
+    observer.deliver(element, 800, 600)
     expect(onResize).toHaveBeenCalledExactlyOnceWith(800)
 
-    // The same size again is not a change.
-    observer.deliver(element, 800)
+    // The same box again is not a change.
+    observer.deliver(element, 800, 600)
     expect(onResize).toHaveBeenCalledOnce()
 
-    // A genuine change still reports.
-    observer.deliver(element, 600)
+    // A height change still reports — and reports the block size, which is the number
+    // the callback is defined to carry.
+    observer.deliver(element, 600, 600)
     expect(onResize).toHaveBeenLastCalledWith(600)
+  })
+
+  it('reports a width-only resize, which is the axis that reflows', () => {
+    // The #34 defect: the consumer answers a resize by re-reading a fingerprint of the
+    // scrollport's *width*, so swallowing a width-only delivery left every row height
+    // measured under the old width — visible as rows drawn overlapping or with gaps,
+    // healing only for the rows still mounted, which the item observer re-measures.
+    const { element, observer, onResize } = observeElement()
+
+    observer.deliver(element, 800, 800)
+    onResize.mockClear()
+
+    // A responsive column narrowing, or a sidebar opening beside the list: same height.
+    observer.deliver(element, 800, 400)
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(800)
+
+    // Still deduped on the pair, so the repeat costs the consumer nothing.
+    observer.deliver(element, 800, 400)
+    expect(onResize).toHaveBeenCalledOnce()
+  })
+
+  it('falls back to the content rect on both axes when there is no border box', () => {
+    // Older Safari delivers `borderBoxSize` as an empty list. Reading only
+    // `contentRect.height` there would reintroduce the swallow on the inline axis.
+    const { element, observer, onResize } = observeElement()
+
+    observer.deliverWithoutBorderBox(element, 800, 800)
+    expect(onResize).toHaveBeenCalledExactlyOnceWith(800)
+
+    observer.deliverWithoutBorderBox(element, 800, 400)
+    expect(onResize).toHaveBeenLastCalledWith(800)
+    expect(onResize).toHaveBeenCalledTimes(2)
   })
 
   it('disconnects on cleanup', () => {
@@ -355,6 +402,21 @@ describe('viewport size observation', () => {
     onResize.mockClear()
     window.dispatchEvent(new Event('resize'))
     expect(onResize).not.toHaveBeenCalled()
+  })
+
+  it('reports every window resize, even one that leaves innerHeight alone', () => {
+    // The asymmetry with the element scroller, and the reason #34 was an element-scroller
+    // bug only: this implementation dedups nothing. So a purely horizontal window drag —
+    // the ordinary way a `windowScroller` list's scrollport changes width — already
+    // reaches the consumer, which discards the number and re-reads the fingerprint itself.
+    const onResize = vi.fn()
+    const stop = createWindowViewport(window).observeSize(onResize)
+
+    window.dispatchEvent(new Event('resize'))
+    window.dispatchEvent(new Event('resize'))
+    expect(onResize).toHaveBeenCalledTimes(2)
+
+    stop()
   })
 
   it('gives a window scroller no gate target, since it cannot leave the screen', () => {
