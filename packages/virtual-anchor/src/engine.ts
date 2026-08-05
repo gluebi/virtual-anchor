@@ -1337,11 +1337,7 @@ export function createEngine(initial: EngineOptions): Engine {
       // `getElement()`, and for a document scroller that is `documentElement`, whose
       // border-box height is the *content* height — so every content growth read as a
       // viewport resize and discarded the whole measurement cache.
-      cleanups.push(
-        viewport.observeSize(() => {
-          onViewportResize()
-        }),
-      )
+      cleanups.push(viewport.observeSize(onViewportResize))
 
       const gateTarget = viewport.getGateTarget()
       if (gateTarget) {

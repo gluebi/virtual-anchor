@@ -68,6 +68,14 @@ export interface Viewport {
   /**
    * Observe changes to the *scrollport's* size.
    *
+   * The callback carries nothing, and that is the whole contract: the scrollport's box
+   * moved on one axis or the other, and a consumer that wants a dimension asks for it —
+   * {@link getViewportSize} for the scrolling axis, {@link getScrollportElement} for the
+   * width that decides where text wraps. It used to report the block size, from a time
+   * when a resize *was* a height change; no consumer ever read the number, and once a
+   * width-only resize started being forwarded (#34) one number could no longer say which
+   * axis had moved anyway.
+   *
    * A `Viewport` concern rather than the engine's, because only the viewport knows what
    * to watch. Getting this wrong was a critical bug: the engine observed
    * `getElement()`, and for a document scroller that is `documentElement`, whose
@@ -76,7 +84,7 @@ export interface Viewport {
    * cache — a window-scrolled list erased its own measurement history as it scrolled
    * and ran permanently on estimates.
    */
-  observeSize(onResize: (size: number) => void): () => void
+  observeSize(onResize: () => void): () => void
   /**
    * The element an on-screen check should observe, or null if the scrollport *is* the
    * screen and no check is meaningful.
@@ -154,7 +162,7 @@ export function createElementViewport(element: HTMLElement): Viewport {
         // going through. Written as an optional chain because eslint asks for one here.
         if (last?.block === block && last.inline === inline) return
         last = { block, inline }
-        onResize(block)
+        onResize()
       })
       observer.observe(element, { box: 'border-box' })
       return () => {
@@ -196,9 +204,30 @@ export function createWindowViewport(view: Window): Viewport {
     // visualViewport, which is what actually changes when a mobile URL bar or a soft
     // keyboard appears). Observing `documentElement` here would report the content
     // height instead.
+    //
+    // Nothing is deduped here, unlike the element scroller above. What that rules out is
+    // deduping on `innerHeight` *alone*, which would swallow a purely horizontal window
+    // drag — the ordinary way a `windowScroller` list's scrollport changes width, and #34
+    // imported. A pair, `innerHeight` against the scrollport's `clientWidth`, would be as
+    // safe here as the border box is there; it is simply not done, and the omission costs a
+    // `layoutSignatureFor` and a non-invalidating `publish` on every event that moved
+    // nothing — which `visualViewport` emits in bursts through a URL-bar animation or a
+    // pinch-zoom. Left alone deliberately rather than by oversight: reporting every resize
+    // is what the case below this one now pins, so narrowing it is a behaviour change with
+    // its own tests to write, not a cleanup to fold in here.
+    //
+    // `report` rather than handing `onResize` to `addEventListener` directly, which would
+    // compile and behave identically today. The DOM invokes a listener *with* the `Event`,
+    // and this interface says the callback receives nothing; the only consumer declares no
+    // parameter, so the argument is harmless — it is ignored by the one thing that could
+    // read it. The wrapper is what keeps the promise true rather than accidentally true,
+    // for one closure per subscription and a stable reference to unsubscribe with. Note
+    // {@link Viewport.addEventListener} does pass its listener straight through, so it
+    // hands over an `Event` the same way; both implementations do, so they agree with each
+    // other, which is the property that matters and the one this preserves here.
     observeSize(onResize) {
       const report = (): void => {
-        onResize(view.innerHeight)
+        onResize()
       }
       view.addEventListener('resize', report, { passive: true })
       view.visualViewport?.addEventListener('resize', report, { passive: true })
