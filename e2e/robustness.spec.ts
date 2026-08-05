@@ -362,3 +362,82 @@ test.describe('a sticky header that changes height', () => {
     )
   })
 })
+
+/** A row's own border-box height, by virtual key. */
+function rowHeight(page: Page, key: string): Promise<number> {
+  return page.evaluate(
+    (k) =>
+      document.querySelector(`[data-virtual-key="${k}"]`)?.getBoundingClientRect().height ?? -1,
+    key,
+  )
+}
+
+/** The scrollport's own content height, which this case needs to stay put. */
+function scrollportHeight(page: Page): Promise<number> {
+  return page.locator('.scroller').evaluate((el) => el.clientHeight)
+}
+
+test.describe('a scrollport that changes width without changing height', () => {
+  test('discards the heights measured at the old width', async ({ page }) => {
+    // Issue #34, in a real browser. Everything else covering this drives *synthesised*
+    // ResizeObserver deliveries, because jsdom performs no layout — so nothing else
+    // exercises the thing that actually went wrong: a reflow that moves where text wraps
+    // while leaving the scrollport exactly as tall as it was. That combination is the whole
+    // defect, and it is not expressible without a layout engine.
+    // The deep link is the scroll: `open` blocks until the demo reports `settled=`, which the
+    // same effect that drove `scrollToKey('comment-400', { align: 'start' })` sets. So the
+    // rows on the way there have been measured by the time this returns, and an explicit
+    // `scrollTo` to the same key would be a round trip that changes nothing.
+    await open(page, 'comment=400')
+
+    const before = await page.evaluate(() => window.__list.takeSizeSnapshot())
+    const measuredBefore = before?.sizes.length ?? 0
+    // Guard the premise: with nothing measured there is nothing to invalidate, and the
+    // assertions below would hold for the wrong reason.
+    expect(measuredBefore).toBeGreaterThan(5)
+
+    // A row that is actually on screen, not merely in the snapshot: most of what has been
+    // measured was measured on the way past and is long unmounted, and an unmounted row has
+    // no box to report a height for.
+    const rowKey = await page.evaluate(
+      () => document.querySelector('[data-virtual-key]')?.getAttribute('data-virtual-key') ?? '',
+    )
+    const heightBefore = await rowHeight(page, rowKey)
+    expect(heightBefore).toBeGreaterThan(0)
+    const scrollportBefore = await scrollportHeight(page)
+
+    // Narrower, same height. 1150 is chosen against measurement, not by feel: at 1280 the
+    // row is 277.25px tall, at 1150 it is 300.5px, and the scrollport is 635px at both. Go
+    // much below 1050 and the demo's header controls wrap onto a second row, which takes 44px
+    // off the scrollport and turns this into an ordinary two-axis resize.
+    await page.setViewportSize({ width: 1150, height: 720 })
+
+    // The honest signal that the reflow happened, rather than a timeout: a row that really
+    // is a different height than it was.
+    await expect.poll(() => rowHeight(page, rowKey)).not.toBe(heightBefore)
+
+    // Load-bearing. If the scrollport's height moved too, this would be an ordinary resize
+    // that the pre-fix code already caught, and the case would pass against the defect
+    // rather than because of the fix. `a sticky header that changes height` above depends on
+    // narrowing far enough to wrap the header; this one depends on not doing that, and says
+    // so out loud rather than hoping.
+    expect(
+      await scrollportHeight(page),
+      'the scrollport must not have changed height, or this exercises the wrong path',
+    ).toBe(scrollportBefore)
+
+    // Polled, not read once: the row height above changes at layout, and the library reacts
+    // one `ResizeObserver` delivery later. Reading the snapshot straight after the reflow
+    // catches WebKit mid-way and asserts against a cache that has not been told yet — which
+    // is a race in the test, not in the library, and it fails only on WebKit.
+    //
+    // The key the cache is trusted against has to move, because nothing measured under the
+    // old one may survive: a height taken at a different width is not stale, it is wrong.
+    await expect
+      .poll(() => page.evaluate(() => window.__list.takeSizeSnapshot()?.layoutSignature))
+      .not.toBe(before?.layoutSignature)
+
+    const after = await page.evaluate(() => window.__list.takeSizeSnapshot())
+    expect(after?.sizes.length ?? 0).toBeLessThan(measuredBefore)
+  })
+})

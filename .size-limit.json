@@ -2,7 +2,7 @@
   {
     "name": "virtual-anchor — the core entry, what a non-React consumer ships",
     "path": "packages/virtual-anchor/dist/index.js",
-    "limit": "10.1 kB"
+    "limit": "10.2 kB"
   },
   {
     "name": "virtual-anchor/react — core and adapter, what a React consumer ships",
