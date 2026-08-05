@@ -174,6 +174,26 @@ const DEFAULT_EDGE_THRESHOLD = 600
  */
 const REPIN_QUIET_MS = 150
 /**
+ * How often a measurement may re-read the layout signature.
+ *
+ * A rate limit, not a threshold: it decides nothing about the content, only how often the
+ * question is asked. Necessary because the only reliable signal that the root font size
+ * changed *is* a measurement — a change re-lays-out every mounted row and fires their
+ * observers — and that path runs for every row measured during a fling. Reading a computed
+ * style there costs nothing per call and everything per hundred.
+ *
+ * 250ms because the cause is a human one: a browser's default size being changed, or an
+ * accessibility toggle being flipped. A quarter of a second of latency against an action
+ * that takes one is not perceptible, and it bounds the reads during a three-second fling to
+ * a dozen.
+ *
+ * Not the timestamp comparison `momentum.ts` refuses. That one would have replaced a free
+ * state check with arithmetic; this one is arithmetic standing in front of a
+ * `getComputedStyle`, and there is no state to check instead — the absence of any signal is
+ * the whole reason this exists.
+ */
+const SIGNATURE_RECHECK_MS = 250
+/**
  * Whether a publish may move the scroll offset, and on whose authority.
  *
  * The distinction exists because iOS refuses scroll writes during a fling and the two
@@ -1107,27 +1127,107 @@ export function createEngine(initial: EngineOptions): Engine {
     )
   }
 
+  /**
+   * Re-read the layout signature, and discard every measurement if it moved.
+   *
+   * `layoutSignatureFor` hashes exactly the things that reflow text — content width, root
+   * font size, device pixel ratio — and is already the key a size snapshot is trusted
+   * against, so reusing it means one definition of "the layout changed".
+   *
+   * From the scrollport, not `getElement()`: it is the scrolling box's width that decides how
+   * text wraps, and this has to read the same element the adapter seeded the signature from —
+   * otherwise the very first observation sees a change and clears every measurement.
+   *
+   * @returns whether the cache was discarded. Every caller has to act on it, because that
+   * moved every offset in the list.
+   */
+  const recheckLayoutSignature = (): boolean => {
+    const signature = layoutSignatureFor(viewport.getScrollportElement())
+    const changed = cache.setLayoutSignature(signature)
+
+    // The first observation merely learns the signature; there is no previous layout for
+    // it to differ from, and clearing would throw away measurements taken moments
+    // earlier during mount.
+    const invalidated = changed && signatureKnown
+    if (invalidated) cache.clearAll()
+    signatureKnown = true
+    return invalidated
+  }
+
+  /** When the signature was last re-read off a measurement, for {@link SIGNATURE_RECHECK_MS}. */
+  let signatureCheckedAt = 0
+
   const resizer: Resizer = createResizer({
     onItemResize(batch) {
+      // Before the batch is applied, for two separate reasons.
+      //
+      // A `ResizeObserver` callback runs *after* layout, so the computed-style read inside
+      // `layoutSignatureFor` forces no reflow here — but `publish` below writes styles, and
+      // a read after that would. And a signature change clears the cache, so the batch has
+      // to land afterwards: these measurements were taken under the *new* layout and are
+      // the only correct sizes in the list at this moment.
+      //
+      // Why here at all: a root font size change re-wraps text without moving the
+      // scrollport, so `observeSize` never fires and the width term never changes. What it
+      // does do is re-lay-out every mounted row, which is this callback. The signal was
+      // always here; nothing was asking.
+      //
+      // Worth being honest about the shape of this, because it is not a general mechanism:
+      // each term of the signature is caught by whatever side effect it happens to have that
+      // something already listens for — the width by a scrollport resize, the font size by
+      // rows re-laying-out. A term with no layout consequence at all would be caught by
+      // neither and would need a subscription of its own. Adding one to `layoutSignatureFor`
+      // therefore means asking what would notice it, and the answer may be "nothing yet".
+      //
+      // Two adjacent paths deliberately not hooked:
+      //
+      // `observeItem` measures synchronously on attach and never reaches here, so a font size
+      // change with nothing mounted is not seen at mount time. It does not need to be: a
+      // newly observed element gets a synthetic first delivery, which lands in this batch a
+      // tick later, so the gap is one delivery plus at most one rate-limit window and it
+      // closes itself. Paying a `getComputedStyle` per row on the mount path — which runs for
+      // every row of every scroll — to buy that tick back would be a bad trade.
+      //
+      // `onSlotResize` is not hooked either, and runs *before* this in the same callback. A
+      // font size change that re-lays-out a slot re-lays-out any mounted row too, so this
+      // batch sees it; the case where it would not — no rows mounted at all — has nothing
+      // measured to invalidate. What that leaves is one slot publish against a cache this
+      // callback is about to clear, and since both publishes happen synchronously before
+      // paint, nothing is drawn from the stale one.
+      const stamp = now()
+      let invalidated = false
+      if (stamp - signatureCheckedAt >= SIGNATURE_RECHECK_MS) {
+        signatureCheckedAt = stamp
+        invalidated = recheckLayoutSignature()
+      }
+
       let changed = false
       for (const [key, size] of batch) {
         const index = cache.indexOf(key)
         if (index < 0) continue
         if (cache.setSize(index, size)) changed = true
       }
-      if (!changed) return
+      // Two independent reasons to go on: a size in the batch moved, or the cache was
+      // discarded a moment ago — in which case every offset below the first item moved and
+      // there is a restore to do whether or not this batch's own sizes are news.
+      if (!changed && !invalidated) return
       if (TRACING) {
         trace('measure.batch', () => ({
           count: batch.length,
           totalSize: cache.totalSize(),
           scrollOffset: viewport.getScrollOffset(),
+          invalidated,
         }))
       }
 
       cache.refreshEstimate(viewport.getViewportSize())
       // Re-derive the scroll offset from the anchor: the item that was under the
       // viewport top stays under the viewport top, whatever moved above it.
-      publish('measure')
+      //
+      // `'model'` when the signature moved, on the same reasoning as the resize path: a
+      // discarded cache moved every offset below the first item, and a correction that large
+      // cannot wait for a fling to end without teleporting the reader.
+      publish(invalidated ? 'model' : 'measure')
       scroller.notifyModelChanged()
     },
 
@@ -1153,21 +1253,10 @@ export function createEngine(initial: EngineOptions): Engine {
     // changing a single line box, so discarding the cache for them is pure waste;
     // combined with a restored snapshot it is destructive.
     //
-    // `layoutSignatureFor` already hashes exactly the things that *do* reflow — content
-    // width, root font size, device pixel ratio — and is already the key a size snapshot
-    // is trusted against. Reusing it means one definition of "the layout changed".
-    // From the scrollport, not `getElement()`: it is the scrolling box's width that decides how
-    // text wraps, and this has to read the same element the adapter seeded the signature from —
-    // otherwise the very first observation sees a change and clears every measurement.
-    const signature = layoutSignatureFor(viewport.getScrollportElement())
-    const changed = cache.setLayoutSignature(signature)
-
-    // The first observation merely learns the signature; there is no previous layout for
-    // it to differ from, and clearing would throw away measurements taken moments
-    // earlier during mount.
-    const invalidated = changed && signatureKnown
-    if (invalidated) cache.clearAll()
-    signatureKnown = true
+    // Which of the signature's terms moved is not this function's business — it asks the
+    // same question a measurement asks, and `recheckLayoutSignature` is the one place that
+    // answers it. A resize is simply the trigger that catches the *width* term.
+    const invalidated = recheckLayoutSignature()
 
     // A reflow that discarded every measurement moved every offset in the list, so
     // the restore is not postponable. A height-only resize is — and on iOS that case
