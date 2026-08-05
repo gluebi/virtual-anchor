@@ -4,6 +4,7 @@ import {
   isSelfWrite,
   resolveAnchorOffset,
 } from './anchor.js'
+import { observeResolution } from './env.js'
 import { composeInsets, ListGeometry, type ListInsets } from './listGeometry.js'
 import { createScrollerGate, type ScrollerGate } from './gate.js'
 import { createResizer, type Resizer } from './resizer.js'
@@ -174,6 +175,26 @@ const DEFAULT_EDGE_THRESHOLD = 600
  */
 const REPIN_QUIET_MS = 150
 /**
+ * How often a measurement may re-read the layout signature.
+ *
+ * A rate limit, not a threshold: it decides nothing about the content, only how often the
+ * question is asked. Necessary because the only reliable signal that the root font size
+ * changed *is* a measurement — a change re-lays-out every mounted row and fires their
+ * observers — and that path runs for every row measured during a fling. Reading a computed
+ * style there costs nothing per call and everything per hundred.
+ *
+ * 250ms because the cause is a human one: a browser's default size being changed, or an
+ * accessibility toggle being flipped. A quarter of a second of latency against an action
+ * that takes one is not perceptible, and it bounds the reads during a three-second fling to
+ * a dozen.
+ *
+ * Not the timestamp comparison `momentum.ts` refuses. That one would have replaced a free
+ * state check with arithmetic; this one is arithmetic standing in front of a
+ * `getComputedStyle`, and there is no state to check instead — the absence of any signal is
+ * the whole reason this exists.
+ */
+const SIGNATURE_RECHECK_MS = 250
+/**
  * Whether a publish may move the scroll offset, and on whose authority.
  *
  * The distinction exists because iOS refuses scroll writes during a fling and the two
@@ -189,10 +210,20 @@ const REPIN_QUIET_MS = 150
  * By cause, not by magnitude: a size threshold here would be the first compensation
  * heuristic in a file whose whole design is not having one.
  *
- * The honest caveat, since it is not obvious from the names: what the two buckets are
- * really proxying is *whether content above the anchor moved*, and the proxy is not
- * exact. A measured `header` or `stickyHeader` slot moves the list's origin, so it is a
- * `'model'` change wearing a `'measure'` label — see `onSlotGeometryChange`.
+ * What the two buckets are really proxying is *whether content above the anchor moved*,
+ * and one case looks like a mismatch: a measured `header` or `stickyHeader` slot moves
+ * the list's origin via `scrollMargin`, yet `onSlotGeometryChange` publishes `'measure'`.
+ * That is deliberate, and it is not obvious from the names, so:
+ *
+ * - A deferred correction is *held* as a paint offset rather than dropped, so the content
+ *   sits exactly where `'model'` would have put it. The label only chooses which mechanism
+ *   carries the correction — the same argument the `room` bound makes in `writeScroll`.
+ * - Once the correction exceeds `room` the write is taken and the fling cancelled anyway,
+ *   so near an end `'measure'` takes exactly the write `'model'` would have. Which end
+ *   depends on the sign, and not symmetrically: a header that *grows* pushes the bottom
+ *   away by the same amount it displaces the content, so only the space above can run out.
+ * - `'model'` would cancel the fling on *every* slot resize, including the ones that
+ *   repeat through a gesture: an animated composer, a sticky header rewrapping on rotate.
  */
 type Restore = 'none' | 'measure' | 'model'
 
@@ -425,18 +456,31 @@ export function createEngine(initial: EngineOptions): Engine {
   }
 
   /**
-   * A slot changed height, so the list's origin moved.
+   * A slot changed height, so the composed insets moved — and with a `header`, a
+   * `stickyHeader`, or the `leadingSpace` a footer moves under `alignToBottom`, the
+   * list's origin along with them.
    *
    * The same treatment as a measurement landing, and for the same reason: the
    * anchor names an item, `resolveAnchorOffset` re-derives `scrollTop` from it
-   * against the new geometry, and the two movements cancel exactly. This is the
-   * bug every other library has — a header that loads an image and shoves the
-   * view down — not being written here rather than being fixed here.
+   * against the new geometry, and the two movements cancel exactly. That is why a
+   * header which loads an image does not shove the view down here — the bug every
+   * other library has.
+   *
+   * Which is why this does not need to know *which* slot changed, though the three
+   * call sites could all say. Only a header moves the origin during an ordinary
+   * gesture, and `'measure'` already handles that correctly (see {@link Restore}).
+   * The one case left over — a `footer` moving `leadingSpace` under `alignToBottom`
+   * — arises only when the content is shorter than the viewport, which is where
+   * `syncLeadingSpace` produces anything at all, and there the scroll range is
+   * empty: `room` is the distance to the *nearer* end, so it is 0 whenever the
+   * offset is 0, and the write is taken whatever the label says.
    */
   const onSlotGeometryChange = (): void => {
     if (TRACING) trace('slot.resize', () => ({ ...slotSizes }))
-    // A measurement, not a model change: an animated sticky footer resizing under a
-    // fling is exactly the wobble the gate exists to postpone.
+    // A measurement, not a model change, at both ends of the list: an animated sticky
+    // footer resizing under a fling is exactly the wobble the gate exists to postpone,
+    // and a header's correction is *held* rather than dropped. See the `Restore` doc for
+    // why holding it is indistinguishable from writing it.
     publish('measure')
     scroller.notifyModelChanged()
   }
@@ -595,7 +639,7 @@ export function createEngine(initial: EngineOptions): Engine {
     previous[0] === from && previous[1] === to ? previous : [from, to]
 
   const computeRanges = (
-    scrollOffset: number,
+    contentAt: number,
   ): { rendered: readonly [number, number]; visible: readonly [number, number] } => {
     // Through the shared constant, not a fresh `[0, -1]`: an empty list must keep publishing the
     // same reference, or emptying and staying empty reads as a change.
@@ -606,8 +650,8 @@ export function createEngine(initial: EngineOptions): Engine {
     }
 
     const g = syncGeometry()
-    const visible = g.visibleBand(scrollOffset)
-    const buffered = g.bufferedBand(scrollOffset, options.buffer ?? DEFAULT_BUFFER)
+    const visible = g.visibleBand(contentAt)
+    const buffered = g.bufferedBand(contentAt, options.buffer ?? DEFAULT_BUFFER)
 
     // The pinned scroll target is deliberately *not* unioned in here. Widening the
     // contiguous span to reach a distant target mounts every item in between: a smooth
@@ -685,9 +729,9 @@ export function createEngine(initial: EngineOptions): Engine {
    * visibility band — or it describes a position the view is not at, and each momentum
    * event then makes it worse rather than holding it still.
    *
-   * The two reads that deliberately stay in scroll space are `getMaxScrollOffset` and
-   * the offset published to consumers: both are about the scrollbar, which is exactly
-   * the thing the shift is hiding from.
+   * Which reads deliberately stay in scroll space is said once, in `publish`, where both
+   * offsets are taken. Deliberately not repeated here: two copies of that list is how the
+   * visibility band came to be *described* as reading content space while it did not.
    */
   const contentOffset = (): number => viewport.getScrollOffset() + carry + pendingShift
 
@@ -940,12 +984,22 @@ export function createEngine(initial: EngineOptions): Engine {
       }
     }
 
-    // Two offsets, deliberately. The rendered range and the visibility band compare
-    // against item offsets, so they want where the content *is*: computing them from the
-    // raw offset while a shift is outstanding centres the mounted window up to two
-    // viewports away from the screen, which paints blank, and reports comments visible
-    // that never appeared. `atBottom` and the published offset are about the scrollbar,
-    // which is the one thing the shift is deliberately hiding from.
+    // Two offsets, deliberately, and every read below belongs to exactly one of them.
+    //
+    // `contentAt` — the anchor, the rendered range and the visibility band. All three
+    // compare against item offsets, so all three want where the content *is*. Computing
+    // the range from the raw offset while a shift is outstanding centres the mounted
+    // window up to the remaining scroll range away from the screen, which paints blank;
+    // computing the *band* from it hands `tracker.sample` a strip of list coordinates
+    // the reader is not looking at, so every visibility event fired during the hold
+    // names rows that never appeared. The band was the one missed when the space was
+    // split, and it is the one nothing gives away: the render stays correct, only the
+    // reporting is wrong.
+    //
+    // `scrollOffset` — the offset published to consumers, `atBottom` and `notifyEdges`.
+    // All three are about the scrollbar, and the scrollbar is the one thing the shift is
+    // deliberately hiding from: it is precisely the part of the view that has *not*
+    // moved with the content.
     const contentAt = contentOffset()
     const scrollOffset = viewport.getScrollOffset()
     const ranges = computeRanges(contentAt)
@@ -986,7 +1040,7 @@ export function createEngine(initial: EngineOptions): Engine {
       }
     }
 
-    sampleVisibility(ranges.visible, scrollOffset)
+    sampleVisibility(ranges.visible, contentAt)
   }
 
   let visibilityTimer: ReturnType<typeof setTimeout> | null = null
@@ -1026,8 +1080,10 @@ export function createEngine(initial: EngineOptions): Engine {
       () => {
         visibilityTimer = null
         armedFor = null
-        const scrollOffset = viewport.getScrollOffset()
-        sampleVisibility(computeRanges(scrollOffset).visible, scrollOffset)
+        // Content space, like every other sample: this fires when nothing else is
+        // happening, so during a held correction it is usually the *only* sample taken.
+        const contentAt = contentOffset()
+        sampleVisibility(computeRanges(contentAt).visible, contentAt)
       },
       Math.max(0, due - stamp),
     )
@@ -1039,15 +1095,19 @@ export function createEngine(initial: EngineOptions): Engine {
    * The arming used to sit at each of the three early returns below, which made "every
    * sample re-arms" an invariant maintained by hand: a fourth early return would silently
    * stop the clock and bring back the dwell that never completes.
+   *
+   * @param contentAt Content space, from {@link contentOffset}. The band built from it is
+   * compared against `cache.offsetOf`, so a raw scroll offset here reports rows the reader
+   * never saw for as long as a correction is held.
    */
-  const sampleVisibility = (visible: readonly [number, number], scrollOffset: number): void => {
-    sampleVisibilityOnce(visible, scrollOffset)
+  const sampleVisibility = (visible: readonly [number, number], contentAt: number): void => {
+    sampleVisibilityOnce(visible, contentAt)
     armVisibilityTimer()
   }
 
   const sampleVisibilityOnce = (
     visible: readonly [number, number],
-    scrollOffset: number,
+    contentAt: number,
   ): void => {
     const g = syncGeometry()
 
@@ -1067,10 +1127,10 @@ export function createEngine(initial: EngineOptions): Engine {
     // The conversion from the gate's scrollport-relative band into list coordinates is
     // `ListGeometry`'s job: doing it by hand in a second place is what let the document
     // scroller apply its offset twice.
-    const visibleBand = g.visibleBand(scrollOffset)
+    const visibleBand = g.visibleBand(contentAt)
     const onScreen = gate?.getVisibleBand() ?? null
     const band =
-      onScreen === null ? visibleBand : g.clampToOnScreen(scrollOffset, visibleBand, onScreen)
+      onScreen === null ? visibleBand : g.clampToOnScreen(contentAt, visibleBand, onScreen)
 
     if (band === null) {
       notifyVisibility(tracker.flushLeaves(now()))
@@ -1107,27 +1167,107 @@ export function createEngine(initial: EngineOptions): Engine {
     )
   }
 
+  /**
+   * Re-read the layout signature, and discard every measurement if it moved.
+   *
+   * `layoutSignatureFor` hashes exactly the things that reflow text — content width, root
+   * font size, device pixel ratio — and is already the key a size snapshot is trusted
+   * against, so reusing it means one definition of "the layout changed".
+   *
+   * From the scrollport, not `getElement()`: it is the scrolling box's width that decides how
+   * text wraps, and this has to read the same element the adapter seeded the signature from —
+   * otherwise the very first observation sees a change and clears every measurement.
+   *
+   * @returns whether the cache was discarded. Every caller has to act on it, because that
+   * moved every offset in the list.
+   */
+  const recheckLayoutSignature = (): boolean => {
+    const signature = layoutSignatureFor(viewport.getScrollportElement())
+    const changed = cache.setLayoutSignature(signature)
+
+    // The first observation merely learns the signature; there is no previous layout for
+    // it to differ from, and clearing would throw away measurements taken moments
+    // earlier during mount.
+    const invalidated = changed && signatureKnown
+    if (invalidated) cache.clearAll()
+    signatureKnown = true
+    return invalidated
+  }
+
+  /** When the signature was last re-read off a measurement, for {@link SIGNATURE_RECHECK_MS}. */
+  let signatureCheckedAt = 0
+
   const resizer: Resizer = createResizer({
     onItemResize(batch) {
+      // Before the batch is applied, for two separate reasons.
+      //
+      // A `ResizeObserver` callback runs *after* layout, so the computed-style read inside
+      // `layoutSignatureFor` forces no reflow here — but `publish` below writes styles, and
+      // a read after that would. And a signature change clears the cache, so the batch has
+      // to land afterwards: these measurements were taken under the *new* layout and are
+      // the only correct sizes in the list at this moment.
+      //
+      // Why here at all: a root font size change re-wraps text without moving the
+      // scrollport, so `observeSize` never fires and the width term never changes. What it
+      // does do is re-lay-out every mounted row, which is this callback. The signal was
+      // always here; nothing was asking.
+      //
+      // Worth being honest about the shape of this, because it is not a general mechanism:
+      // each term of the signature is caught by whatever side effect it happens to have that
+      // something already listens for — the width by a scrollport resize, the font size by
+      // rows re-laying-out. A term with no layout consequence at all would be caught by
+      // neither and would need a subscription of its own. Adding one to `layoutSignatureFor`
+      // therefore means asking what would notice it, and the answer may be "nothing yet".
+      //
+      // Two adjacent paths deliberately not hooked:
+      //
+      // `observeItem` measures synchronously on attach and never reaches here, so a font size
+      // change with nothing mounted is not seen at mount time. It does not need to be: a
+      // newly observed element gets a synthetic first delivery, which lands in this batch a
+      // tick later, so the gap is one delivery plus at most one rate-limit window and it
+      // closes itself. Paying a `getComputedStyle` per row on the mount path — which runs for
+      // every row of every scroll — to buy that tick back would be a bad trade.
+      //
+      // `onSlotResize` is not hooked either, and runs *before* this in the same callback. A
+      // font size change that re-lays-out a slot re-lays-out any mounted row too, so this
+      // batch sees it; the case where it would not — no rows mounted at all — has nothing
+      // measured to invalidate. What that leaves is one slot publish against a cache this
+      // callback is about to clear, and since both publishes happen synchronously before
+      // paint, nothing is drawn from the stale one.
+      const stamp = now()
+      let invalidated = false
+      if (stamp - signatureCheckedAt >= SIGNATURE_RECHECK_MS) {
+        signatureCheckedAt = stamp
+        invalidated = recheckLayoutSignature()
+      }
+
       let changed = false
       for (const [key, size] of batch) {
         const index = cache.indexOf(key)
         if (index < 0) continue
         if (cache.setSize(index, size)) changed = true
       }
-      if (!changed) return
+      // Two independent reasons to go on: a size in the batch moved, or the cache was
+      // discarded a moment ago — in which case every offset below the first item moved and
+      // there is a restore to do whether or not this batch's own sizes are news.
+      if (!changed && !invalidated) return
       if (TRACING) {
         trace('measure.batch', () => ({
           count: batch.length,
           totalSize: cache.totalSize(),
           scrollOffset: viewport.getScrollOffset(),
+          invalidated,
         }))
       }
 
       cache.refreshEstimate(viewport.getViewportSize())
       // Re-derive the scroll offset from the anchor: the item that was under the
       // viewport top stays under the viewport top, whatever moved above it.
-      publish('measure')
+      //
+      // `'model'` when the signature moved, on the same reasoning as the resize path: a
+      // discarded cache moved every offset below the first item, and a correction that large
+      // cannot wait for a fling to end without teleporting the reader.
+      publish(invalidated ? 'model' : 'measure')
       scroller.notifyModelChanged()
     },
 
@@ -1153,21 +1293,10 @@ export function createEngine(initial: EngineOptions): Engine {
     // changing a single line box, so discarding the cache for them is pure waste;
     // combined with a restored snapshot it is destructive.
     //
-    // `layoutSignatureFor` already hashes exactly the things that *do* reflow — content
-    // width, root font size, device pixel ratio — and is already the key a size snapshot
-    // is trusted against. Reusing it means one definition of "the layout changed".
-    // From the scrollport, not `getElement()`: it is the scrolling box's width that decides how
-    // text wraps, and this has to read the same element the adapter seeded the signature from —
-    // otherwise the very first observation sees a change and clears every measurement.
-    const signature = layoutSignatureFor(viewport.getScrollportElement())
-    const changed = cache.setLayoutSignature(signature)
-
-    // The first observation merely learns the signature; there is no previous layout for
-    // it to differ from, and clearing would throw away measurements taken moments
-    // earlier during mount.
-    const invalidated = changed && signatureKnown
-    if (invalidated) cache.clearAll()
-    signatureKnown = true
+    // Which of the signature's terms moved is not this function's business — it asks the
+    // same question a measurement asks, and `recheckLayoutSignature` is the one place that
+    // answers it. A resize is simply the trigger that catches the *width* term.
+    const invalidated = recheckLayoutSignature()
 
     // A reflow that discarded every measurement moved every offset in the list, so
     // the restore is not postponable. A height-only resize is — and on iOS that case
@@ -1183,6 +1312,7 @@ export function createEngine(initial: EngineOptions): Engine {
   const scroller: Scroller = createScroller({
     viewport,
     writeGate,
+    getContentOffset: contentOffset,
     getCache: () => cache,
     getGeometry: geometry,
     applyCarry,
@@ -1309,18 +1439,21 @@ export function createEngine(initial: EngineOptions): Engine {
       // `gate`, orphaning the first behind a teardown closure nobody holds.
       if (unmount) return unmount
 
-      // The scroller binds its input listeners here rather than at construction, so
-      // that building an engine has no side effects and a speculatively-constructed one
-      // cannot leak them. It also attaches the shared write gate, which is why this
-      // comes first: the gate's listeners must precede the scroll and settle handlers
-      // below, so that both of those see an already-transitioned gate.
-      scroller.attach()
-
       const cleanups: (() => void)[] = []
 
       // Whatever the fling refused, once it is over. One publish, not one per skipped
       // correction: they all resolve to the same anchor, so replaying them
       // individually would write the same offset repeatedly.
+      //
+      // **First of the gate's open listeners, and that is the point.** `onOpen` fires
+      // them in registration order, so registering here — before `scroller.attach()`
+      // below registers its own — is what makes "nothing held while the gate is open"
+      // true for *every* later listener rather than only for the code after this one.
+      // The scroller's is waiting on this same reopening: it replays a banked delta
+      // against `scrollTop` and wakes the convergence loop, both from an offset the
+      // shift would otherwise still be standing in for. So a re-order does not lose the
+      // correction — it applies it twice, once in the stale delta and once in the fold,
+      // and silently, since every deviation is then measured post-fold.
       cleanups.push(
         writeGate.onOpen(() => {
           // Before the re-publish, not after: the publish re-derives the offset from
@@ -1333,15 +1466,30 @@ export function createEngine(initial: EngineOptions): Engine {
         }),
       )
 
+      // The scroller binds its input listeners here rather than at construction, so
+      // that building an engine has no side effects and a speculatively-constructed one
+      // cannot leak them. It also attaches the shared write gate, which is why this
+      // comes before the scroll and settle handlers below: the gate's *DOM* listeners
+      // must precede them, so that both of those see an already-transitioned gate. The
+      // `onOpen` registration above is unaffected by that ordering — it only adds to a
+      // set, and nothing can fire it until `gate.attach()` binds those listeners here.
+      scroller.attach()
+
       // The viewport owns knowing what to watch. The engine used to observe
       // `getElement()`, and for a document scroller that is `documentElement`, whose
       // border-box height is the *content* height — so every content growth read as a
       // viewport resize and discarded the whole measurement cache.
-      cleanups.push(
-        viewport.observeSize(() => {
-          onViewportResize()
-        }),
-      )
+      cleanups.push(viewport.observeSize(onViewportResize))
+
+      // The third term of the layout signature, and the one with no layout consequence to
+      // piggyback on: a device pixel ratio change need not resize the scrollport or re-lay-out
+      // a single row, so neither of the other two triggers can see it. `observeResolution`
+      // holds both the mechanism and the measurement that says it is worth having.
+      //
+      // Straight to `onViewportResize`, because what it does is re-read the signature and
+      // publish accordingly, which is the whole of what is wanted here. The name is about its
+      // first caller rather than its job.
+      cleanups.push(observeResolution(viewport.getWindow(), onViewportResize))
 
       const gateTarget = viewport.getGateTarget()
       if (gateTarget) {
@@ -1468,7 +1616,6 @@ export function createEngine(initial: EngineOptions): Engine {
         // engine has no business holding the content away from the scroll offset. The
         // surface is about to be torn down or re-attached either way.
         writeDeferred = false
-        pendingShift = 0
         pendingShift = 0
         writePaintOffset()
         if (unmount === teardown) unmount = null
@@ -1680,6 +1827,10 @@ export type { VirtualItem, VirtualState }
  * pixel ratio is not stale, it is *wrong* — restoring it would place the list
  * confidently in the wrong position. Including these in the key means a
  * responsive change or a browser zoom discards the snapshot instead.
+ *
+ * The device pixel ratio earns its place by measurement rather than by argument, since CSS
+ * pixel layout is *nominally* independent of it. See `observeResolution` in `env.ts`, which
+ * carries the numbers and is what notices a change at runtime.
  */
 export function layoutSignatureFor(element: HTMLElement | null): string {
   if (!element) return ''

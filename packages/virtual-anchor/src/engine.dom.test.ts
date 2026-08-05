@@ -3,7 +3,7 @@ import { createEngine, layoutSignatureFor, type Engine } from './engine.js'
 import { EMPTY_STATE } from './store.js'
 import type { Surface } from './surface.js'
 import type { ItemKey, SlotName } from './types.js'
-import type { Viewport } from './viewport.js'
+import { createElementViewport, type Viewport } from './viewport.js'
 
 /**
  * Integration tests for the engine.
@@ -30,12 +30,21 @@ interface Harness {
   scrollSettled: () => void
   /** Dispatch a wheel, as a reader reaching for the scroller would. */
   userInput: () => void
+  /** Resize the scrollport along the block axis, leaving its width alone. */
   resize: (size: number) => void
+  /** Resize it along the inline axis instead — the axis that reflows text. */
+  resizeWidth: (width: number) => void
+  /**
+   * Deliver the scrollport's current box unchanged, as `observe()` synthesises on mount.
+   *
+   * The delivery later ones are deduped against, so a test about a *swallowed* resize has
+   * to do this before the resize it cares about.
+   */
+  observeScrollport: () => void
   keys: (count: number, prefix?: string) => ItemKey[]
   /** Report a measured size for a key, as a ResizeObserver would. */
   measure: (key: ItemKey, size: number) => void
   viewportSize: number
-  contentWidth: number
 }
 
 const KEYS = (count: number, prefix = 'c'): ItemKey[] =>
@@ -60,15 +69,15 @@ class FakeResizeObserver implements ResizeObserver {
     this.observed.clear()
   }
 
-  static deliverTo(target: Element, blockSize: number): void {
+  static deliverTo(target: Element, blockSize: number, inlineSize = 0): void {
     for (const instance of FakeResizeObserver.instances) {
       if (!instance.observed.has(target)) continue
       instance.callback(
         [
           {
             target,
-            borderBoxSize: [{ blockSize, inlineSize: 0 }],
-            contentRect: new DOMRect(0, 0, 0, blockSize),
+            borderBoxSize: [{ blockSize, inlineSize }],
+            contentRect: new DOMRect(0, 0, inlineSize, blockSize),
           },
         ] as unknown as ResizeObserverEntry[],
         instance,
@@ -129,12 +138,18 @@ const setup = (
    * two apart, and the race that motivated the split would pass unnoticed.
    */
   const scrollEndListeners: (() => void)[] = []
-  const sizeListeners: ((size: number) => void)[] = []
 
   Object.defineProperty(scroller, 'clientWidth', {
     configurable: true,
     get: () => state.contentWidth,
   })
+
+  const scrollportViewport = createElementViewport(scroller)
+
+  /** Deliver the scrollport's current box, whatever the test last set it to. */
+  const deliverScrollport = (): void => {
+    FakeResizeObserver.deliverTo(scroller, state.viewportSize, state.contentWidth)
+  }
 
   const surface: Surface = {
     setContentSize: (size) => {
@@ -179,13 +194,11 @@ const setup = (
         if (i >= 0) list.splice(i, 1)
       }
     },
-    observeSize: (onResize) => {
-      sizeListeners.push(onResize)
-      return () => {
-        const i = sizeListeners.indexOf(onResize)
-        if (i >= 0) sizeListeners.splice(i, 1)
-      }
-    },
+    // The real implementation rather than a forwarding fake, because *whether* a resize
+    // delivery reaches the engine at all is decided in there — and a fake that forwarded
+    // every one of them is what let #34 through: a width-only delivery was swallowed, so
+    // the layout signature was never re-read and stale row heights survived the reflow.
+    observeSize: (onResize) => scrollportViewport.observeSize(onResize),
     getGateTarget: () => scroller,
     getElement: () => scroller,
     getScrollportElement: () => scroller,
@@ -228,8 +241,13 @@ const setup = (
     },
     resize: (size) => {
       state.viewportSize = size
-      for (const listener of [...sizeListeners]) listener(size)
+      deliverScrollport()
     },
+    resizeWidth: (width) => {
+      state.contentWidth = width
+      deliverScrollport()
+    },
+    observeScrollport: deliverScrollport,
     keys: KEYS,
     measure: (key, size) => {
       const element = elements.get(key)
@@ -240,12 +258,6 @@ const setup = (
     },
     set viewportSize(value: number) {
       state.viewportSize = value
-    },
-    get contentWidth() {
-      return state.contentWidth
-    },
-    set contentWidth(value: number) {
-      state.contentWidth = value
     },
   }
 }
@@ -560,23 +572,95 @@ describe('engine anchoring', () => {
 })
 
 describe('engine measurement invalidation', () => {
-  it('discards measurements when the content width changes', () => {
-    const h = setup({ count: 50 })
-    const element = mountItem(h, 'c0', 250)
-    FakeResizeObserver.deliverTo(element, 250)
+  // The root font size is read off `documentElement`, which outlives a test — so a case that
+  // changes it has to put it back, or every signature taken after it starts from 20px.
+  afterEach(() => {
+    document.documentElement.style.removeProperty('font-size')
+  })
+
+  it('discards measurements when the width changes and the height does not', () => {
+    // The #34 repro. The signature hashes the scrollport's width, and its only runtime
+    // re-read used to be reached through a callback gated on the *block* size — so a
+    // scrollport that reflowed without changing height kept every height measured at the
+    // old width. The rows still mounted are re-measured by the item observer and heal;
+    // the rest keep a stale size, so the prefix sum mixes the two and places rows at
+    // offsets that do not match their heights. Downstream that reads as rows drawn
+    // overlapping or with gaps, fixing themselves when scrolled out and back in.
+    const h = setup({ count: 20 })
+    // Measured on attach, as the engine measures every item it is handed.
+    for (const key of h.keys(20)) mountItem(h, key, 250)
+    expect(h.engine.cache.totalSize()).toBe(20 * 250)
+
+    // Load-bearing: this is the delivery that sets what the next one is compared against.
+    // Without it the width change below is a first delivery, which reports either way, and
+    // the bug hides.
+    h.observeScrollport()
+    h.resizeWidth(400)
+
+    // Nothing measured survives, so the list is back on its estimates.
+    expect(h.engine.cache.measuredCount).toBe(0)
+    expect(h.engine.cache.totalSize()).toBe(20 * 100)
+  })
+
+  it('discards measurements when the root font size changes and the scrollport does not', () => {
+    // The other half of #44. `observeSize` is the only thing that re-read the signature, so
+    // only the *width* term ever had a trigger behind it. A root font size change re-wraps
+    // every line without moving the scrollport, so nothing was delivered and every measured
+    // height stayed keyed to a layout that no longer existed.
+    //
+    // Note what this test does not call: `resizeWidth`, or `observeScrollport`. There is no
+    // scrollport resize here at all, which is the entire point.
+    const h = setup({ count: 20 })
+    for (const key of h.keys(20)) mountItem(h, key, 250)
+    expect(h.engine.cache.totalSize()).toBe(20 * 250)
+
+    // A user raising their browser's default size, or an app's accessibility text toggle.
+    document.documentElement.style.fontSize = '20px'
+
+    // The signal that was always there and nothing was asking: the rows on screen re-lay-out,
+    // so their observers fire. One delivery is enough — the engine re-reads the signature
+    // before it applies the batch.
+    h.measure('c0', 300)
+
+    // Only the row in the batch survives, because it is the only one measured under the new
+    // layout. Everything else is back on its estimate rather than confidently wrong.
+    expect(h.engine.cache.measuredCount).toBe(1)
+    expect(h.engine.cache.totalSize()).toBe(19 * 100 + 300)
+  })
+
+  it('re-reads the signature at most once per rate-limit window', () => {
+    // The top of the item batch is the hot path — every row measured during a fling — so the
+    // read is rate-limited. A limit rather than a threshold: it decides nothing about the
+    // content, only how often the question is asked. Below, both sides of the guard.
+    let clock = 100
+    const h = setup({ count: 20, now: () => clock })
+    for (const key of h.keys(20)) mountItem(h, key, 250)
+
+    document.documentElement.style.fontSize = '20px'
+
+    // Inside the window — and this first one is inside it by construction, since the
+    // signature was seeded moments ago at mount and there is nothing yet to differ from.
+    h.measure('c0', 300)
+    expect(h.engine.cache.measuredCount).toBe(20)
+
+    // Past it, so the same change is now seen.
+    clock = 400
+    h.measure('c1', 300)
     expect(h.engine.cache.measuredCount).toBe(1)
 
-    h.contentWidth = 400
-    h.resize(800)
-
-    // A width change reflows every line box, so every measurement is stale.
-    expect(h.engine.cache.measuredCount).toBe(0)
+    // Deliberately no `totalSize` assertion on either side, unlike the case above.
+    // `refreshEstimate` ran on the first batch — twenty samples, median 250 — and
+    // `clearAll` keeps the estimate it learned, which is the whole point of learning one.
+    // So the total after the clear is 19 × 250 + 300, which is exactly what it was before
+    // the clear. It would pass whether the cache was discarded or not, and `measuredCount`
+    // is the only reading here that discriminates.
   })
 
   it('keeps measurements when only the height changes', () => {
     // A mobile URL bar hiding, devtools opening, a soft keyboard, a vertical drag.
     // None of them reflows a single line box, and discarding the cache for them is both
-    // wasteful and — with a restored snapshot — destructive.
+    // wasteful and — with a restored snapshot — destructive. This is the case the width
+    // fix above must not swallow into itself.
     const h = setup({ count: 50 })
     const element = mountItem(h, 'c0', 250)
     FakeResizeObserver.deliverTo(element, 250)

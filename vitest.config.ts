@@ -78,8 +78,10 @@ export default defineConfig({
         'packages/virtual-anchor/src/settle.ts': { branches: 100, functions: 100, lines: 100 },
         // Both scroller kinds now answer for their scrollport as well as their measurement
         // scope, and the quirks-mode path is exercised — so this is no longer the file with the
-        // thinnest coverage in the integration layer.
-        'packages/virtual-anchor/src/viewport.ts': { branches: 70, functions: 96, lines: 100 },
+        // thinnest coverage in the integration layer. Branches went 70 to 85 with #34: the
+        // resize dedup is four branches on its own, and the `contentRect` fallback for an
+        // absent `borderBoxSize` had none of them exercised before.
+        'packages/virtual-anchor/src/viewport.ts': { branches: 85, functions: 96, lines: 100 },
         'packages/virtual-anchor/src/resizer.ts': { branches: 92, functions: 100, lines: 100 },
         'packages/virtual-anchor/src/gate.ts': { branches: 78, functions: 100, lines: 100 },
         // The uncovered branch is the production build, which by definition is not this build.

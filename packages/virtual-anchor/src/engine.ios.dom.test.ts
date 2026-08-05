@@ -3,7 +3,7 @@ import { pretendIPhone, touch, unpretendIPhone } from './iosPlatform.test.helper
 import { createEngine, layoutSignatureFor, type Engine } from './engine.js'
 import { setTraceSink, type TraceEvent } from './trace.js'
 import type { Surface } from './surface.js'
-import type { ItemKey } from './types.js'
+import type { ItemKey, SlotName } from './types.js'
 import type { Viewport } from './viewport.js'
 
 /**
@@ -90,6 +90,14 @@ interface Harness {
   paintOffsets: () => number[]
   /** The paint offset currently applied. */
   paintOffset: () => number
+  /**
+   * The paint offset in effect at each `scrollTop` write, in order.
+   *
+   * Scroll writes and paint offsets land in one ordered log, so a write made while the
+   * content was still held away from `scrollTop` is distinguishable from one made after
+   * the shift was folded in — the interleaving `scrollWrites` and `paintOffsets` discard.
+   */
+  heldAtWrites: () => number[]
   /** The scroller's own maximum, for assertions about the end of the list. */
   maxOffset: () => number
   offset: () => number
@@ -210,6 +218,15 @@ const setup = (
     scrollWrites: () => numbersFor('scroll:'),
     paintOffsets: () => numbersFor('paint:'),
     paintOffset: () => numbersFor('paint:').at(-1) ?? 0,
+    heldAtWrites: () => {
+      let held = 0
+      const atWrites: number[] = []
+      for (const write of writes) {
+        if (write.startsWith('paint:')) held = Number(write.slice('paint:'.length))
+        else if (write.startsWith('scroll:')) atWrites.push(held)
+      }
+      return atWrites
+    },
     maxOffset: () => viewport.getMaxScrollOffset(),
     offset: () => state.offset,
     scroll: (value) => {
@@ -500,6 +517,100 @@ describe('the engine on iOS WebKit', () => {
     expect(h.paintOffset()).toBe(0)
   })
 
+  it('makes the fold the only write with the shift still outstanding', () => {
+    // Both states at once is what makes the registration order observable: the deferred
+    // measurement holds the shift, and a `scrollToIndex` the shut gate refuses banks the
+    // scroller's delta, so two listeners want the same reopening. `estimateSize` disables
+    // the median estimator, whose rebuild would swamp the one correction under test.
+    const h = setup({ estimateSize: () => 100 })
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    h.measure('c10', 700)
+    void h.engine.scrollToIndex(80)
+    const before = h.scrollWrites().length
+
+    h.scrollSettled()
+
+    // One write per listener, and the fold is first: it discharges the shift, so the
+    // scroller's flush — and every listener after it — writes against a `scrollTop` that
+    // already owns the correction. Re-order the two registrations and this reads
+    // `[true, true]`, which is the shift counted twice.
+    const held = h.heldAtWrites().slice(before)
+    expect(held.map((px) => Math.abs(px) > 1)).toEqual([true, false])
+  })
+
+  it('folds by the shift alone, not by the shift on top of the banked delta', () => {
+    const h = setup({ estimateSize: () => 100 })
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    h.measure('c10', 700)
+    // Far enough away that the banked delta cannot be mistaken for the shift.
+    void h.engine.scrollToIndex(80)
+    const shift = h.paintOffset()
+    expect(shift).toBeGreaterThan(1)
+    const offsetBefore = h.offset()
+    const before = h.scrollWrites().length
+
+    h.scrollSettled()
+
+    // Going first is what keeps the fold's arithmetic about the shift and nothing else.
+    expect(h.scrollWrites().slice(before)[0]).toBeCloseTo(offsetBefore + shift, 5)
+  })
+
+  describe('a programmatic scroll issued mid-gesture', () => {
+    // Issue #33, at the seam the two iOS suites left uncovered between them: the scroller
+    // suite can drive a scroll during a gesture but has no engine holding a shift, and this
+    // one holds a shift but never drove a scroll through it. Both halves are needed for the
+    // destination and the coordinate it is compared against to disagree.
+
+    it('measures the scroll against where the content is', async () => {
+      const h = setup({ estimateSize: () => 100 })
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      // 600px of correction, held on the container rather than written: `scrollTop` says
+      // 5000 and the reader is looking at 5600.
+      h.measure('c10', 700)
+      expect(h.paintOffset()).toBeCloseTo(600, 5)
+
+      const promise = h.engine.scrollToKey('c100')
+      // Cancelled rather than settled, so it resolves where it stood — and what it reports
+      // is the caller's only account of where the content had got to. c100 sits at 10_600
+      // once c10 is 600px taller than its estimate, so the content has 5000 left to travel;
+      // measured against `scrollTop` it claims 5600, which is the shift over again.
+      h.engine.cancelScroll()
+
+      const result = await promise
+      expect(result.reason).toBe('cancelled')
+      expect(result.deviation).toBeCloseTo(5000, 5)
+    })
+
+    it('lands on the item once the gesture is over', async () => {
+      // The end-to-end guard, and honest about its reach: both reopen orderings converge
+      // here, so it asserts the landing rather than the writes that reach it. Flushing the
+      // banked distance before the shift is folded steps the list 600px past the item and
+      // the loop pulls it back a frame later; folding first makes it a single write.
+      const h = setup({ estimateSize: () => 100 })
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      h.measure('c10', 700)
+
+      const promise = h.engine.scrollToKey('c100')
+      // Nothing was written while the fling ran; the destination was banked as a distance
+      // the content still had to cover.
+      expect(h.scrollWrites()).toEqual([])
+
+      h.scrollSettled()
+      // Real animation frames, which the fake clock drives — the only case in the file
+      // that needs the convergence loop to run.
+      await vi.advanceTimersByTimeAsync(120)
+
+      const result = await promise
+      expect(result.settled).toBe(true)
+      expect(h.offset()).toBeCloseTo(10_600, 5)
+      expect(h.paintOffset()).toBe(0)
+    })
+  })
+
   it('mounts the range the content is showing, not the one scrollTop implies', () => {
     // With a shift outstanding, `scrollTop` and the visible content differ by it. Compute
     // the rendered window from the raw offset and it is centred up to two viewports from
@@ -521,6 +632,110 @@ describe('the engine on iOS WebKit', () => {
     const [first, last] = h.engine.store.getState().renderedRange
     expect(shown).toBeGreaterThanOrEqual(first)
     expect(shown).toBeLessThanOrEqual(last)
+  })
+
+  describe('the visibility band while a shift is held', () => {
+    // The other half of the split, and the half #29 left behind: the band was still
+    // built from the raw offset while the candidates it is measured against came from
+    // `cache.offsetOf`, i.e. content space. Nothing paints wrong — the rendered range
+    // above is computed correctly — but every visibility event fired during a hold
+    // describes a strip of content the reader is not looking at.
+    //
+    // All three cases use a correction wider than the viewport plus the buffer, so the
+    // scroll-space window and the content-space window do not overlap. With a smaller
+    // one both spaces name some of the same rows and the assertions pass either way.
+    const record = (events: string[]): Partial<Parameters<typeof createEngine>[0]> => ({
+      onVisibilityChange: (batch) => {
+        for (const event of batch) events.push(`${event.phase}:${String(event.key)}`)
+      },
+    })
+
+    /**
+     * The row under the viewport top at `offset`, named rather than hard-coded.
+     *
+     * Which row that is depends on the estimate, the viewport height and how far the
+     * fling went, so a literal would quietly stop being the row under test. The sentinel
+     * is never visible, so a missing key fails the assertion rather than satisfying it.
+     */
+    const rowAt = (h: Harness, offset: number): ItemKey =>
+      h.engine.keyAt(h.engine.cache.indexAt(offset)) ?? 'no-such-row'
+
+    it('reports the items the content is showing, not the ones scrollTop implies', () => {
+      const events: string[] = []
+      const h = setup({ estimateSize: () => 100, ...record(events) })
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      expect(h.engine.getVisibility(rowAt(h, h.offset())).visible).toBe(true)
+
+      events.length = 0
+      h.measure('c10', 1500)
+
+      // The correction is held, so the content moved and `scrollTop` did not.
+      const held = h.paintOffset()
+      expect(held).toBeGreaterThan(1200)
+      const shown = rowAt(h, h.offset() + held)
+      // Or the two spaces name the same row and nothing below discriminates.
+      expect(shown).not.toBe(rowAt(h, h.offset()))
+
+      // The row the shift is keeping under the viewport top is still on screen, so it has
+      // neither left nor been replaced by the row sitting at the raw offset — one the
+      // reader scrolled past before the measurement landed. Reading the band in scroll
+      // space reports the opposite: the candidates are a viewport and a half past the
+      // band, so *nothing* overlaps it and all eight visible rows report a leave.
+      expect(events).toEqual([])
+      expect(h.engine.getVisibility(shown).visible).toBe(true)
+    })
+
+    it('reports the same row off iOS, where the two spaces coincide', () => {
+      // The inertness guard. Off iOS the correction is written rather than held, so the
+      // raw offset *is* where the content is and the fix must cost nothing. It cannot
+      // fail against this bug — no shift is ever outstanding for the two spaces to
+      // disagree by — which is the statement being made.
+      unpretendIPhone()
+      const events: string[] = []
+      const h = setup({ estimateSize: () => 100, ...record(events) })
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+
+      events.length = 0
+      h.measure('c10', 1500)
+
+      expect(h.paintOffset()).toBe(0)
+      expect(h.engine.getVisibility(rowAt(h, h.offset())).visible).toBe(true)
+      expect(events).toEqual([])
+    })
+
+    it('samples the visibility deadline in content space too', () => {
+      // The deadline timer re-samples on its own, and read both its candidate range and
+      // its band from the raw offset. It is also the sample most likely to be the *only*
+      // one taken during a hold: it fires when nothing else is happening, which is
+      // exactly the reader who has stopped scrolling and is dwelling on a comment.
+      //
+      // `dwellMs` is what makes a deadline exist at all — with none, every enter is
+      // reported on the sample that observes it and no timer is ever armed.
+      const events: string[] = []
+      const h = setup({
+        estimateSize: () => 100,
+        visibility: { dwellMs: 500 },
+        ...record(events),
+      })
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      h.measure('c10', 1500)
+      const held = h.paintOffset()
+      expect(held).toBeGreaterThan(1200)
+      // Nothing yet: the dwell has only just started.
+      expect(events).toEqual([])
+      expect(vi.getTimerCount()).toBeGreaterThan(0)
+
+      // Only time passing — no scroll, no measurement, no resize. Short of both the
+      // gate's 3s cap and any settle, so the shift is still outstanding.
+      vi.advanceTimersByTime(600)
+
+      // Reading the band in scroll space instead starts the dwell over on the rows at the
+      // raw offset, so this deadline reports nothing at all.
+      expect(events).toContain(`enter:${String(rowAt(h, h.offset() + held))}`)
+    })
   })
 
   it('sends what a truncating platform refuses to the carry, and holds nothing', () => {
@@ -632,6 +847,140 @@ describe('the engine on iOS WebKit', () => {
     h.measure('c10', 700)
 
     expect(h.scrollWrites().slice(before)).not.toEqual([])
+  })
+})
+
+/**
+ * Mount a slot element, as the React adapter's ref callback would.
+ *
+ * `resize` drives both halves of what a real resize is — the box the element reports and
+ * the observer callback announcing it — because the engine measures synchronously on
+ * attach and then trusts the observer for everything after. Copied from
+ * `engine.dom.test.ts`, as the rest of this file's harness already is, and which is where
+ * the off-iOS baseline for the first case below lives.
+ */
+const mountSlot = (
+  h: Harness,
+  slot: SlotName,
+  height: number,
+): { resize: (next: number) => void } => {
+  const element = document.createElement('div')
+  const rect = vi
+    .spyOn(element, 'getBoundingClientRect')
+    .mockReturnValue(new DOMRect(0, 0, 600, height))
+  document.body.appendChild(element)
+
+  h.engine.observeSlot(element, slot)
+  return {
+    resize: (next) => {
+      rect.mockReturnValue(new DOMRect(0, 0, 600, next))
+      FakeResizeObserver.deliverTo(element, next)
+    },
+  }
+}
+
+/**
+ * Measured slots during a gesture — issue #32.
+ *
+ * No slot was observed anywhere in this file before, which is why the classification could
+ * be argued either way: `onSlotGeometryChange` publishes `'measure'`, yet a measured
+ * `header` moves the list's *origin*, so on the face of it that is a `'model'` change
+ * wearing a `'measure'` label. The argument for keeping it is in `Restore`'s doc; these
+ * cases pin the two claims it rests on.
+ */
+describe('the engine’s measured slots on iOS WebKit', () => {
+  it('holds the view when the header grows mid-fling, instead of writing it', () => {
+    // The off-iOS baseline is `engine.dom.test.ts`'s "holds the view when the header
+    // grows", where the same 400px of growth moves `scrollTop` by 400. Here the write is
+    // refused and the paint offset carries the identical 400 — same visible result, and
+    // the fling survives it.
+    const h = setup()
+    const header = mountSlot(h, 'header', 300)
+    fling(h, 5000)
+    const scrollsBefore = h.scrollWrites().length
+    const anchorBefore = h.engine.getAnchor()
+
+    header.resize(700)
+
+    expect(h.scrollWrites().slice(scrollsBefore)).toEqual([])
+    expect(h.paintOffset()).toBeCloseTo(400, 5)
+    // Not merely compensated back — never disturbed. The anchor is the position of record,
+    // and a geometry change is not a position change.
+    expect(h.engine.getAnchor()).toEqual(anchorBefore)
+  })
+
+  it('takes the write when the header grows near the top of the list', () => {
+    // The second claim, as a fact rather than an assertion: past `room` the write is taken
+    // and the fling lost, so `'measure'` there does exactly what `'model'` would have.
+    //
+    // The top, and not the bottom, is the end that binds a *growth* — which is the whole
+    // reason the classification is a judgement call and not a bug. A growing header pushes
+    // the bottom away by the same 400px it displaces the content by, so the distance to the
+    // bottom never shrinks; only the 100px above the reader can run out. Asserting this at
+    // the bottom instead passes only because this harness leaves slot heights out of
+    // `getMaxScrollOffset`, and fails the moment it does not.
+    const h = setup()
+    const header = mountSlot(h, 'header', 300)
+    fling(h, 100)
+    const scrollsBefore = h.scrollWrites().length
+
+    header.resize(700)
+
+    expect(h.scrollWrites().slice(scrollsBefore)).not.toEqual([])
+    // Nothing held: `paintOffsets` rather than the last one, so "held nothing" is not
+    // satisfied by "never wrote a paint offset at all". Anything under a pixel is the carry.
+    expect(h.paintOffsets().filter((px) => Math.abs(px) > 1)).toEqual([])
+  })
+
+  it('leaves the view alone when a sticky footer resizes mid-fling', () => {
+    // The case the classification was never in doubt for, and the reason it is not: a
+    // sticky footer feeds `scrollPaddingEnd` and `spaceAfter`, neither of which enters the
+    // conversion to scroller space, so `resolveAnchorOffset` returns the offset the list is
+    // already at. `writeScroll` leaves at its sub-pixel early return, *before* the gate is
+    // consulted — so an animated sticky footer under a fling is free by construction rather
+    // than by deferral, and the label could not matter to it either way.
+    const h = setup()
+    const footer = mountSlot(h, 'stickyFooter', 100)
+    fling(h, 5000)
+    const scrollsBefore = h.scrollWrites().length
+    const visibleEndBefore = h.engine.store.getState().visibleRange[1]
+
+    footer.resize(300)
+
+    expect(h.scrollWrites().slice(scrollsBefore)).toEqual([])
+    expect(h.paintOffsets().filter((px) => Math.abs(px) > 1)).toEqual([])
+    // A guard, not the assertion: without it every expectation above is satisfied by a
+    // resize that never reached the engine. 200px more sticky footer is 200px less of the
+    // scrollport for items to be visible in.
+    expect(h.engine.store.getState().visibleRange[1]).toBeLessThan(visibleEndBefore)
+  })
+
+  it('takes the write when an alignToBottom footer moves the leading space', () => {
+    // The one case a per-slot rule would classify differently — `leadingSpace` reaches
+    // `scrollMargin` through `composeInsets`, so this resize really does move the origin —
+    // coming out the same anyway, for the reason `onSlotGeometryChange`'s doc gives.
+    //
+    // `count: 3` is what puts 300px of content in an 800px viewport, which is what makes
+    // `leadingSpace` non-zero at all; `trackContent` is what has the harness report the
+    // empty scroll range that follows from it.
+    const h = setup({ count: 3, alignToBottom: true, trackContent: true })
+    const footer = mountSlot(h, 'footer', 100)
+    // The only momentum frame this list can produce. 300px of content in an 800px viewport
+    // has no scroll range, so every gesture frame reports the same offset.
+    touch(h.scroller, 'touchstart')
+    touch(h.scroller, 'touchend')
+    vi.advanceTimersByTime(50)
+    h.scroll(0)
+    expect(h.maxOffset()).toBe(0)
+    const scrollsBefore = h.scrollWrites().length
+
+    footer.resize(300)
+
+    // The exact origin move: 200px more footer is 200px less `leadingSpace`, and therefore
+    // 200px less `scrollMargin`. Written, not held — a browser then clamps it to 0, which is
+    // the point: there was never anywhere for a shift to go.
+    expect(h.scrollWrites().slice(scrollsBefore)).toEqual([-200])
+    expect(h.paintOffsets().filter((px) => Math.abs(px) > 1)).toEqual([])
   })
 })
 

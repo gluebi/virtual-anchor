@@ -40,6 +40,18 @@ interface Harness {
    * tells the scroller what happened; it does not move anything.
    */
   setRawOffset: (value: number) => void
+  /**
+   * Hold the content this far from where `scrollTop` says it is.
+   *
+   * What the engine does while a gesture refuses its writes: the correction goes onto the
+   * item container as a paint offset, so the content sits at `scrollTop + shift` and every
+   * item offset is a number in *that* space. The harness had no way to express this at
+   * all, which is why eighteen iOS cases passed straight through issue #33.
+   *
+   * Folded into `scrollTop` when the gate reopens, by a listener registered ahead of the
+   * scroller's — see the note at the registration for why the order is the engine's.
+   */
+  setShift: (value: number) => void
   writes: number[]
   advance: (ms: number) => void
   frames: (n: number) => void
@@ -65,6 +77,7 @@ const harness = (options: { max?: number } = {}): Harness => {
   const max = options.max ?? 99_400
   const writes: number[] = []
   let offset = 0
+  let shift = 0
   let clock = 0
   let queue: (() => void)[] = []
 
@@ -143,12 +156,23 @@ const harness = (options: { max?: number } = {}): Harness => {
     },
   })
 
+  // The engine's fold, registered ahead of the scroller's own `gate.onOpen` flush — the
+  // order `engine.mount()` establishes, and the invariant the scroller's writes rest on:
+  // `scrollTop` owns the shift before any other reopen listener runs, so nothing is ever
+  // held with the gate open and a content-space target is a scroll-space one. Flush the
+  // other way round and the shift is added on top of a write that already accounted for it.
+  gate.onOpen(() => {
+    offset += shift
+    shift = 0
+  })
+
   const scroller = createScroller({
     viewport,
     writeGate: gate,
     getCache: () => cache,
     getGeometry: () => ({}),
     applyCarry: () => {},
+    getContentOffset: () => offset + shift,
     now: () => clock,
     requestFrame: (callback) => {
       queue.push(callback)
@@ -172,6 +196,9 @@ const harness = (options: { max?: number } = {}): Harness => {
     offset: () => offset,
     setRawOffset: (value) => {
       offset = value
+    },
+    setShift: (value) => {
+      shift = value
     },
     advance: tick,
     scroll: (next) => {
@@ -426,6 +453,98 @@ describe('scroller on iOS WebKit', () => {
     // Nothing is replayed: the cancelled scroll left nothing to flush.
     expect(h.writes).toEqual([])
     expect(h.offset()).toBe(1000)
+  })
+
+  describe('with the engine holding a gesture shift', () => {
+    // Issue #33: four reads that compared a destination built from item offsets against
+    // the raw scroll offset. See `setShift` for the state they were wrong about.
+
+    it('replays the banked correction from where the content is', () => {
+      // Deliberately the same script as 'flushes the banked correction when the fling
+      // settles' above, which lands at 51_000, with 400px of correction held on top. The
+      // landing must not move: the shift is where the content already is, not another
+      // 400px of destination.
+      const h = harness()
+      touch(h.element, 'touchstart')
+      h.setShift(400)
+      void h.scroller.scrollToIndex(500)
+      expect(h.writes).toEqual([])
+
+      touch(h.element, 'touchend')
+      h.advance(50)
+      h.scroll(1000)
+      h.settle()
+
+      // Banked as 49_600 — content at 400, item at 50_000 — and replayed from the content
+      // at 1400 once the fold has moved `scrollTop` there. Measured against the raw offset
+      // it banks 50_000 and lands 400px past the item.
+      expect(h.writes).toEqual([51_000])
+    })
+
+    it('does not resolve settled for a target only the scrollbar has reached', async () => {
+      // Fully measured, so `scrollToIndex` takes its fast path and reports a result
+      // immediately — there is no convergence loop left to correct it afterwards.
+      // `scrollTop` is at the item's offset and the content is 400px past it, so the
+      // proximity test resolved `settled: true, deviation: 0` about a position the reader
+      // is not at, and the correction banked on the way there stayed banked.
+      const h = harness()
+      for (let i = 0; i < h.cache.length; i++) h.cache.setSize(i, 100)
+      touch(h.element, 'touchstart')
+      h.setRawOffset(500)
+      h.setShift(400)
+
+      const promise = h.scroller.scrollToIndex(5)
+      expect(h.scroller.isScrolling()).toBe(true)
+
+      // The gesture ends: the shift folds into `scrollTop`, the banked −400 comes back out
+      // of the content, and the loop confirms the landing.
+      touch(h.element, 'touchend')
+      h.advance(200)
+      h.frames(3)
+
+      const result = await promise
+      expect(h.offset()).toBe(500)
+      expect(result.settled).toBe(true)
+      expect(result.deviation).toBe(0)
+    })
+
+    it("judges align: 'auto' by where the content is", async () => {
+      // `scrollTop` 0 with 1000px held: the reader is looking at [1000, 1600) and item 5 —
+      // [500, 600) — is off the top of the screen. Asked of the raw offset, item 5 is the
+      // first thing on screen, so 'auto' takes its "already fully visible" branch and
+      // returns the current offset as the target. Nothing moves and the promise says it
+      // succeeded.
+      const h = harness()
+      for (let i = 0; i < h.cache.length; i++) h.cache.setSize(i, 100)
+      touch(h.element, 'touchstart')
+      h.setShift(1000)
+
+      const promise = h.scroller.scrollToIndex(5, { align: 'auto' })
+      touch(h.element, 'touchend')
+      h.advance(200)
+      h.frames(3)
+
+      const result = await promise
+      // Item 5's top edge at the top of the viewport, in the space item offsets live in.
+      expect(h.offset()).toBe(500)
+      expect(result.settled).toBe(true)
+    })
+
+    it('reports the distance the content has left to travel', async () => {
+      // The number that lies. `deviation` is the caller's only account of where a scroll
+      // that did not settle actually ended, and against the raw offset it is out by the
+      // whole shift — reported as 50_000 while the content stood 49_600 away.
+      const h = harness()
+      touch(h.element, 'touchstart')
+      h.setShift(400)
+
+      const promise = h.scroller.scrollToIndex(500)
+      h.scroller.cancel()
+
+      const result = await promise
+      expect(result.settled).toBe(false)
+      expect(result.deviation).toBe(49_600)
+    })
   })
 
   it('removes its own input listeners on disposal', () => {
