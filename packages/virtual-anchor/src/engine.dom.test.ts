@@ -572,6 +572,12 @@ describe('engine anchoring', () => {
 })
 
 describe('engine measurement invalidation', () => {
+  // The root font size is read off `documentElement`, which outlives a test — so a case that
+  // changes it has to put it back, or every signature taken after it starts from 20px.
+  afterEach(() => {
+    document.documentElement.style.removeProperty('font-size')
+  })
+
   it('discards measurements when the width changes and the height does not', () => {
     // The #34 repro. The signature hashes the scrollport's width, and its only runtime
     // re-read used to be reached through a callback gated on the *block* size — so a
@@ -594,6 +600,60 @@ describe('engine measurement invalidation', () => {
     // Nothing measured survives, so the list is back on its estimates.
     expect(h.engine.cache.measuredCount).toBe(0)
     expect(h.engine.cache.totalSize()).toBe(20 * 100)
+  })
+
+  it('discards measurements when the root font size changes and the scrollport does not', () => {
+    // The other half of #44. `observeSize` is the only thing that re-read the signature, so
+    // only the *width* term ever had a trigger behind it. A root font size change re-wraps
+    // every line without moving the scrollport, so nothing was delivered and every measured
+    // height stayed keyed to a layout that no longer existed.
+    //
+    // Note what this test does not call: `resizeWidth`, or `observeScrollport`. There is no
+    // scrollport resize here at all, which is the entire point.
+    const h = setup({ count: 20 })
+    for (const key of h.keys(20)) mountItem(h, key, 250)
+    expect(h.engine.cache.totalSize()).toBe(20 * 250)
+
+    // A user raising their browser's default size, or an app's accessibility text toggle.
+    document.documentElement.style.fontSize = '20px'
+
+    // The signal that was always there and nothing was asking: the rows on screen re-lay-out,
+    // so their observers fire. One delivery is enough — the engine re-reads the signature
+    // before it applies the batch.
+    h.measure('c0', 300)
+
+    // Only the row in the batch survives, because it is the only one measured under the new
+    // layout. Everything else is back on its estimate rather than confidently wrong.
+    expect(h.engine.cache.measuredCount).toBe(1)
+    expect(h.engine.cache.totalSize()).toBe(19 * 100 + 300)
+  })
+
+  it('re-reads the signature at most once per rate-limit window', () => {
+    // The top of the item batch is the hot path — every row measured during a fling — so the
+    // read is rate-limited. A limit rather than a threshold: it decides nothing about the
+    // content, only how often the question is asked. Below, both sides of the guard.
+    let clock = 100
+    const h = setup({ count: 20, now: () => clock })
+    for (const key of h.keys(20)) mountItem(h, key, 250)
+
+    document.documentElement.style.fontSize = '20px'
+
+    // Inside the window — and this first one is inside it by construction, since the
+    // signature was seeded moments ago at mount and there is nothing yet to differ from.
+    h.measure('c0', 300)
+    expect(h.engine.cache.measuredCount).toBe(20)
+
+    // Past it, so the same change is now seen.
+    clock = 400
+    h.measure('c1', 300)
+    expect(h.engine.cache.measuredCount).toBe(1)
+
+    // Deliberately no `totalSize` assertion on either side, unlike the case above.
+    // `refreshEstimate` ran on the first batch — twenty samples, median 250 — and
+    // `clearAll` keeps the estimate it learned, which is the whole point of learning one.
+    // So the total after the clear is 19 × 250 + 300, which is exactly what it was before
+    // the clear. It would pass whether the cache was discarded or not, and `measuredCount`
+    // is the only reading here that discriminates.
   })
 
   it('keeps measurements when only the height changes', () => {
