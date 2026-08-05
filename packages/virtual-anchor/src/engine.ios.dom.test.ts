@@ -90,6 +90,14 @@ interface Harness {
   paintOffsets: () => number[]
   /** The paint offset currently applied. */
   paintOffset: () => number
+  /**
+   * The paint offset in effect at each `scrollTop` write, in order.
+   *
+   * Scroll writes and paint offsets land in one ordered log, so a write made while the
+   * content was still held away from `scrollTop` is distinguishable from one made after
+   * the shift was folded in — the interleaving `scrollWrites` and `paintOffsets` discard.
+   */
+  heldAtWrites: () => number[]
   /** The scroller's own maximum, for assertions about the end of the list. */
   maxOffset: () => number
   offset: () => number
@@ -210,6 +218,15 @@ const setup = (
     scrollWrites: () => numbersFor('scroll:'),
     paintOffsets: () => numbersFor('paint:'),
     paintOffset: () => numbersFor('paint:').at(-1) ?? 0,
+    heldAtWrites: () => {
+      let held = 0
+      const atWrites: number[] = []
+      for (const write of writes) {
+        if (write.startsWith('paint:')) held = Number(write.slice('paint:'.length))
+        else if (write.startsWith('scroll:')) atWrites.push(held)
+      }
+      return atWrites
+    },
     maxOffset: () => viewport.getMaxScrollOffset(),
     offset: () => state.offset,
     scroll: (value) => {
@@ -498,6 +515,46 @@ describe('the engine on iOS WebKit', () => {
     // content offset returns to zero. Same visible position, different mechanism.
     expect(h.offset()).toBeCloseTo(offsetBefore + shift, 5)
     expect(h.paintOffset()).toBe(0)
+  })
+
+  it('makes the fold the only write with the shift still outstanding', () => {
+    // Both states at once is what makes the registration order observable: the deferred
+    // measurement holds the shift, and a `scrollToIndex` the shut gate refuses banks the
+    // scroller's delta, so two listeners want the same reopening. `estimateSize` disables
+    // the median estimator, whose rebuild would swamp the one correction under test.
+    const h = setup({ estimateSize: () => 100 })
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    h.measure('c10', 700)
+    void h.engine.scrollToIndex(80)
+    const before = h.scrollWrites().length
+
+    h.scrollSettled()
+
+    // One write per listener, and the fold is first: it discharges the shift, so the
+    // scroller's flush — and every listener after it — writes against a `scrollTop` that
+    // already owns the correction. Re-order the two registrations and this reads
+    // `[true, true]`, which is the shift counted twice.
+    const held = h.heldAtWrites().slice(before)
+    expect(held.map((px) => Math.abs(px) > 1)).toEqual([true, false])
+  })
+
+  it('folds by the shift alone, not by the shift on top of the banked delta', () => {
+    const h = setup({ estimateSize: () => 100 })
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    h.measure('c10', 700)
+    // Far enough away that the banked delta cannot be mistaken for the shift.
+    void h.engine.scrollToIndex(80)
+    const shift = h.paintOffset()
+    expect(shift).toBeGreaterThan(1)
+    const offsetBefore = h.offset()
+    const before = h.scrollWrites().length
+
+    h.scrollSettled()
+
+    // Going first is what keeps the fold's arithmetic about the shift and nothing else.
+    expect(h.scrollWrites().slice(before)[0]).toBeCloseTo(offsetBefore + shift, 5)
   })
 
   it('mounts the range the content is showing, not the one scrollTop implies', () => {
