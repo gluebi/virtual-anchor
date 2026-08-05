@@ -14,6 +14,14 @@ export default defineConfig(
       'test-results/**',
       'playwright-report/**',
       'spike/residual-carry.html',
+      // Agent worktrees. A `git worktree` placed inside the repo is a second, complete
+      // checkout of it — so `eslint .` walks into it and reports every finding twice, against
+      // file paths that are not the ones you are editing. Git itself already keeps a
+      // registered worktree out of `status`; this is the same courtesy for the linter.
+      //
+      // Only the linter needs it: vitest's `packages/*/src/**` and the coverage `include` are
+      // root-relative with a single-segment wildcard, so a nested checkout cannot match them.
+      '.claude/**',
       // Not worth a program of its own; nothing here is shipped.
       'eslint.config.js',
     ],
