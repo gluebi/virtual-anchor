@@ -496,6 +496,54 @@ describe('VisibilityTracker once semantics', () => {
     expect(h.tracker.get('c0').hasBeenSeen).toBe(true)
     expect(h.tracker.get('c0').visible).toBe(false)
   })
+
+  /**
+   * #50. The first sample of a list's life is the render-body publish, before any ref
+   * callback has measured a row — so every candidate in it is an estimate. Spending
+   * `once`'s single report there hands a consumer filtering on `measured` an event it
+   * must discard, and `hasBeenSeen` then refuses the measured one that follows.
+   *
+   * Contrast `reports an estimated edge, and says so` above: without `once` the estimate
+   * is still reported, because there a later event can correct it.
+   */
+  it('does not spend its one report on an unmeasured estimate', () => {
+    const h = harness({ rule: { mode: 'edge', edge: 'end' }, once: true }, 300)
+
+    // Withheld, and — the sharp part — not latched either.
+    expect(h.at({ top: 0, now: 0, candidates: items(0, 2, false) })).toEqual([])
+    expect(h.tracker.get('c0').hasBeenSeen).toBe(false)
+
+    const measured = h.at({ top: 0, now: 16, candidates: items(0, 2) })
+    expect(keysOf(measured, 'enter')).toEqual(['c0', 'c1', 'c2'])
+    expect(measured.every((e) => e.measured)).toBe(true)
+
+    // Away and back: withholding the estimate must not buy a second report either.
+    h.at({ top: 5000, now: 100 })
+    expect(keysOf(h.at({ top: 0, now: 200, candidates: items(0, 2) }), 'enter')).toEqual([])
+  })
+
+  /**
+   * A `quiet` adoption emits nothing, so there is no event for a `measured` filter to
+   * discard and nothing to protect by holding it back. Withholding it would be actively
+   * wrong: `#started` would latch on the withheld sample regardless, leaving the measured
+   * sample that follows looking like a second one — and `quiet` would then report exactly
+   * the rows it exists to swallow.
+   */
+  it('adopts an unmeasured estimate silently when quiet, rather than reporting it later', () => {
+    const h = harness({ rule: { mode: 'edge', edge: 'end' }, once: true, quiet: true }, 300)
+
+    expect(h.at({ top: 0, now: 0, candidates: items(0, 2, false) })).toEqual([])
+    expect(h.at({ top: 0, now: 16, candidates: items(0, 2) })).toEqual([])
+  })
+
+  it('waits on the measurement without arming a deadline', () => {
+    const h = harness({ rule: { mode: 'edge', edge: 'end' }, once: true }, 300)
+
+    expect(h.at({ top: 0, now: 0, candidates: items(0, 2, false) })).toEqual([])
+    // Waiting on a measurement, not on the clock — and a measurement publishes. A
+    // deadline here would fire, find `sample` still declining, and re-arm at zero.
+    expect(h.tracker.nextDeadline(0)).toBeNull()
+  })
 })
 
 describe('VisibilityTracker leave hysteresis', () => {

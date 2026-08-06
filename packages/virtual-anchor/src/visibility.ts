@@ -55,7 +55,13 @@ export interface VisibilityOptions {
    * picking one changes every number downstream.
    */
   dwell?: 'continuous' | 'cumulative'
-  /** Report `enter` at most once per key, ever. Impression semantics. */
+  /**
+   * Report `enter` at most once per key, ever. Impression semantics.
+   *
+   * An unmeasured item is held back rather than reported. The one report has to carry
+   * real geometry, because there is no second one to correct it — see `#dueAt`. Without
+   * `once`, an `edge` rule still reports an estimate and says so; see `satisfies`.
+   */
   once?: boolean
   /**
    * Adopt whatever is already on screen at the first sample without reporting
@@ -298,8 +304,13 @@ export class VisibilityTracker {
    * moment has arrived, `nextDeadline` takes the earliest across the active set. Written
    * twice, the two drifted silently — a deadline that fires while `sample` declines to
    * report re-arms at delay zero and spins.
+   *
+   * `silent` is a `quiet` adoption, which latches the state without emitting anything.
+   * The measurement condition below guards the *report*, so an adoption is exempt: there
+   * is no event for a consumer to filter, and holding one back would make the sample
+   * after it the first one `quiet` sees — which is the sample `quiet` exists to swallow.
    */
-  #dueAt(state: ItemState): number | null {
+  #dueAt(state: ItemState, silent = false): number | null {
     const { dwellMs = 0, dwell = 'continuous', once = false, leaveDelayMs = 0 } = this.#options
 
     // A departure held back by hysteresis: the leave fires when the delay elapses.
@@ -307,10 +318,27 @@ export class VisibilityTracker {
       return state.leavePendingSince + leaveDelayMs
     }
 
-    // A reported item has nothing left to wait for, and under `once` an item that has
-    // been seen will never report again however long it dwells.
+    // A reported item has nothing left to wait for.
     if (state.reported || state.passingSince === null) return null
-    if (once && state.hasBeenSeen) return null
+
+    // The two ways `once` refuses a report, folded so the option is tested once. An item
+    // that has been seen will never report again however long it dwells — and an item
+    // whose geometry is still an estimate must not report *yet*, because the one report
+    // `once` allows cannot be spent on a guess.
+    //
+    // The estimate half is not hypothetical. The first sample of a list's life runs in the
+    // *render* body — `setOptions` ends in `publish`, and `publish` ends in a sample — a
+    // whole commit phase before `observeItem` measures anything. Reporting there latched
+    // every in-band row against an estimated offset, and `hasBeenSeen` then refused the
+    // measured report one tick later, so a consumer filtering on `measured` as `satisfies`
+    // advises received nothing it was allowed to use.
+    //
+    // `null` rather than a deadline, because what unblocks the item is a measurement and a
+    // first measurement always publishes — `SizeCache.setSize` compares against the stored
+    // measurement, not the estimate, so a row that measures exactly its estimate still
+    // reports a change. A deadline would fire, find `sample` still declining to report, and
+    // re-arm at delay zero — the spin this method exists to rule out.
+    if (once && (state.hasBeenSeen || (!silent && !state.measured))) return null
 
     const banked = dwell === 'cumulative' ? state.accumulated : 0
     return state.passingSince + Math.max(0, dwellMs - banked)
@@ -431,7 +459,7 @@ export class VisibilityTracker {
         this.#active.add(state)
         this.#timed.add(state)
 
-        const dueAt = this.#dueAt(state)
+        const dueAt = this.#dueAt(state, adoptSilently)
         if (dueAt !== null && input.now >= dueAt) {
           state.reported = true
           state.hasBeenSeen = true
@@ -602,6 +630,11 @@ function event(
  * would mean an item never reports until measured — which for read tracking reads
  * as "not read yet" rather than "not sure yet". The event carries `measured`
  * truthfully, so a consumer wanting only confirmed geometry can filter on it.
+ *
+ * That filter is usable only because `once` holds an unmeasured item back instead
+ * (`#dueAt`). Reported here and filtered there, the single report `once` allows would
+ * be discarded with nothing to follow it, which is #50 — the two rules cannot be read
+ * apart.
  *
  * Takes the raw geometry as well as the fractions, because an edge rule keys on
  * where one edge *is* rather than on how much of the item shows.
