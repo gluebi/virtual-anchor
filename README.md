@@ -365,6 +365,13 @@ half-read and it is still reported when its clock runs out. Events are suppresse
 during a programmatic scroll, so `scrollToKey` across ten thousand comments reports
 the destination and nothing it flew past.
 
+Every event carries `measured`, saying whether the item's geometry was a real
+measurement or an estimate. `fraction` and `full` never report an unmeasured item at
+all — "half of it is showing" is a guess dressed as a fact — while `any` and `edge` do,
+and say so. Under `once` they do not: that mode grants a key exactly one report and
+there is no second one to correct it, so an unmeasured item is held back until it has
+been measured. That is what makes filtering on `measured` safe rather than lossy.
+
 ## Debugging
 
 The library can narrate its own decisions — scroll convergence frame by frame, anchor

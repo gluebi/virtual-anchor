@@ -252,6 +252,19 @@ describe('SizeCache measurement guards', () => {
     expect(cache.setSize(0, 251)).toBe(true)
   })
 
+  it('counts a first measurement as a change even when it equals the estimate', () => {
+    // Load-bearing beyond this file. `observeItem` publishes only when `setSize` returns
+    // true, and the visibility tracker defers a `once` report until a measurement arrives
+    // *because* that publish is guaranteed. Comparing against the estimate rather than the
+    // stored measurement would silence the publish for every row that guessed right, and
+    // under `once` those rows would then never be reported at all.
+    const cache = new SizeCache({ keys: keysFor(2), defaultEstimate: 100 })
+    expect(cache.isMeasured(0)).toBe(false)
+    expect(cache.setSize(0, 100)).toBe(true)
+    expect(cache.isMeasured(0)).toBe(true)
+    expect(cache.setSize(0, 100)).toBe(false)
+  })
+
   it('ignores writes to indices outside the window', () => {
     const cache = new SizeCache({ keys: keysFor(2) })
     expect(cache.setSize(5, 100)).toBe(false)

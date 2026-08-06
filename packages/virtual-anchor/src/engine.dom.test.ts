@@ -769,6 +769,41 @@ describe('engine visibility', () => {
     expect(events).toContain('enter:c50')
   })
 
+  /**
+   * #50. `setOptions` publishes from the React render body and `publish` ends in a
+   * sample, so the first sample of a list's life runs a whole commit phase before any
+   * ref callback has measured a row. Under `once` that sample was the only one each
+   * in-band row ever got, and it carried an estimate.
+   *
+   * A consumer marking forum comments read filters on `measured`, exactly as `satisfies`
+   * advises. On a list short enough that every row is in the band at mount, all of them
+   * latched unmeasured, all of them were discarded, and nothing could ever be marked
+   * read — with no scroll left to recover from it.
+   */
+  it('spends the once-report on measured geometry, not the mount estimate', () => {
+    const events: string[] = []
+    const h = setup({
+      count: 3,
+      visibility: { rule: { mode: 'edge', edge: 'end' }, once: true },
+      onVisibilityChange: (batch) => {
+        for (const e of batch) {
+          events.push(`${e.phase}:${String(e.key)}:${e.measured ? 'measured' : 'estimated'}`)
+        }
+      },
+    })
+
+    // Every trailing edge is inside the band already, but nothing has been measured.
+    expect(events).toEqual([])
+
+    // The commit phase: each ref callback attaches and measures synchronously. Deliberately
+    // measuring *exactly* the estimate, which is the case the deferral leans on hardest —
+    // `setSize` compares against the stored measurement rather than the estimate, so a row
+    // that guesses right still reports a change and still publishes.
+    for (const key of h.keys(3)) mountItem(h, key, 100)
+
+    expect(events).toEqual(['enter:c0:measured', 'enter:c1:measured', 'enter:c2:measured'])
+  })
+
   it('reports a dwell that completes while nothing else is happening', async () => {
     // Every other sample is driven by an event, and events stop when the user stops. A
     // dwell measured from the last of them was therefore never reached at rest: with
