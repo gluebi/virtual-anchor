@@ -1003,8 +1003,12 @@ export function createEngine(initial: EngineOptions): Engine {
    * append, a measurement landing — the scroll offset is re-derived from the anchor
    * rather than patched with a delta. That is what makes the correction invisible,
    * and it is why there is no compensation heuristic anywhere in this file.
+   *
+   * @param priorAnchorOffset Where {@link anchor} resolved *before* whatever change is being
+   * published. `null` means nobody could say — the default, and what every caller but
+   * `setOptions` passes today. See the restore branch for what it buys.
    */
-  const publish = (restore: Restore): void => {
+  const publish = (restore: Restore, priorAnchorOffset: number | null = null): void => {
     if (disposed) return
     const restoreScroll = restore !== 'none'
 
@@ -1091,14 +1095,53 @@ export function createEngine(initial: EngineOptions): Engine {
     } else if (restoreScroll && anchor && !scroller.isScrolling()) {
       const restored = resolveAnchorOffset(anchor, cache, geometry())
 
+      /**
+       * What to write: where the anchor *moved to*, not where the anchor *is*.
+       *
+       * The two differ during momentum, and the difference cancelled flings — issue #54, found on
+       * a device. `anchor` is re-derived on each scroll event, so `restored` answers "where the
+       * content was when the last one arrived", while `writeScroll` compares it against
+       * `contentOffset()` read now. A fling moves between those two moments, so
+       *
+       *     delta = (what the model change displaced) − (travel since the last scroll event)
+       *
+       * and for a change that displaced nothing — 500 items appended *below* the reader — the
+       * whole of that is the second term. Measured on an iPhone: `delta: -7`, written because
+       * `'model'` overrides the write gate, nudging the reader backwards to a stale offset and
+       * killing a fling with a second of travel still in it.
+       *
+       * So the displacement is taken where it is actually knowable — as the difference between the
+       * anchor's offset before and after the change — and applied to wherever the content has since
+       * got to. Both terms are content-space, so an outstanding carry or paint offset cancels out
+       * of the subtraction rather than having to be reasoned about.
+       *
+       * Bit-identical to the old form whenever the content is still: a stationary anchor is in
+       * sync, so `contentOffset() === priorAnchorOffset` and `target === restored`. The two diverge
+       * only while the content is moving under the write, which is the case being fixed. And a
+       * displacement of zero then lands inside `writeScroll`'s existing no-op threshold, so
+       * "changed nothing, wrote nothing" falls out rather than needing its own branch.
+       *
+       * `null` from every caller but `setOptions` today — the measurement paths clear and rebuild
+       * the cache, where the anchor's offset genuinely has moved and the full restore is right.
+       * That is a statement about the current call graph, not a design constraint: the `'measure'`
+       * path has the same lag defect and the same shape would fix it.
+       */
+      const restoreFrom = contentOffset()
+      const target =
+        priorAnchorOffset === null || restored === null
+          ? restored
+          : restoreFrom + (restored - priorAnchorOffset)
+
       // A null restore means the anchored key left the window. For a grows-only
       // window that cannot happen; if it does, holding position beats jumping.
-      if (restored !== null && writeScroll(restored, restore, maxOffset)) {
+      if (target !== null && writeScroll(target, restore, maxOffset, restoreFrom)) {
         // Not `markSelfWrite`'s queue but the engine's own: do not re-derive the
         // anchor from this write's read-back, which may have been snapped to a whole
         // pixel. Absorbing that into `offsetWithinItem` re-introduces the residual
         // the carry just removed.
-        pushRestoreIntent(restored)
+        // `target`, not `restored`: the queue exists to recognise this write's own read-back,
+        // so it has to hold the number that was written.
+        pushRestoreIntent(target)
       }
     }
 
@@ -1516,6 +1559,17 @@ export function createEngine(initial: EngineOptions): Engine {
       // 12,000-entry snapshot at a time.
       const snapshot = next.sizeSnapshot
 
+      /**
+       * Where the anchor sits under the *old* model.
+       *
+       * Captured here — before the merge below, which is what makes `geometry()` return the new
+       * insets, and before every cache mutation — because it is the only moment at which the
+       * question "what did this change displace?" can still be answered. `publish` needs it to
+       * avoid writing the fling's own lag; see the restore branch there for why that matters.
+       *
+       * One Fenwick prefix sum, O(log n), per `setOptions` call.
+       */
+      const priorAnchorOffset = anchor === null ? null : resolveAnchorOffset(anchor, cache, geometry())
 
       // Captured before the merge: both move every offset below them, so both
       // belong with the prepend case below rather than with the quiet options.
@@ -1586,7 +1640,7 @@ export function createEngine(initial: EngineOptions): Engine {
       // is why this is `'model'` and not `'measure'`: a prepend that skipped its
       // restore because a fling was in progress would move the reader by the whole
       // inserted height, which is the one thing this library promises cannot happen.
-      publish(modelChanged ? 'model' : 'none')
+      publish(modelChanged ? 'model' : 'none', priorAnchorOffset)
     },
 
     mount() {
