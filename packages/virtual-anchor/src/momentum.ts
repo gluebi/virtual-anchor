@@ -10,28 +10,55 @@ import type { Viewport } from './viewport.js'
  * iOS fires touch events only at the *start* of momentum, so `touchend` is not the
  * end of the scrolling. This bridges the gap between the finger lifting and the
  * first momentum scroll event; it deliberately does not try to bound the fling
- * itself, which is what {@link MOMENTUM_MAX_MS} and the settle signal are for.
+ * itself, which is what {@link MOMENTUM_IDLE_MS} and the settle signal are for.
  */
 const IOS_TOUCH_GRACE_MS = 150
 
 /**
- * Ceiling on an unterminated fling.
+ * How long momentum may go *quiet* before the gate gives up waiting for a settle.
  *
- * A safety valve, not a duration: momentum normally ends at `scrollend`, or at the
- * settle helper's scroll debounce where that event is unavailable. This exists so a
- * settle that never arrives cannot wedge the gate shut forever. Deliberately below
- * the scroller's `HARD_DEADLINE_MS` of 5000, so a programmatic scroll issued
- * mid-fling still has frames left to converge in once the gate reopens.
+ * A safety valve, not a duration, and the distinction is the whole of issue #53. Momentum
+ * normally ends at `scrollend`, or at the settle helper's scroll debounce where that event
+ * is unavailable; this exists only so a settle that never arrives cannot wedge the gate shut
+ * forever.
+ *
+ * It used to be a *ceiling*: armed once at momentum onset and fired 3000ms later whatever
+ * else had happened. On a twelve-thousand-row thread that is not a safety valve, it is the
+ * common case. Measured on an iPhone, every fling that ran longer than three seconds hit it
+ * and none that ran shorter did:
+ *
+ * | fling | outcome |
+ * | --- | --- |
+ * | 837ms, 2266ms | settled |
+ * | 3032, 3251, 3782, 4504, 4721, 8467ms | **cap** |
+ *
+ * And firing it mid-fling does precisely what the gate exists to prevent: `canWrite()` starts
+ * answering true again with the fling still running, the next measurement writes `scrollTop`,
+ * and WebKit cancels the momentum. That is the "stops abruptly" this whole mechanism is for.
+ *
+ * So the timer is re-armed by every scroll event, which makes it an inactivity watchdog — and
+ * inactivity is the right predicate for the thing it actually guards against. A fling still
+ * delivering two hundred scroll events is self-evidently not a wedged gate.
+ *
+ * Three seconds of *silence* rather than something tighter, because a blocked main thread can
+ * stop delivering scroll events for a while without the fling being over: the worst gap measured
+ * on a device was 205ms, and on a simulator 202ms. The window has to clear that comfortably or
+ * the watchdog re-creates the bug it fixes.
+ *
+ * The old note that this sat "deliberately below the scroller's `HARD_DEADLINE_MS` of 5000"
+ * no longer applies and was already obsolete: the convergence loop suspends its deadline clock
+ * while parked, so a longer gate-shut window costs a programmatic scroll nothing.
  */
-const MOMENTUM_MAX_MS = 3000
+const MOMENTUM_IDLE_MS = 3000
 
 /**
  * Where a touch-driven scroll currently is.
  *
  * `grace` and `momentum` are separate states rather than one "not idle" flag because
  * they end differently: `grace` ends on a timer *or* on the first scroll event that
- * promotes it to `momentum`, while `momentum` ends on settle *or* the hard cap. A
- * single flag cannot express "waiting to find out whether this was a tap or a fling".
+ * promotes it to `momentum`, while `momentum` ends on settle *or* on the watchdog going
+ * quiet. A single flag cannot express "waiting to find out whether this was a tap or a
+ * fling" — nor "a scroll event means onset here and means keep waiting there".
  */
 export type GateState = 'idle' | 'touching' | 'grace' | 'momentum'
 
@@ -139,11 +166,31 @@ export function createScrollWriteGate(options: ScrollWriteGateOptions): ScrollWr
     timer = null
   }
 
+  /**
+   * Replace the pending timer with a new one.
+   *
+   * Clears first, so the caller never has to. `enter` already argues that "clearing here rather
+   * than at each call site is what stops a new transition needing to remember" — this is the same
+   * argument one level down, and it exists because the watchdog re-arm below *is* a call site that
+   * arms without a transition, and so was the one place having to remember.
+   *
+   * The two fire callbacks are hoisted rather than written inline: this runs on every scroll event
+   * during momentum, and an inline arrow would allocate two closures per event — a couple of
+   * hundred a second on a ProMotion device, for the length of every fling.
+   */
   const arm = (ms: number, onFire: () => void): void => {
+    clearPendingTimer()
     timer = setTimer(() => {
       timer = null
       onFire()
     }, ms)
+  }
+
+  const graceExpired = (): void => {
+    enter('idle', 'grace-expired')
+  }
+  const watchdogFired = (): void => {
+    enter('idle', 'cap')
   }
 
   /**
@@ -178,19 +225,32 @@ export function createScrollWriteGate(options: ScrollWriteGateOptions): ScrollWr
     // A tap, not a fling: nothing will ever scroll, so the timer is the only
     // thing that can reopen the gate. Without it a stationary press shuts the
     // list's corrections down permanently.
-    arm(IOS_TOUCH_GRACE_MS, () => {
-      enter('idle', 'grace-expired')
-    })
+    arm(IOS_TOUCH_GRACE_MS, graceExpired)
+  }
+
+  /** Wait `MOMENTUM_IDLE_MS` of silence, then conclude the fling is over. */
+  const armWatchdog = (): void => {
+    arm(MOMENTUM_IDLE_MS, watchdogFired)
   }
 
   const onScroll = (): void => {
+    // A scroll *during* momentum is the fling still going, so it pushes the watchdog back rather
+    // than being ignored. Without this the timer was a fixed ceiling from onset and fired in the
+    // middle of every fling longer than three seconds — see `MOMENTUM_IDLE_MS` for the measurements.
+    //
+    // `enter` is deliberately not used: the state is not changing, and going through it would emit
+    // a transition event for a transition that did not happen. Its early return on an unchanged
+    // state would swallow the re-arm anyway.
+    if (state === 'momentum') {
+      armWatchdog()
+      return
+    }
+
     // Only a scroll *within* the grace window is momentum onset. Later ones are
     // the reader scrolling again, or the echo of a write we just made.
     if (state !== 'grace') return
     enter('momentum', 'momentum-onset')
-    arm(MOMENTUM_MAX_MS, () => {
-      enter('idle', 'cap')
-    })
+    armWatchdog()
   }
 
   const onSettled = (): void => {

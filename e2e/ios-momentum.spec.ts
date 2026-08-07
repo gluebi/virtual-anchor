@@ -357,6 +357,38 @@ test.describe('the momentum gate, as the library reports it', () => {
     expect(model.every((event) => event.data.took === true)).toBe(true)
   })
 
+  test('a fling longer than the watchdog window is not cut off', async ({ page }) => {
+    // The regression test for issue #53, and the one assertion here that maps directly onto the
+    // reported symptom. The gate's timer used to be a *ceiling* armed at momentum onset, so it
+    // fired three seconds in whatever else was happening — measured on a device, every fling
+    // longer than three seconds hit it and none shorter did. Firing it mid-fling reopens the gate,
+    // the next measurement writes `scrollTop`, and WebKit cancels the momentum.
+    //
+    // Five seconds of scroll events, which the old ceiling could not have survived.
+    await open(page, 'debug=1&overlay=0&comment=6018')
+    await page.evaluate(() => {
+      window.__traceClear()
+    })
+
+    // Through the shared helper rather than hand-rolled, and that is load-bearing here rather than
+    // tidy: the helper keeps the lift and the first scroll write inside one `page.evaluate`. Split
+    // across separate round-trips, the gap between them can outlast the gate's 150ms grace window —
+    // at which point the gate reaches `idle` by `grace-expired`, never enters `momentum`, and `cap`
+    // cannot appear for a reason that has nothing to do with the watchdog. The test would pass
+    // while proving nothing.
+    await fling(page, { ms: 5000 }, 25)
+    await page.waitForTimeout(600)
+
+    const verdict = await page.evaluate(() => window.__verdict())
+    expect(verdict?.flingMs).toBeGreaterThan(4000)
+    // Guards against the assertion below passing vacuously: `cap` cannot appear if the gate never
+    // shut in the first place, so "no cap" only means anything once momentum is on the record.
+    expect(verdict?.states.map((state) => state.state)).toContain('momentum')
+    // The whole claim: the gate was never given back mid-fling.
+    expect(verdict?.states.map((state) => state.reason)).not.toContain('cap')
+    expect(verdict?.suspects.map((suspect) => suspect.id)).not.toContain('cap')
+  })
+
   test('reports what it saw, without asserting the speed of the machine', async ({ page }) => {
     // Gap statistics are reported and never asserted. `af282b8` — "stop asserting the speed of the
     // machine" — is the precedent: a CI runner under load produces gaps a developer's laptop never
