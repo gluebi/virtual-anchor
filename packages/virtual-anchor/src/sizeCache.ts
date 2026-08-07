@@ -1,5 +1,6 @@
 import type { ItemKey } from './types.js'
-import { TRACING, trace } from './trace.js'
+import { DEBUG } from './debugFlag.js'
+import { trace } from './trace.js'
 
 /**
  * A restorable set of measured item sizes.
@@ -460,7 +461,7 @@ export class SizeCache {
       // Both signatures, because "refused" without them is the one case where you need to
       // know why: a width that differs by a pixel from the one measured under is
       // indistinguishable from a stale format otherwise.
-      if (TRACING) {
+      if (DEBUG) {
         trace('snapshot.restore', () => ({
           accepted: false,
           count: snapshot.sizes.length,
@@ -481,7 +482,7 @@ export class SizeCache {
       applied++
     }
 
-    if (TRACING) {
+    if (DEBUG) {
       trace('snapshot.restore', () => ({
         accepted: true,
         count: snapshot.sizes.length,

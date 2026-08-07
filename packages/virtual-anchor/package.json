@@ -23,25 +23,37 @@
   "types": "./src/index.ts",
   "exports": {
     ".": "./src/index.ts",
-    "./react": "./src/react/index.ts"
+    "./react": "./src/react/index.ts",
+    "./debug": "./src/debug/index.ts"
   },
+  "//development": "The `development` condition resolves the instrumented build in dist/dev. It switches the whole export map at once, which is why it is a condition rather than an alias per subpath: a half-applied alias would give a consumer two module instances of a package whose trace sink is module state, which is the same hazard the ESM-only note below exists for. There is no SSR path and no worker path, so a consumer has exactly one environment and therefore exactly one condition set. `types` sits above it so TypeScript never follows a condition into a directory that ships no .d.ts — the two builds have identical types, so one copy serves both.",
   "publishConfig": {
     "main": "./dist/index.js",
     "types": "./dist/index.d.ts",
     "exports": {
       ".": {
         "types": "./dist/index.d.ts",
+        "development": "./dist/dev/index.js",
         "default": "./dist/index.js"
       },
       "./react": {
         "types": "./dist/react.d.ts",
+        "development": "./dist/dev/react.js",
         "default": "./dist/react.js"
+      },
+      "./debug": {
+        "types": "./dist/debug.d.ts",
+        "development": "./dist/dev/debug.js",
+        "default": "./dist/debug.js"
       }
     },
     "typesVersions": {
       "*": {
         "react": [
           "./dist/react.d.ts"
+        ],
+        "debug": [
+          "./dist/debug.d.ts"
         ]
       }
     }

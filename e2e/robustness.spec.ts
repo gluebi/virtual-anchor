@@ -200,8 +200,10 @@ test.describe('a restored size snapshot', () => {
     // through `setOptions`, which had no handler for it, so the feature did nothing at all
     // through the component.
     //
-    // Asserted on what the list *has*, not on a trace event: tracing is compiled out of a
-    // production build, and the demo under test is one.
+    // Asserted on what the list *has*, rather than on a trace event, and it stays that way now
+    // that `pnpm test:e2e` builds the demo with instrumentation: what the cache holds is the
+    // actual claim, and a test that watched a trace event instead would pass whenever the event
+    // fired for some other reason.
     await open(page, 'comment=4000&snapshot=1')
 
     // Measure a decent number of comments, then persist as the demo does on unload.

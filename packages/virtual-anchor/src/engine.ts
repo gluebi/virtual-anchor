@@ -3,6 +3,7 @@ import {
   deriveAnchor,
   isSelfWrite,
   resolveAnchorOffset,
+  SELF_WRITE_TOLERANCE,
 } from './anchor.js'
 import { observeResolution } from './env.js'
 import { composeInsets, ListGeometry, type ListInsets } from './listGeometry.js'
@@ -12,7 +13,8 @@ import { createScrollWriteGate } from './momentum.js'
 import { createScroller, type Scroller } from './scroller.js'
 import { onScrollSettled } from './settle.js'
 import { createNullSurface, type Surface } from './surface.js'
-import { TRACING, trace } from './trace.js'
+import { DEBUG } from './debugFlag.js'
+import { trace } from './trace.js'
 import { SizeCache, type SizeSnapshot } from './sizeCache.js'
 import {
   createVirtualStore,
@@ -476,7 +478,7 @@ export function createEngine(initial: EngineOptions): Engine {
    * offset is 0, and the write is taken whatever the label says.
    */
   const onSlotGeometryChange = (): void => {
-    if (TRACING) trace('slot.resize', () => ({ ...slotSizes }))
+    if (DEBUG) trace('slot.resize', () => ({ ...slotSizes }))
     // A measurement, not a model change, at both ends of the list: an animated sticky
     // footer resizing under a fling is exactly the wobble the gate exists to postpone,
     // and a header's correction is *held* rather than dropped. See the `Restore` doc for
@@ -612,6 +614,17 @@ export function createEngine(initial: EngineOptions): Engine {
     const next = carry + pendingShift
     if (next === paintOffset) return
     paintOffset = next
+    // Here rather than inside `surface.setPaintOffset`, because the surface is handed only
+    // the sum and the diagnosis needs to know which addend moved: a sub-pixel carry landing
+    // and a whole correction being banked write the same CSS property, and they mean opposite
+    // things about whether the view is being held or has slipped.
+    //
+    // Only on a real change — the early return above already dedupes — so a bad gesture emits
+    // roughly one per deferral rather than one per publish. Together with `scroll.sample` this
+    // is a continuous record of where the reader's content actually is, since the visible
+    // position is `scrollTop + px`, which is `contentOffset()`. That pair is what turns "the
+    // content jumped" from a description into a number.
+    if (DEBUG) trace('paint.offset', () => ({ px: next, carry, shift: pendingShift }))
     surface.setPaintOffset(next)
   }
 
@@ -761,37 +774,52 @@ export function createEngine(initial: EngineOptions): Engine {
    *
    * @returns whether the platform took the write.
    */
-  const writeScroll = (offset: number, restore: Restore, maxOffset: number): boolean => {
-    // Against the *content* offset, not the raw scroll offset: with a shift
-    // outstanding the two differ by exactly the correction already applied to the
-    // content, so comparing against `scrollTop` would re-apply it every publish.
-    const delta = offset - contentOffset()
+  const writeScroll = (
+    offset: number,
+    restore: Restore,
+    maxOffset: number,
+    from = contentOffset(),
+  ): boolean => {
+    // Read once, and taken from the caller where it has one, for two reasons that used to be one
+    // bug each.
+    //
+    // `from` was computed twice — once here for `delta`, once inside the trace thunk — and
+    // `room` read `getScrollOffset()` twice more, also inside the thunk. Every one of those
+    // is an uncached `element.scrollTop`, and the thunk runs after `publish` has written
+    // styles, so each was a *forced synchronous layout* on the hottest path in this file.
+    // Three per traced write, on a gesture measured at 43 deferrals: 129 layouts that
+    // existed only because someone was watching. The instrument was perturbing the thing it
+    // was built to measure, which is the one thing a diagnostic may never do.
+    //
+    // Against the *content* offset, not the raw scroll offset: with a shift outstanding the
+    // two differ by exactly the correction already applied to the content, so comparing
+    // against `scrollTop` would re-apply it every publish. `maxOffset` is passed for the same
+    // reason and `from` now joins it: the restore branch computes its target from this very
+    // number, and two reads a few microseconds apart is two chances to disagree.
+    const delta = offset - from
 
     // Nothing to do. Kept here so the callers do not each re-derive the threshold;
     // it exists to absorb the disagreement between an integer `clientHeight` and the
     // exact float offset it is compared against.
+    //
+    // Note for anyone reading a trace: this returns *before* the event below, so the absence
+    // of a `scroll.write` does not mean the absence of a publish.
     if (Math.abs(delta) <= 0.01) return false
 
     // A model change writes through a shut gate; a measurement waits. See the
     // `Restore` doc for why the two are not interchangeable — in short, a deferred
     // prepend teleports the reader and a deferred measurement does not.
-    const deferred = restore !== 'model' && !writeGate.canWrite()
-
-    // The size of each correction and whether it was taken — the pair that says whether
-    // a deferral is invisible or a visible lurch. See `pendingShift` for what that
-    // measured on a device.
-    if (TRACING) {
-      trace('scroll.write', () => ({
-        restore,
-        offset,
-        from: contentOffset(),
-        delta,
-        deferred,
-        pendingShift,
-        room: Math.max(0, Math.min(viewport.getScrollOffset(), maxOffset - viewport.getScrollOffset())),
-      }))
-    }
-
+    //
+    // `canWrite` is hoisted rather than asked twice because `reason` below has to key on the
+    // *gate*, not on `deferred`. Keying it on `deferred` compiled but could not express the
+    // case it most needed to: `deferred` is already false whenever `restore === 'model'`, so a
+    // prepend deliberately overriding a shut gate reported `gate-open` — indistinguishable
+    // from an ordinary write on an idle platform. The type checker caught it as an impossible
+    // comparison, which is the second time in this function that the outcome and the intent
+    // were being conflated.
+    const canWrite = writeGate.canWrite()
+    const deferred = restore !== 'model' && !canWrite
+    const held = pendingShift + delta
     // Hold the view by moving the content the distance `scrollTop` was going to move.
     // The gesture never sees a scroll write, so nothing cancels it, and the reader sees
     // the correction they would have seen anyway.
@@ -815,9 +843,48 @@ export function createEngine(initial: EngineOptions): Engine {
     // Not the magnitude heuristic this file refuses elsewhere: both branches correct, and
     // this only chooses which mechanism carries it — the same shape as `MAX_CARRY`, on the
     // same CSS property, with the same "refusing is the safe failure" logic.
-    const held = pendingShift + delta
-    const room = Math.max(0, Math.min(viewport.getScrollOffset(), maxOffset - viewport.getScrollOffset()))
-    if (deferred && Math.abs(held) <= room) {
+    const scrollNow = viewport.getScrollOffset()
+    const room = Math.max(0, Math.min(scrollNow, maxOffset - scrollNow))
+    const bank = deferred && Math.abs(held) <= room
+
+    // Emitted *after* the decision, which is the other half of the fix.
+    //
+    // `deferred` alone was computed before the `room` test and reported as though it were the
+    // outcome — so the one case that matters most, a write escaping because the bound fired
+    // mid-fling, was recorded as `deferred: true` and printed by the demo's on-device HUD as
+    // `DEFER`. The HUD's own comment said that case was "worth naming rather than leaving to
+    // be inferred", and then named it as its opposite. `took` is now the field to key on and
+    // `reason` says which of the four exits was taken; `deferred` is kept, meaning what it
+    // always meant — what the engine *wanted* — and nothing more.
+    //
+    // `max` costs nothing: it is `maxOffset`, already a parameter, already read once by
+    // `publish`. It earns its place by making `room ≈ 0` legible. Deep in a list the bound is
+    // effectively unlimited; at either end it tightens to nothing, and `from` outside
+    // `[0, max]` is a rubber-band overscroll — a case this function does not test for at all,
+    // though `scroller.canWriteScroll` does.
+    if (DEBUG) {
+      trace('scroll.write', () => ({
+        restore,
+        reason: bank
+          ? 'held'
+          : canWrite
+            ? 'gate-open'
+            : restore === 'model'
+              ? 'model'
+              : 'no-room',
+        took: !bank,
+        offset,
+        from,
+        delta,
+        deferred,
+        pendingShift,
+        heldAfter: bank ? held : 0,
+        room,
+        max: maxOffset,
+      }))
+    }
+
+    if (bank) {
       // Only here. Set on a path that went on to write, the flag would ask for a
       // re-publish that has nothing left to do.
       writeDeferred = true
@@ -877,10 +944,56 @@ export function createEngine(initial: EngineOptions): Engine {
   const reconcileGestureShift = (): void => {
     if (pendingShift === 0) return
 
-    const target = viewport.getScrollOffset() + pendingShift
+    const shift = pendingShift
+    const carryBefore = carry
+    const from = viewport.getScrollOffset()
+    const target = from + shift
     pushRestoreIntent(target)
     commitScroll(target)
     writePaintOffset()
+
+    // The one place in this file that traces *after* the fact.
+    //
+    // `getMaxScrollOffset()` is `scrollHeight - clientHeight` — a genuine forced layout — so it
+    // happens only when something is actually listening, which is what putting it inside the thunk
+    // buys. It is affordable even then because this runs once when the gate reopens, not once per
+    // frame and not once per measured row.
+    //
+    // What it is for. This function's own doc above asserts that both halves land in one task
+    // so nothing paints between them, and `commitScroll`'s asserts that "a correction can
+    // never exceed the content above it, so the fold's target cannot leave the scrollable
+    // range". The second claim has a gap: `room` was evaluated per-deferral against the
+    // offset *at that moment*, and the fling has been moving the scroller ever since, so by
+    // the time the fold lands `from + shift` may sit past `max`. The browser then clamps,
+    // `carryFor` discards anything over `MAX_CARRY` as too large to carry, and the reader is
+    // left displaced — which is a visible jump at exactly the moment a fling ends. Precisely
+    // because the invariant is asserted, nothing would report it being broken.
+    //
+    // `clamped` is that test. The continuity of `from + shift + carryBefore` against
+    // `applied + carryAfter` is the one-number version of "was the fold visible", and it is
+    // what the e2e suite asserts rather than trusts.
+    // The reads are *inside* the thunk, which is what keeps them off the path of a build that has
+    // instrumentation but no listener attached — `trace` returns before calling the thunk, and
+    // calls it synchronously when it does, so the values are the same either way.
+    //
+    // That makes one guard sufficient here. `scroller.ts`'s `traceStep` is the one site that still
+    // needs both, and for a reason this site does not share: an inline thunk inside its per-frame
+    // loop would allocate a closure context every frame even with nothing listening.
+    if (DEBUG) {
+      trace('gesture.fold', () => {
+        const applied = viewport.getScrollOffset()
+        return {
+          shift,
+          from,
+          target,
+          applied,
+          max: viewport.getMaxScrollOffset(),
+          clamped: Math.abs(applied - target) > SELF_WRITE_TOLERANCE,
+          carryBefore,
+          carryAfter: carry,
+        }
+      })
+    }
   }
 
   /**
@@ -921,11 +1034,15 @@ export function createEngine(initial: EngineOptions): Engine {
     // The anchor keeps the *user's* position stable. While a programmatic scroll
     // is in flight the scroller is authoritative instead — restoring an anchor
     // captured before it started would drag the view back and stall convergence.
-    if (TRACING && restoreScroll) {
+    // No `scrollOffset` here, deliberately, and it used to be. Reading it inside the thunk is a
+    // forced layout — this runs after the content size has been written — once per publish, which
+    // during a fling is once per measured row. `scroll.sample` now reports the offset on every
+    // scroll event at higher fidelity than this could, so the field was costing a layout to
+    // duplicate information the reader already has.
+    if (DEBUG && restoreScroll) {
       trace('anchor.restore', () => ({
         anchor,
         skipped: anchor === null ? 'no-anchor' : scroller.isScrolling() ? 'scrolling' : null,
-        scrollOffset: viewport.getScrollOffset(),
         totalSize,
       }))
     }
@@ -973,6 +1090,7 @@ export function createEngine(initial: EngineOptions): Engine {
       }
     } else if (restoreScroll && anchor && !scroller.isScrolling()) {
       const restored = resolveAnchorOffset(anchor, cache, geometry())
+
       // A null restore means the anchored key left the window. For a grows-only
       // window that cannot happen; if it does, holding position beats jumping.
       if (restored !== null && writeScroll(restored, restore, maxOffset)) {
@@ -1074,7 +1192,7 @@ export function createEngine(initial: EngineOptions): Engine {
     }
     if (due === null) return
 
-    if (TRACING) trace('visibility.deadline', () => ({ due, in: due - stamp }))
+    if (DEBUG) trace('visibility.deadline', () => ({ due, in: due - stamp }))
     armedFor = due
     visibilityTimer = setTimeout(
       () => {
@@ -1182,6 +1300,9 @@ export function createEngine(initial: EngineOptions): Engine {
    * moved every offset in the list.
    */
   const recheckLayoutSignature = (): boolean => {
+    // Read only by the trace below, so not read at all in a build without it. It cannot move
+    // *into* the thunk, because `setLayoutSignature` overwrites it on the next line.
+    const previous = DEBUG && signatureKnown ? cache.layoutSignature : null
     const signature = layoutSignatureFor(viewport.getScrollportElement())
     const changed = cache.setLayoutSignature(signature)
 
@@ -1189,6 +1310,22 @@ export function createEngine(initial: EngineOptions): Engine {
     // it to differ from, and clearing would throw away measurements taken moments
     // earlier during mount.
     const invalidated = changed && signatureKnown
+    // Before the clear, so `cleared` reports what was thrown away rather than zero.
+    //
+    // The signature strings are the payload's whole value: they name *which* term moved —
+    // scrollport width, root font size, device pixel ratio — and that is what separates a
+    // phone's URL bar collapsing mid-fling from a webfont landing from a page zoom. All three
+    // reach here, all three invalidate every measurement in the list, and only one of them is
+    // something the reader did. A `scroll.write` with `reason: 'model'` in the middle of a
+    // gesture is otherwise unattributable.
+    if (DEBUG) {
+      trace('layout.signature', () => ({
+        signature,
+        previous,
+        invalidated,
+        cleared: invalidated ? cache.length : 0,
+      }))
+    }
     if (invalidated) cache.clearAll()
     signatureKnown = true
     return invalidated
@@ -1251,11 +1388,12 @@ export function createEngine(initial: EngineOptions): Engine {
       // discarded a moment ago — in which case every offset below the first item moved and
       // there is a restore to do whether or not this batch's own sizes are news.
       if (!changed && !invalidated) return
-      if (TRACING) {
+      // `scrollOffset` dropped for the same reason as `anchor.restore`'s: a forced layout inside
+      // the thunk, to report a number `scroll.sample` already reports on every scroll event.
+      if (DEBUG) {
         trace('measure.batch', () => ({
           count: batch.length,
           totalSize: cache.totalSize(),
-          scrollOffset: viewport.getScrollOffset(),
           invalidated,
         }))
       }
@@ -1269,6 +1407,22 @@ export function createEngine(initial: EngineOptions): Engine {
       // cannot wait for a fling to end without teleporting the reader.
       publish(invalidated ? 'model' : 'measure')
       scroller.notifyModelChanged()
+
+      // The same batch, timed. `measure.batch` above reports the decision's *inputs*; this
+      // reports what it cost, and the two are deliberately separate events rather than one
+      // emitted late, because a batch that throws or returns early should still have said it
+      // arrived.
+      //
+      // `stamp` was already taken unconditionally for the rate limit, so the only new work is
+      // the closing `now()`. What the number covers is everything this callback caused: the
+      // signature recheck and any `clearAll`, the Fenwick updates, the estimate refresh, the
+      // anchor restore, the publish, the per-item offset writes and the visibility sample.
+      // That makes it the single most useful figure for deciding whether a stutter was the
+      // main thread rather than the write gate — the difference between the library
+      // cancelling a fling and the library simply being too slow to keep up with one.
+      if (DEBUG) {
+        trace('measure.done', () => ({ count: batch.length, invalidated, ms: now() - stamp }))
+      }
     },
 
     onSlotResize(batch) {
@@ -1362,6 +1516,7 @@ export function createEngine(initial: EngineOptions): Engine {
       // 12,000-entry snapshot at a time.
       const snapshot = next.sizeSnapshot
 
+
       // Captured before the merge: both move every offset below them, so both
       // belong with the prepend case below rather than with the quiet options.
       const geometryChanged =
@@ -1402,7 +1557,7 @@ export function createEngine(initial: EngineOptions): Engine {
       if (next.layoutSignature !== undefined) cache.setLayoutSignature(next.layoutSignature)
 
       const keysChanged = next.keys !== undefined && cache.setKeys(next.keys)
-      if (TRACING && keysChanged) {
+      if (DEBUG && keysChanged) {
         trace('model.keys', () => ({ count: cache.length, firstKey: cache.keyAt(0) }))
       }
 
@@ -1508,6 +1663,23 @@ export function createEngine(initial: EngineOptions): Engine {
       cleanups.push(
         viewport.addEventListener('scroll', () => {
           const offset = viewport.getScrollOffset()
+
+          // First statement in the handler, before `notifyScroll` and before anything
+          // publishes, because what this measures is *delivery time*.
+          //
+          // The gap between consecutive scroll events is the primary evidence for a
+          // main-thread stall — the case where momentum keeps running on the compositor
+          // while nothing repositions the rows, so the content appears frozen and then
+          // jumps when the handler finally catches up. Stamped after `publish` instead, the
+          // gap would include this handler's own duration, which folds the stall into the
+          // thing being measured.
+          //
+          // Carries no clock of its own: `TraceEvent.at` is already `performance.now()` at
+          // the call. The two addends travel with the offset because the anchor is derived
+          // from their sum below, so a diagnostic that reported only the offset would be
+          // reporting an input to the answer rather than the answer.
+          if (DEBUG) trace('scroll.sample', () => ({ offset, carry, shift: pendingShift }))
+
           scroller.notifyScroll(offset)
 
           // The anchor records where the view *is*, so it follows every intentional
@@ -1530,7 +1702,7 @@ export function createEngine(initial: EngineOptions): Engine {
           } else {
             restoreIntents.splice(0, restoreIndex + 1)
           }
-          if (TRACING) {
+          if (DEBUG) {
             trace('anchor.derive', () => ({
               offset,
               anchor,
@@ -1628,7 +1800,7 @@ export function createEngine(initial: EngineOptions): Engine {
       // One attach per row actually mounted. A ref callback recreated on every render
       // would show up here as a detach/attach pair per row per frame, which is the
       // churn the per-key memoised callbacks exist to prevent.
-      if (TRACING) trace('item.attach', () => ({ key }))
+      if (DEBUG) trace('item.attach', () => ({ key }))
       const detachFromSurface = surface.attachItem(key, element as HTMLElement)
       const index = cache.indexOf(key)
 
@@ -1658,7 +1830,7 @@ export function createEngine(initial: EngineOptions): Engine {
     },
 
     observeSlot(element, slot) {
-      if (TRACING) trace('slot.attach', () => ({ slot }))
+      if (DEBUG) trace('slot.attach', () => ({ slot }))
 
       // Measured synchronously for the same reason an item is: ResizeObserver's
       // first callback lands after the next rendering update, and a slot whose

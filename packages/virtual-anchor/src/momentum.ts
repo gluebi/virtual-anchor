@@ -1,6 +1,7 @@
 import { isIOSWebKit } from './env.js'
 import { onScrollSettled } from './settle.js'
-import { TRACING, trace } from './trace.js'
+import { DEBUG } from './debugFlag.js'
+import { trace } from './trace.js'
 import type { Viewport } from './viewport.js'
 
 /**
@@ -32,7 +33,24 @@ const MOMENTUM_MAX_MS = 3000
  * promotes it to `momentum`, while `momentum` ends on settle *or* the hard cap. A
  * single flag cannot express "waiting to find out whether this was a tap or a fling".
  */
-type GateState = 'idle' | 'touching' | 'grace' | 'momentum'
+export type GateState = 'idle' | 'touching' | 'grace' | 'momentum'
+
+/**
+ * Why the gate changed state.
+ *
+ * A union rather than a `string` because the analyzer in `virtual-anchor/debug` branches on these
+ * exact spellings to find gesture boundaries and to recognise the `cap` and `grace-expired`
+ * hypotheses. Typed loosely, renaming one would compile everywhere and silently stop the analyzer
+ * segmenting — which is the failure `traceTopics.ts` exists to prevent, on the fields that decide
+ * the most.
+ */
+export type GateReason =
+  | 'touchstart'
+  | 'touchend'
+  | 'grace-expired'
+  | 'momentum-onset'
+  | 'cap'
+  | 'settled'
 
 /**
  * Whether the platform will accept a scroll write right now.
@@ -136,7 +154,7 @@ export function createScrollWriteGate(options: ScrollWriteGateOptions): ScrollWr
    * expiry behind it — so clearing here rather than at each call site is what stops a
    * new transition needing to remember.
    */
-  const enter = (next: GateState, reason: string): void => {
+  const enter = (next: GateState, reason: GateReason): void => {
     if (state === next) return
     clearPendingTimer()
     // The early return above is what makes this the shut → open *edge*: reaching
@@ -144,7 +162,7 @@ export function createScrollWriteGate(options: ScrollWriteGateOptions): ScrollWr
     // the deferred work mid-gesture, which is the thing being deferred.
     const reopened = next === 'idle'
     state = next
-    if (TRACING) trace('scroll.gate', () => ({ state: next, reason }))
+    if (DEBUG) trace('scroll.gate', () => ({ state: next, reason }))
     if (reopened) {
       for (const listener of [...openListeners]) listener()
     }
@@ -185,6 +203,22 @@ export function createScrollWriteGate(options: ScrollWriteGateOptions): ScrollWr
 
   return {
     attach() {
+      // Before the early return, deliberately, and this is the only trace in this module
+      // that is not a state transition.
+      //
+      // Off iOS this gate binds nothing and `canWrite()` is a constant `true`, so it emits
+      // no transitions at all — which means "the gate stayed idle for the whole gesture" and
+      // "there is no gate on this platform" are the same observation from the trace alone.
+      // They could not be more different: off iOS *every* correction writes `scrollTop`
+      // unconditionally, and Chrome cancels a compositor fling on such a write just as
+      // WebKit does. So a reader diagnosing a stuttering fling on Android needs to know that
+      // none of the momentum machinery is even running, and this one event is the only thing
+      // that can tell them.
+      //
+      // Deliberately *not* accompanied by a clock. See {@link ScrollWriteGateOptions} for why
+      // this module has none: every transition out of a shut state is an event or a timer
+      // firing, and the analyzer can subtract `TraceEvent.at` stamps for free.
+      if (DEBUG) trace('gate.attach', () => ({ ios: isIOS, attached, disposed }))
       if (attached || disposed || !isIOS) return
       attached = true
 
