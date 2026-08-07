@@ -374,25 +374,127 @@ been measured. That is what makes filtering on `measured` safe rather than lossy
 
 ## Debugging
 
-The library can narrate its own decisions — scroll convergence frame by frame, anchor
-restores, measurement batches, visibility deadlines:
+The library can narrate its own decisions — every scroll event as it arrives, every attempt to
+move the scroll offset and why it did or did not happen, anchor restores, measurement batches
+with what they cost, visibility deadlines:
 
 ```ts
-import { setTraceSink } from 'virtual-anchor/react'
+import { addTraceListener } from 'virtual-anchor/react'
 
-setTraceSink(({ topic, data }) => { console.log(topic, data) })
+const stop = addTraceListener(({ topic, data }) => { console.log(topic, data) })
 ```
 
-Off unless you install a sink, and inert in a production build: payloads are built
-inside a thunk so nothing is computed with no sink attached, and `setTraceSink` refuses
-to install one at all once `NODE_ENV` is inlined (it returns `false`, so you can tell).
-It costs a few hundred bytes of unreachable strings rather than nothing — minifiers do
-not propagate the constant across modules, which is measured, not assumed. The demo
-keeps the last 3,000 events in a ring buffer behind `?trace=1`, readable as
-`__trace('scroll.')`.
+`addTraceListener` returns an unsubscribe and composes: your listener and the debug overlay
+below can both be attached at once. `setTraceSink` is still there and still replaces whatever
+*it* installed last, which is what it always did — it simply no longer evicts listeners it did
+not install. (That was not hypothetical. The demo installed a ring buffer and then replaced it
+with a HUD that had to re-implement the buffer by hand, because installing the second silently
+discarded the first.)
 
-Every bug found in this library so far was found by measuring rather than by
-reasoning about the code. This is that, made repeatable.
+**Off by default, and genuinely absent rather than merely inert.** Nothing is computed with no
+listener attached — payloads are built inside a thunk — and every call site sits behind a
+build-time constant, so the default build contains no guards, no topic strings and no `trace`
+function at all. `pnpm check:package` greps the published artifact for topic strings and fails
+the build if any survive, because this package previously claimed the instrumentation was inert
+while about 2 kB of it shipped. The claim was wrong for an interesting reason: esbuild's bundler
+prints every top-level `const` as `var`, so what reached a consumer's minifier was not a
+constant and could not be folded. The fold now happens in this package's own build, which is the
+last place the `const` still exists.
+
+### Turning it on
+
+In development it is on already: with nothing configured the flag falls back to
+`process.env.NODE_ENV !== 'production'`, exactly as before.
+
+To keep it in a **production** build — which is what diagnosing a real device needs, because
+dev-mode React and `StrictMode`'s double invoke are themselves a source of jank — resolve the
+`development` export condition:
+
+```ts
+// vite.config.ts. This replaces Vite's default list, so respell the other two.
+export default defineConfig({
+  resolve: { conditions: ['module', 'browser', 'development'] },
+})
+```
+
+```js
+// webpack 5 / Next.js — a user value replaces rather than appends, so prepend.
+config.resolve.conditionNames = ['development', ...config.resolve.conditionNames]
+```
+
+Your app stays a production build: React 19 ships no `development` condition, so nothing about
+this flips React itself. Turbopack exposes no condition control; there, build this package from
+source and define `__VIRTUAL_ANCHOR_DEBUG__` instead.
+
+### The toolkit
+
+Reading a few hundred raw events on a phone is not diagnosis. `virtual-anchor/debug` turns the
+stream into a ranked answer:
+
+```ts
+import { installDebug } from 'virtual-anchor/debug'
+
+installDebug({ target: '.my-scroller' })
+```
+
+That records into a ring buffer, watches frame timing, watches touches, prints a verdict to the
+console when each gesture settles, and draws the same verdict on the page for a device with
+nothing attached to it. `analyzeGestures(events)` is a pure function if you would rather have
+the numbers — it runs in a test, in a worker, or over a trace someone emailed you.
+
+The entry ships **only if you import it**, so the core entry's size is unchanged and CI enforces
+that with a budget on each. The verdict names what it found and what it could not distinguish;
+it says `RECORD TRUNCATED` and refuses to rank rather than drawing a conclusion from a buffer
+that dropped the start of the gesture.
+
+### Topics
+
+| topic | when | key fields | volume |
+|---|---|---|---|
+| `scroll.sample` | every scroll event, stamped at delivery | `offset`, `carry`, `shift` | per frame |
+| `anchor.derive` | the anchor re-read from an observed offset | `anchor`, `skipped` | per frame |
+| `scroll.step` | one frame of a programmatic scroll | `target`, `remaining`, `arrived` | per frame |
+| `scroll.write` | the engine attempting to move the offset | `reason`, `took`, `room`, `max`, `heldAfter` | per correction |
+| `paint.offset` | the container's visual displacement changed | `px`, `carry`, `shift` | per correction |
+| `scroll.commit` | the *scroller* writing, refused or taken | `refused`, `banked` | per frame while scrolling |
+| `gesture.fold` | a banked correction becoming a real offset | `shift`, `clamped`, `carryBefore/After` | once per gesture |
+| `scroll.gate` | the momentum gate changing state | `state`, `reason` | a few per gesture |
+| `gate.attach` | once, at mount, before the off-iOS return | `ios` | once ever |
+| `scroll.park` / `wake` / `flush` | the convergence loop sleeping and resuming | `banked`, `suspended` | once per gesture |
+| `measure.batch` / `measure.done` | a ResizeObserver delivery, and what it cost | `count`, `invalidated`, `ms` | per batch |
+| `layout.signature` | the fingerprint that invalidates measurements | `signature`, `previous`, `cleared` | rare |
+| `frame.long` / `frame.summary` | from the toolkit's probe, not the core | `gap`, `longest` | outliers only |
+
+`scroll.write`'s `reason` is the field worth knowing: `held` means the correction was banked and
+nothing was written, `gate-open` an ordinary write, `model` a prepend deliberately overriding a
+shut gate, and `no-room` a correction that had to be written because banking it would have
+exceeded the scroll range on that side. On iOS that last one cancels the fling.
+
+Three topics account for every `scrollTop` write the library makes: `scroll.write` from the engine,
+`scroll.commit` from the scroller, and `gesture.fold` — the fold is a write too, and deliberately
+not a `scroll.write`, because it converts a correction already taken rather than making a new one.
+
+Payload shapes are declared in one place and `trace` is generic over the topic, so an emitter cannot
+drift from what a reader expects — which matters because the analyzer reads by field name from
+several modules away, where a rename would otherwise compile clean and report nothing.
+
+### Diagnosing a fling on a phone
+
+1. `pnpm --filter demo build:trace && pnpm --filter demo preview` — a production build with the
+   instrumentation kept.
+2. Open `?debug=1&quiet=1` on the device and fling the list, including *into* the end of it.
+3. Read the verdict pane, or the console if the Web Inspector is attached.
+4. Tap **save** to get the JSON off the device. Note that `navigator.clipboard` and
+   `navigator.share` need a secure context, and a LAN dev server over plain http is not one — so
+   the download and the on-screen textarea are the two mechanisms that actually work there.
+5. Re-run **without** `quiet=1` and compare the longest frame. The difference is your app's own
+   per-frame work; the residue is the library. That differential is the only honest way to tell
+   them apart, which is why the analyzer will not guess at it from a single recording.
+6. Re-run with `probe=0` to confirm any timing finding without the frame probe, which costs one
+   main-thread wakeup per frame and so perturbs what it measures.
+
+Every bug found in this library so far was found by measuring rather than by reasoning about the
+code. This is that, made repeatable.
 
 ## Coming from another library
 
@@ -429,8 +531,13 @@ React 19 for the `virtual-anchor/react` entry only — it is an *optional* peer,
 core entry pulls in no framework and warns about none.
 
 A bundler (or Node) that defines `process.env.NODE_ENV`, which is the same assumption React
-itself makes. Development warnings and tracing are keyed to it, and loading the build
-straight from a CDN into a browser without substituting it will fail at module evaluation.
+itself makes. The development warnings are keyed to it, and loading the build straight from a CDN
+into a browser without substituting it will fail at module evaluation.
+
+Tracing is no longer keyed to it. It has its own build-time flag, off in the published default
+build and reachable through the `development` export condition, so that a *production* app can
+carry an instrumented library — which is what diagnosing a real device requires. See
+[Debugging](#debugging).
 
 Client-only: there is no SSR path. A virtual list cannot render meaningfully on a server
 that has no viewport, and pretending otherwise produces markup the client immediately

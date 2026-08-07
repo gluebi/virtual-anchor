@@ -25,7 +25,16 @@ export default defineConfig({
     coverage: {
       provider: 'v8',
       include: ['packages/virtual-anchor/src/**'],
-      exclude: ['**/*.test.*', '**/index.ts', '**/types.ts', '**/*.d.ts'],
+      // `traceTopics.ts` joins `types.ts` here for the same reason: it is declarations only
+      // and emits no code, so a threshold on it would measure nothing and a missing
+      // threshold would look like an oversight.
+      exclude: [
+        '**/*.test.*',
+        '**/index.ts',
+        '**/types.ts',
+        '**/traceTopics.ts',
+        '**/*.d.ts',
+      ],
       thresholds: {
         // Floors, not aspirations: each is at or just under what the suite reaches today, so
         // coverage cannot quietly fall away again. Three files were enforced before this,
@@ -68,11 +77,22 @@ export default defineConfig({
         // Raised again with the momentum write gate (#26), which arrived with the first
         // engine-level iOS tests this suite has ever had — the absence of which is why
         // `publish` was able to write `scrollTop` past the guard for two releases.
-        'packages/virtual-anchor/src/engine.ts': { branches: 86, functions: 90, lines: 97 },
-        'packages/virtual-anchor/src/scroller.ts': { branches: 91, functions: 96, lines: 98 },
-        // The gate itself, whole but for the production-build trace call — the same
-        // exemption `trace.ts` carries, and by definition not this build.
-        'packages/virtual-anchor/src/momentum.ts': { branches: 96, functions: 100, lines: 100 },
+        // Raised with the instrumentation work, which arrived with engine-level tests for every
+        // value of `scroll.write`'s new `reason`, for the fold, and for the paint offset.
+        'packages/virtual-anchor/src/engine.ts': { branches: 86, functions: 93, lines: 98 },
+        // Functions to 100 with the scroller's own writes finally being traced: `scroll.commit`,
+        // `flush`, `park` and `wake` had no tests because they emitted nothing to test.
+        //
+        // Branches 91 → 90, and the difference is the four new `if (DEBUG)` guards. Their false
+        // arm is "this is a build without instrumentation", which by definition is not this build
+        // — the same exemption `trace.ts` has always carried, now for four more guards. Nothing
+        // became less tested; the denominator grew.
+        'packages/virtual-anchor/src/scroller.ts': { branches: 90, functions: 100, lines: 98 },
+        // The gate, whole but for two production-build trace calls: the transition narration and
+        // `gate.attach`. Both are covered when a listener is installed — `momentum.dom.test.ts`
+        // asserts on both, including the off-iOS case — so what is uncovered is only the arm where
+        // the guard is compiled out.
+        'packages/virtual-anchor/src/momentum.ts': { branches: 93, functions: 100, lines: 100 },
         // Both settle paths, including the debounce fallback that bounds a fling on any
         // Safari without `scrollend`. Whole, so held at whole.
         'packages/virtual-anchor/src/settle.ts': { branches: 100, functions: 100, lines: 100 },
@@ -85,7 +105,39 @@ export default defineConfig({
         'packages/virtual-anchor/src/resizer.ts': { branches: 92, functions: 100, lines: 100 },
         'packages/virtual-anchor/src/gate.ts': { branches: 78, functions: 100, lines: 100 },
         // The uncovered branch is the production build, which by definition is not this build.
-        'packages/virtual-anchor/src/trace.ts': { branches: 80, functions: 100, lines: 100 },
+        //
+        // Functions 100 → 83 for the same reason rather than a new one: `addTraceListener` returns
+        // a no-op unsubscribe when there is no instrumentation, and a function that exists only to
+        // be harmless in a build this suite is not cannot be called from a build this suite is.
+        // Counting it as a gap would mean deleting the guard to satisfy the number.
+        'packages/virtual-anchor/src/trace.ts': { branches: 80, functions: 83, lines: 100 },
+        // One expression, one branch, and the branch is which build this is. The `define`d arm is
+        // what `scripts/check-package.mjs` proves by grepping the shipped artifact for topic
+        // strings; no unit test can reach it, and a threshold pretending otherwise would be a
+        // fiction. See `debugFlag.ts` for the measurements.
+        'packages/virtual-anchor/src/debugFlag.ts': { branches: 50, functions: 100, lines: 100 },
+
+        // The debug toolkit. Pure by design where it can be, which is where the floors are highest:
+        // the analyzer, the recorder and the formatter are functions of their arguments, so there is
+        // no excuse for a gap in them beyond the ranking branches no fixture reaches yet.
+        'packages/virtual-anchor/src/debug/analyzer.ts': { branches: 86, functions: 100, lines: 97 },
+        'packages/virtual-anchor/src/debug/recorder.ts': { branches: 93, functions: 100, lines: 100 },
+        'packages/virtual-anchor/src/debug/format.ts': { branches: 78, functions: 100, lines: 95 },
+        'packages/virtual-anchor/src/debug/install.ts': { branches: 88, functions: 100, lines: 97 },
+        'packages/virtual-anchor/src/debug/gestureProbe.ts': { branches: 86, functions: 100, lines: 100 },
+        // Functions to 100 on both after the cleanup removed the two `frames()` accessors nothing
+        // called. The branch ratios went *down* by a point or two in the same change, and for the
+        // reason this table already records elsewhere: removing covered branches lowers the ratio
+        // without anything becoming less tested. What is left is the `typeof performance` and
+        // window-less fallbacks, which are the non-browser case.
+        'packages/virtual-anchor/src/debug/driver.ts': { branches: 90, functions: 100, lines: 100 },
+        'packages/virtual-anchor/src/debug/frameProbe.ts': { branches: 80, functions: 100, lines: 100 },
+        // The lowest floor here, and the uncovered parts are named rather than rounded away: the
+        // `save` button's `Blob` download and its deferred `revokeObjectURL`, which jsdom does not
+        // implement. There is deliberately no feature detection to test — `navigator.clipboard` and
+        // `navigator.share` are secure-context-gated and so unavailable on the LAN dev server this
+        // exists for, which is why only the download and the textarea are offered at all.
+        'packages/virtual-anchor/src/debug/overlay.ts': { branches: 86, functions: 78, lines: 88 },
 
         // The whole React adapter, with nothing left over.
         'packages/virtual-anchor/src/react/useItemVisibility.ts': { branches: 100, functions: 100, lines: 100 },

@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { pretendIPhone, touch, unpretendIPhone } from './iosPlatform.test.helpers.js'
 import { createScrollWriteGate, type ScrollWriteGate } from './momentum.js'
+import { collectTrace } from './trace.test.helpers.js'
+import type { TraceEvent } from './trace.js'
 import type { Viewport } from './viewport.js'
 
 /**
@@ -197,6 +199,64 @@ describe('the scroll write gate', () => {
     expect(h.opens()).toBe(1)
   })
 
+  it('does not cap a fling that is still scrolling', () => {
+    // Issue #53, and the reason the timer is a watchdog rather than a ceiling. Measured on an
+    // iPhone: flings through this demo's twelve thousand rows run three to eight and a half
+    // seconds, and *every* one that passed three seconds used to be cut off here — the gate
+    // reopening mid-fling, the next measurement writing `scrollTop`, and WebKit cancelling the
+    // momentum. Which is the exact symptom the gate exists to prevent.
+    const h = harness()
+    touch(h.element, 'touchstart')
+    touch(h.element, 'touchend')
+    h.advance(50)
+    h.scroll()
+
+    // Eight seconds of fling, delivering an event every 16ms as a real one does.
+    for (let frame = 0; frame < 500; frame++) {
+      h.advance(16)
+      h.scroll()
+    }
+
+    expect(h.gate.canWrite()).toBe(false)
+    expect(h.opens()).toBe(0)
+  })
+
+  it('still reopens once a fling that never settles goes quiet', () => {
+    // The other half: the watchdog has to keep doing the job the ceiling was there for. A gate
+    // that stayed shut because no settle ever arrived would refuse every correction forever.
+    const h = harness()
+    touch(h.element, 'touchstart')
+    touch(h.element, 'touchend')
+    h.advance(50)
+    h.scroll()
+    h.advance(1000)
+    h.scroll()
+
+    // Silence from here. The window runs from the *last* event, not from onset.
+    h.advance(2999)
+    expect(h.gate.canWrite()).toBe(false)
+
+    h.advance(1)
+    expect(h.gate.canWrite()).toBe(true)
+    expect(h.opens()).toBe(1)
+  })
+
+  it('tolerates a stall mid-fling without concluding the fling is over', () => {
+    // Measured worst gaps: 205ms on a device, 202ms on the simulator, both while the fling was
+    // still visibly running. The window has to clear that comfortably, or the watchdog re-creates
+    // the bug it fixes.
+    const h = harness()
+    touch(h.element, 'touchstart')
+    touch(h.element, 'touchend')
+    h.advance(50)
+    h.scroll()
+
+    h.advance(250)
+    h.scroll()
+
+    expect(h.gate.canWrite()).toBe(false)
+  })
+
   it('does not promote a scroll arriving after the grace period to momentum', () => {
     // By then the gate is already open and the event is either the reader starting
     // afresh or the echo of a write. Treating it as momentum onset would shut the
@@ -341,5 +401,82 @@ describe('the scroll write gate', () => {
     // refusing those writes stalled an ordinary scroll outright.
     expect(harness().gate.isActive()).toBe(true)
     expect(harness({ isIOS: false }).gate.isActive()).toBe(false)
+  })
+})
+
+describe('what it reports about itself', () => {
+  const stopped: (() => void)[] = []
+  const traced = (): TraceEvent[] => {
+    const { events, stop } = collectTrace()
+    stopped.push(stop)
+    return events
+  }
+
+  afterEach(() => {
+    for (const stop of stopped) stop()
+    stopped.length = 0
+  })
+
+  it('says it attached, and on which platform', () => {
+    const events = traced()
+    harness().gate.attach()
+
+    expect(events.find((event) => event.topic === 'gate.attach')?.data).toMatchObject({
+      ios: true,
+    })
+  })
+
+  it('says so even where it binds nothing at all', () => {
+    // Emitted *before* the off-iOS early return, and that ordering is the whole point: off iOS
+    // this gate makes no transitions, so "the gate stayed idle for the gesture" and "there is no
+    // gate on this platform" are otherwise the same observation. They could not be more
+    // different — off iOS every correction writes `scrollTop` unconditionally, and Chrome cancels
+    // a compositor fling on such a write too. This one event is what tells a reader on Android
+    // that none of the momentum machinery is running.
+    const events = traced()
+    harness({ isIOS: false }).gate.attach()
+
+    expect(events.find((event) => event.topic === 'gate.attach')?.data).toMatchObject({
+      ios: false,
+    })
+  })
+
+  it('narrates every transition with the reason for it', () => {
+    const events = traced()
+    const h = harness()
+    h.gate.attach()
+
+    touch(h.element, 'touchstart')
+    touch(h.element, 'touchend')
+    h.scroll()
+    h.settle()
+
+    expect(
+      events
+        .filter((event) => event.topic === 'scroll.gate')
+        .map((event) => `${String(event.data.state)}:${String(event.data.reason)}`),
+    ).toEqual([
+      'touching:touchstart',
+      'grace:touchend',
+      'momentum:momentum-onset',
+      'idle:settled',
+    ])
+  })
+
+  it('still keeps no clock of its own', () => {
+    // The gate's own doc says "there is deliberately no `now`": every transition out of a shut
+    // state is an event or a timer firing. Adding one for tracing alone would break that to buy
+    // arithmetic the analyzer does for free from `TraceEvent.at`.
+    const clock = vi.spyOn(performance, 'now')
+    const h = harness()
+    h.gate.attach()
+    const before = clock.mock.calls.length
+
+    touch(h.element, 'touchstart')
+    touch(h.element, 'touchend')
+    h.scroll()
+
+    // Whatever `trace` itself stamps is not this module's doing; nothing else may read a clock.
+    expect(clock.mock.calls.length).toBe(before)
   })
 })

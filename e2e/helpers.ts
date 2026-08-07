@@ -4,7 +4,9 @@ import type {
   ItemKey,
   ScrollResult,
   SizeSnapshot,
+  TraceEvent,
 } from '../packages/virtual-anchor/src/index.js'
+import type { GestureVerdict } from '../packages/virtual-anchor/src/debug/index.js'
 
 /**
  * The harness every accuracy spec shares.
@@ -68,6 +70,20 @@ declare global {
      * needs a local cast, and so the write and the read cannot disagree about the type.
      */
     __scrollWrites?: number
+    /**
+     * The demo's trace ring, present under `?trace=1` or `?debug=1`.
+     *
+     * Filtered by topic *prefix*, so `__trace('scroll.')` is every scroll topic. The library's own
+     * types are used rather than hand-written copies for the same reason `DemoHandle` uses them:
+     * `import type` is erased before the page ever sees this file, so a payload field that moves
+     * breaks the spec at compile time instead of silently matching nothing.
+     */
+    __trace: (topic?: string) => TraceEvent[]
+    __traceClear: () => void
+    /** The most recent gesture's diagnosis, present under `?debug=1`. */
+    __verdict: () => GestureVerdict | null
+    __gestures: () => GestureVerdict[]
+    __traceJSON: () => string
   }
 }
 

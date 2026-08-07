@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { pretendIPhone, touch, unpretendIPhone } from './iosPlatform.test.helpers.js'
 import { createEngine, layoutSignatureFor, type Engine } from './engine.js'
+import { collectTrace } from './trace.test.helpers.js'
 import { setTraceSink, type TraceEvent } from './trace.js'
 import type { Surface } from './surface.js'
 import type { ItemKey, SlotName } from './types.js'
@@ -23,7 +24,22 @@ import type { Viewport } from './viewport.js'
 const KEYS = (count: number, prefix = 'c'): ItemKey[] =>
   Array.from({ length: count }, (_, i) => `${prefix}${String(i)}`)
 
-
+/**
+ * Collect trace events for one test.
+ *
+ * At module scope because two adjacent `describe`s each had a byte-identical copy of it, along with
+ * a byte-identical `afterEach`. The shared helper is in `trace.test.helpers.ts`.
+ */
+const collected: (() => void)[] = []
+const traced = (): TraceEvent[] => {
+  const { events, stop } = collectTrace()
+  collected.push(stop)
+  return events
+}
+afterEach(() => {
+  for (const stop of collected) stop()
+  collected.length = 0
+})
 
 /** A fake ResizeObserver whose deliveries the test drives. */
 class FakeResizeObserver implements ResizeObserver {
@@ -100,7 +116,23 @@ interface Harness {
   heldAtWrites: () => number[]
   /** The scroller's own maximum, for assertions about the end of the list. */
   maxOffset: () => number
+  /**
+   * How many times the engine has read the scroll offset.
+   *
+   * Exists for one assertion: that building a trace payload costs no layout reads. The
+   * `scroll.write` thunk used to take three, after `publish` had written styles, on the hottest
+   * path in the library — so tracing a gesture made the gesture worse.
+   */
+  offsetReads: () => number
   offset: () => number
+  /**
+   * Move the offset the way momentum does *between* scroll events: silently.
+   *
+   * The platform advances the scroller continuously and reports it at ~60Hz, so at any instant the
+   * last delivered offset is behind the real one. Nothing else in this harness can express that,
+   * and it is the entire condition of issue #54.
+   */
+  advanceOffset: (by: number) => void
   scroll: (value: number) => void
   scrollSettled: () => void
   resize: (size: number) => void
@@ -130,6 +162,7 @@ const setup = (
   document.body.appendChild(scroller)
 
   const state = { offset: 0, viewportSize: 800, contentWidth: 600, contentSize: 0, leadingSpace: 0 }
+  let offsetReads = 0
   const writes: string[] = []
   const elements = new Map<ItemKey, HTMLElement>()
   const scrollListeners: (() => void)[] = []
@@ -164,7 +197,10 @@ const setup = (
   }
 
   const viewport: Viewport = {
-    getScrollOffset: () => state.offset,
+    getScrollOffset: () => {
+      offsetReads++
+      return state.offset
+    },
     getViewportSize: () => state.viewportSize,
     getMaxScrollOffset: () =>
       trackContent
@@ -228,7 +264,11 @@ const setup = (
       return atWrites
     },
     maxOffset: () => viewport.getMaxScrollOffset(),
+    offsetReads: () => offsetReads,
     offset: () => state.offset,
+    advanceOffset: (by) => {
+      state.offset += by
+    },
     scroll: (value) => {
       state.offset = value
       for (const listener of [...scrollListeners]) listener()
@@ -255,7 +295,6 @@ const setup = (
     },
   }
 }
-
 
 /**
  * Put the list into live momentum: finger down, finger up, one frame of fling.
@@ -343,6 +382,92 @@ describe('the engine on iOS WebKit', () => {
     // Exactly one write, not one per skipped correction: they all resolve to the
     // same anchor, so replaying them individually would write the same offset over.
     expect(h.scrollWrites().slice(before)).toHaveLength(1)
+  })
+
+  it('does not write for an append that displaced nothing, mid-fling', () => {
+    // Issue #54, found on a device by `virtual-anchor/debug`.
+    //
+    // The anchor is re-derived on each scroll event, so `resolveAnchorOffset` answers "where the
+    // content was when the last one arrived" while `writeScroll` compares it against where the
+    // content is *now*. During momentum those differ by the fling's travel — and a `'model'`
+    // restore overrides the gate, so that difference gets written as though it were a correction.
+    // Measured on an iPhone: a 500-item append below the reader wrote `delta: -7`, nudging them
+    // backwards to a stale offset and cancelling a fling with a second still to run.
+    //
+    // The append is the case that must write *nothing*: it changed no offset above the anchor.
+    const h = setup()
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+
+    // Momentum carries on between scroll events. This is the whole condition.
+    h.advanceOffset(7)
+    const before = h.scrollWrites().length
+
+    h.engine.setOptions({ keys: [...KEYS(200), ...KEYS(500, 'newer')] })
+
+    expect(h.scrollWrites().slice(before)).toEqual([])
+  })
+
+  it('is unaffected by a correction already banked as a paint offset', () => {
+    // Edge case flagged with #54's report: with `pendingShift ≠ 0`, `contentOffset()` includes the
+    // paint offset while the anchor's offsets come from the cache. They are the same space —
+    // `anchor` was derived from `contentOffset()` in the first place — so the shift cancels out of
+    // the subtraction rather than being double-counted. Asserted rather than argued.
+    const h = setup()
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+
+    // Bank a correction: the gate is shut, so this is held rather than written.
+    h.measure('c10', 700)
+    expect(h.paintOffset()).not.toBe(0)
+
+    h.advanceOffset(7)
+    const before = h.scrollWrites().length
+
+    h.engine.setOptions({ keys: [...KEYS(200), ...KEYS(500, 'newer')] })
+
+    expect(h.scrollWrites().slice(before)).toEqual([])
+  })
+
+  it('holds position when the model change takes the anchored key away', () => {
+    // The other end of the same guard. `resolveAnchorOffset` returns null for a key that has left
+    // the collection, and holding beats jumping — so nothing is written, with or without lag.
+    const h = setup()
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    h.advanceOffset(7)
+    const before = h.scrollWrites().length
+
+    h.engine.setOptions({ keys: KEYS(200, 'replaced') })
+
+    expect(h.scrollWrites().slice(before)).toEqual([])
+  })
+
+  it('writes a prepend’s real height, uncontaminated by the fling’s lag', () => {
+    // The mirror of the test above, and the one that shows #54's fix writes the *right* number
+    // rather than merely a smaller one. The same prepend is run twice — once with the platform's
+    // offset where the last scroll event left it, once with it advanced 7px as momentum would —
+    // and the correction has to be identical. Before the fix the second was 7px short, because
+    // the travel was being subtracted from the inserted height.
+    const deltaFor = (lag: number): number => {
+      const events = traced()
+      const h = setup()
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      h.advanceOffset(lag)
+
+      h.engine.setOptions({ keys: [...KEYS(10, 'older'), ...KEYS(200)] })
+
+      const write = events.find(
+        (event) => event.topic === 'scroll.write' && event.data.reason === 'model',
+      )
+      expect(write).toBeDefined()
+      return Number(write?.data.delta)
+    }
+
+    const still = deltaFor(0)
+    expect(still).toBeGreaterThan(0)
+    expect(deltaFor(7)).toBe(still)
   })
 
   it('writes for a prepend even mid-fling', () => {
@@ -984,9 +1109,204 @@ describe('the engine’s measured slots on iOS WebKit', () => {
   })
 })
 
+/**
+ * What the engine says about its own scroll writes.
+ *
+ * The payload used to report `deferred`, which was computed *before* the test that decides what
+ * actually happens — so a write that escaped because the bank's bound fired was recorded as a
+ * successful deferral, and the demo's on-device readout printed it as `DEFER`. These assertions
+ * pin the four-value taxonomy that replaced it, and `took` in particular, because that is the
+ * field an on-device tool has to key on.
+ */
+describe('what the engine reports about a scroll write', () => {
+
+  const writes = (events: TraceEvent[]): TraceEvent[] =>
+    events.filter((event) => event.topic === 'scroll.write')
+
+  it('says a write went through on an open gate', () => {
+    const h = setup()
+    h.mountItem('c10', 100)
+    h.scroll(2000)
+    const events = traced()
+
+    h.measure('c10', 700)
+
+    const write = writes(events).at(-1)
+    expect(write?.data).toMatchObject({ reason: 'gate-open', took: true, deferred: false })
+  })
+
+  it('says a correction was banked rather than written, mid-gesture', () => {
+    const h = setup()
+    h.mountItem('c10', 100)
+    const events = traced()
+    fling(h, 5000)
+
+    h.measure('c10', 700)
+
+    const write = writes(events).at(-1)
+    // `took: false` is the whole point: the gate worked, nothing was written, and the correction
+    // is being carried as a paint offset instead.
+    expect(write?.data).toMatchObject({ reason: 'held', took: false, deferred: true })
+    expect(Number(write?.data.heldAfter)).not.toBe(0)
+  })
+
+  it('names the write that escapes because there was no room to bank it', () => {
+    // The leading suspect for a fling that stops abruptly, and the one the old payload could not
+    // express: `room` is the distance to the *nearer* end of the scroll range, so near either end
+    // it collapses, the correction is written instead of banked, and on iOS that cancels the
+    // fling — while the trace said `deferred: true` and the demo printed `DEFER`.
+    //
+    // Provoked at the bottom rather than the top, because at the top there is nothing above the
+    // anchor to grow: a correction needs content above the viewport, and `room` there is the
+    // distance already scrolled. The end of the list is where both are true at once, which is
+    // also where a reader flings to.
+    const h = setup({ trackContent: true })
+    h.mountItem('c10', 100)
+    const events = traced()
+
+    h.scroll(h.maxOffset())
+    touch(h.scroller, 'touchstart')
+    touch(h.scroller, 'touchend')
+    vi.advanceTimersByTime(50)
+    h.scroll(h.maxOffset())
+
+    h.measure('c10', 900)
+
+    const escaped = writes(events).find((event) => event.data.reason === 'no-room')
+    expect(escaped?.data).toMatchObject({ took: true, deferred: true })
+    // And it carries what a reader needs to tell this from a rubber-band overscroll: `from`
+    // against `max`.
+    expect(escaped?.data).toHaveProperty('max')
+  })
+
+  it('names a model change overriding a shut gate', () => {
+    // Deliberate, and legitimate — deferring a prepend moves the reader by the whole inserted
+    // height — but it does cancel momentum, so it has to be distinguishable from an ordinary
+    // write on an idle platform. Keyed on the gate rather than on `deferred`, which is already
+    // false for a model change and so reported these as `gate-open`.
+    const h = setup()
+    h.mountItem('c10', 100)
+    const events = traced()
+    fling(h, 5000)
+
+    h.engine.setOptions({ keys: [...KEYS(10, 'older'), ...KEYS(200)] })
+
+    const write = writes(events).find((event) => event.data.reason === 'model')
+    expect(write?.data).toMatchObject({ took: true, restore: 'model' })
+  })
+
+  it('performs no layout reads while building the payload', () => {
+    // The instrument must not perturb the experiment. This thunk used to call `contentOffset()`
+    // and `getScrollOffset()` twice more inside `room` — three forced layouts per traced write,
+    // after `publish` had written styles, on the hottest path in the library. On a gesture
+    // measured at 43 deferrals that is 129 layouts that existed only because someone was watching.
+    // Two identical runs on two fresh harnesses, because the same harness measured twice is not
+    // the same operation twice — a second size change takes a different path through the cache.
+    const run = (withSink: boolean): { reads: number, traced: number } => {
+      const events: TraceEvent[] = []
+      if (withSink) setTraceSink((event) => events.push(event))
+      try {
+        const h = setup()
+        h.mountItem('c10', 100)
+        fling(h, 5000)
+        const before = h.offsetReads()
+        h.measure('c10', 700)
+        return { reads: h.offsetReads() - before, traced: events.length }
+      } finally {
+        setTraceSink(null)
+      }
+    }
+
+    const observed = run(true)
+    const unobserved = run(false)
+
+    expect(observed.traced).toBeGreaterThan(0)
+    expect(unobserved.traced).toBe(0)
+    expect(observed.reads).toBe(unobserved.reads)
+  })
+})
+
+describe('what the engine reports about the fold and the paint offset', () => {
+
+  it('reports the fold when the gate reopens, and whether it landed exactly', () => {
+    // `reconcileGestureShift` emitted nothing at all before this, which made the most plausible
+    // cause of a visible jump the one thing the trace could not see.
+    const h = setup()
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    h.measure('c10', 700)
+
+    const events = traced()
+    h.scrollSettled()
+
+    const fold = events.find((event) => event.topic === 'gesture.fold')
+    expect(fold?.data).toMatchObject({ clamped: false })
+    expect(Number(fold?.data.shift)).not.toBe(0)
+    // The one-number test for "was the fold invisible".
+    const data = fold?.data as Record<string, number | undefined>
+    const before = Number(data.from) + Number(data.shift) + Number(data.carryBefore)
+    const after = Number(data.applied) + Number(data.carryAfter)
+    expect(Math.abs(before - after)).toBeLessThan(1.5)
+  })
+
+  it('reports which of the two addends moved the paint offset', () => {
+    // The surface is handed only the sum, and a sub-pixel carry landing means something quite
+    // different from a whole correction being banked — so the diagnosis needs them apart.
+    const h = setup()
+    h.mountItem('c10', 100)
+    const events = traced()
+    fling(h, 5000)
+
+    h.measure('c10', 700)
+
+    const paint = events.find((event) => event.topic === 'paint.offset')
+    expect(paint?.data).toHaveProperty('carry')
+    expect(paint?.data).toHaveProperty('shift')
+    expect(Number(paint?.data.px)).toBe(
+      Number(paint?.data.carry) + Number(paint?.data.shift),
+    )
+  })
+})
+
 describe('the engine off iOS', () => {
   beforeEach(() => {
     unpretendIPhone()
+  })
+
+  it('says there is no gate on this platform', () => {
+    // The only way to tell "the gate stayed idle" from "there is no gate", and off iOS every
+    // correction writes unconditionally — so for a reader diagnosing Android this one event is
+    // the whole finding.
+    const events: TraceEvent[] = []
+    setTraceSink((event) => events.push(event))
+    try {
+      setup()
+      expect(events.find((event) => event.topic === 'gate.attach')?.data).toMatchObject({
+        ios: false,
+      })
+    } finally {
+      setTraceSink(null)
+    }
+  })
+
+  it('writes a prepend in full, as it always has', () => {
+    // #54's safety property, on the platform where the gate is inert: with the content still, the
+    // anchor is in sync, so `contentOffset() === priorAnchorOffset` and the target is bit-identical
+    // to the old form. The whole change is supposed to be invisible here.
+    const events = traced()
+    const h = setup()
+    h.mountItem('c30', 100)
+    h.scroll(2000)
+
+    h.engine.setOptions({ keys: [...KEYS(10, 'older'), ...KEYS(200)] })
+
+    // Keyed on `restore`, not `reason`: with the gate open this is a `gate-open` write that
+    // happens to have a model cause, which is exactly the distinction the two fields carry.
+    const write = events.find(
+      (event) => event.topic === 'scroll.write' && event.data.restore === 'model',
+    )
+    expect(write?.data.reason).toBe('gate-open')
+    expect(Number(write?.data.delta)).toBe(1000)
   })
 
   it('writes a measurement correction during a touch scroll, as it always has', () => {

@@ -79,15 +79,46 @@ export interface DemoConfig {
    * the demo being a demo — but it is indistinguishable, by feel, from the *library*
    * stuttering, and until momentum survived at all on iOS there was never a fling long
    * enough to notice it. Turning it off is how you tell the two apart.
+   *
+   * With {@link debug} it stops being a matter of feel: run the same gesture twice, once with
+   * `quiet=1` and once without, and compare the longest frame the toolkit reports. The difference
+   * is this demo; the residue is the library. That differential is the only honest way to answer
+   * the question, which is why the analyzer declines to guess at it from a single recording.
    */
   quiet: boolean
   /**
-   * Overlay the last few scroll corrections on the page.
+   * Load `virtual-anchor/debug` and diagnose every gesture.
    *
-   * So a phone can be diagnosed without being tethered to a Mac for the Web Inspector.
-   * Implies {@link trace}, since it reads the same sink.
+   * So a phone can be diagnosed without being tethered to a Mac for the Web Inspector: the
+   * toolkit segments the trace into gestures, ranks the reasons a fling could have jumped or
+   * stopped, prints the conclusion to the console and — under {@link overlay} — puts it on the
+   * page with a way to export the JSON.
+   *
+   * Implies {@link trace}, since it reads the same stream. Replaces the old hand-rolled `hud`,
+   * which is kept as an alias.
    */
-  hud: boolean
+  debug: boolean
+  /** Mount the on-page readout. Default on with {@link debug}; turn it off for a headless recording. */
+  overlay: boolean
+  /**
+   * Run the frame probe. Default on with {@link debug}.
+   *
+   * It is what separates "the fling was cancelled" from "the main thread was blocked", and it
+   * costs one wakeup per frame — so it perturbs the timing it reports. `probe=0` is how you
+   * confirm a timing finding without it.
+   */
+  probe: boolean
+  /** Which overlay panes to show. `verdict` is the useful one; `live` is for watching counters move. */
+  mode: 'live' | 'verdict' | 'both'
+  /** Trace ring capacity. Larger reaches further back; the toolkit says when it has dropped events. */
+  record: number
+  /**
+   * Keep only these topic prefixes, comma-separated.
+   *
+   * `topics=scroll.,gesture.,frame.` roughly triples how far back a given capacity reaches, by
+   * dropping the per-frame anchor and visibility topics.
+   */
+  topics: readonly string[] | undefined
 }
 
 export const SNAPSHOT_KEY = 'virtual-anchor-demo-sizes'
@@ -103,6 +134,19 @@ const number = (name: string, fallback: number): number => {
   return Number.isFinite(parsed) ? parsed : fallback
 }
 
+/**
+ * `?debug=1`, or its old spelling.
+ *
+ * Named here rather than repeated on both the `trace` and `debug` lines, so "debug implies trace"
+ * is expressed once and a third spelling would mean editing one place.
+ *
+ * `hud=1` is kept because it is in muscle memory and in bookmarks. Worth being clear that it is an
+ * alias for the *param*, not for the old behaviour: it used to draw ten lines of scroll
+ * corrections, and it now installs the whole toolkit. The bookmark neither breaks nor does what it
+ * did.
+ */
+const debug = params.get('debug') === '1' || params.get('hud') === '1'
+
 export const CONFIG: DemoConfig = {
   target: Math.min(Math.max(number('comment', 0), 0), THREAD_SIZE - 1),
   paddingStart: number('paddingStart', DEFAULT_HEADER_HEIGHT),
@@ -117,10 +161,15 @@ export const CONFIG: DemoConfig = {
   stableGutter: params.get('stableGutter') !== '0',
   once: params.get('once') === '1',
   rule: params.get('rule') === 'edge' ? 'edge' : 'fraction',
-  trace: params.get('trace') === '1' || params.get('hud') === '1',
+  trace: params.get('trace') === '1' || debug,
   snapshot: params.get('snapshot') === '1',
   quiet: params.get('quiet') === '1',
-  hud: params.get('hud') === '1',
+  debug,
+  overlay: params.get('overlay') !== '0',
+  probe: params.get('probe') !== '0',
+  mode: params.get('mode') === 'live' ? 'live' : params.get('mode') === 'verdict' ? 'verdict' : 'both',
+  record: Math.max(100, number('record', 5000)),
+  topics: params.get('topics')?.split(',').filter(Boolean),
 }
 
 /**

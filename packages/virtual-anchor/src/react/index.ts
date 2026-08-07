@@ -43,4 +43,4 @@ export type { VirtualListHandle, VirtualListProps } from './VirtualList.js'
  * Tracing, re-exported so an app that only depends on the React package can turn it on.
  * Inert in a production build — see the core's `trace` module.
  */
-export { isTracing, setTraceSink, TRACING } from '../index.js'
+export { addTraceListener, isTracing, setTraceSink, TRACING } from '../index.js'

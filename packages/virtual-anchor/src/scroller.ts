@@ -8,7 +8,9 @@ import { visibleSizeOf, type ListInsets } from './listGeometry.js'
 import { prefersReducedMotion } from './env.js'
 import { createScrollWriteGate, type ScrollWriteGate } from './momentum.js'
 import { onScrollSettled } from './settle.js'
-import { isTracing, TRACING, trace } from './trace.js'
+import { DEBUG } from './debugFlag.js'
+import { isTracing, trace } from './trace.js'
+import type { StepPayload } from './traceTopics.js'
 import type { SizeCache } from './sizeCache.js'
 import type {
   ItemKey,
@@ -155,29 +157,6 @@ export interface Scroller {
 }
 
 /**
- * One frame's worth of convergence decision, as the trace reports it.
- *
- * Extends the sink's payload type so the named fields survive while still satisfying it —
- * an interface without that is not assignable to `Record<string, unknown>`, and a bare
- * type alias trips `consistent-type-definitions`.
- */
-interface StepTrace extends Record<string, unknown> {
-  key: ItemKey
-  index: number
-  target: number
-  /** Where the content is — the space `target` is in, not the raw scroll offset. */
-  actual: number
-  /** Signed distance still to travel, after everything already moving the content. */
-  remaining: number
-  arrived: boolean
-  targetMoved: boolean
-  quiet: boolean
-  settledExternally: boolean
-  stableFrames: number
-  elapsed: number
-}
-
-/**
  * Record one frame of the convergence loop.
  *
  * Two deliberate choices. It is at module scope rather than an inline thunk inside `step`,
@@ -187,10 +166,15 @@ interface StepTrace extends Record<string, unknown> {
  * And it takes a named record rather than a positional list: four of these fields are
  * consecutive booleans, so transposing two of them would compile clean and then lie in
  * every trace, in the module whose entire purpose is being trustworthy about what
- * happened. The record is built only when a sink is attached, which is why the call site
- * asks `isTracing()` rather than `TRACING`.
+ * happened. The record is built only when a listener is attached, which is why the call site
+ * asks `isTracing()` *as well as* `DEBUG`, rather than either alone: `DEBUG` is the part an
+ * optimizer can decide, so it is what deletes this function and its topic string from a
+ * build without instrumentation, and `isTracing()` is the part that can only be answered at
+ * runtime, so it is what decides whether to build the record. This was the single call site
+ * that the constant alone could not eliminate — a function call is not statically decidable,
+ * so `traceStep` stayed referenced and kept `'scroll.step'` alive.
  */
-function traceStep(step: StepTrace): void {
+function traceStep(step: StepPayload): void {
   trace('scroll.step', () => step)
 }
 
@@ -360,6 +344,10 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // `notifyModelChanged` may already have restarted it.
     cleanups.push(
       gate.onOpen(() => {
+        // Before the flush, so a reader can tell what was waiting from what happened next.
+        if (DEBUG) {
+          trace('scroll.wake', () => ({ pending: pending !== null, banked: deferredCorrection }))
+        }
         flushDeferredCorrection()
         schedule()
       }),
@@ -513,11 +501,49 @@ export function createScroller(options: ScrollerOptions): Scroller {
    * listener — so at the moment of a write the two spaces coincide. Flush a banked
    * content-space distance before that fold and the shift is applied twice.
    */
-  const write = (offset: number): void => {
-    if (!canWriteScroll()) {
+  /**
+   * Write an offset.
+   *
+   * `from` is where the content already is, **passed rather than read**. Every one of the five
+   * callers has it in hand — `step` computed it as `actual`, `flushDeferredCorrection` as
+   * `offset`, `scrollToIndex` for its arrival test — and reading it again here would be a fresh
+   * `element.scrollTop`, which is an uncached layout read.
+   *
+   * That is not hypothetical tidiness. The engine removed three such reads from `scroll.write`'s
+   * payload for exactly this reason, and the first version of the trace below reintroduced one in
+   * this module: per convergence frame at up to 120 Hz, and — worse — once on the gate-open path,
+   * which runs immediately after `reconcileGestureShift` has written a style. That one is a
+   * guaranteed forced synchronous layout at the precise moment a fling ends, which is the moment
+   * the whole gate exists to protect. Defaulted rather than required so a future caller cannot
+   * quietly get it wrong by omission.
+   */
+  const write = (offset: number, from = getContentOffset()): void => {
+    const allowed = canWriteScroll()
+
+    // This module wrote `scrollTop` and said nothing about it, for as long as there has been
+    // tracing at all. `scroll.step` reports that the convergence loop *ran*, which is not the
+    // same claim — and the demo's on-device HUD filtered on `scroll.write`, the engine's door,
+    // so every conclusion of the form "no write escaped during that gesture" was drawn from
+    // half the writers. This is the other half.
+    //
+    // One event for both branches, with `refused` saying which, because the interesting
+    // question during a fling is not "did the scroller write" but "did the scroller *want* to
+    // write" — a refusal banks a delta that will be replayed the moment the gate reopens, and
+    // that replay is a write during a moment nobody was watching.
+    if (DEBUG) {
+      trace('scroll.commit', () => ({
+        offset,
+        from,
+        refused: !allowed,
+        banked: deferredCorrection,
+        carry: appliedCarry,
+      }))
+    }
+
+    if (!allowed) {
       // A content-space *distance*: both terms are content space, and replaying it later
       // against wherever the content has got to is the whole point of banking a delta.
-      deferredCorrection = offset - getContentOffset()
+      deferredCorrection = offset - from
       return
     }
     rememberIntent(offset)
@@ -553,14 +579,20 @@ export function createScroller(options: ScrollerOptions): Scroller {
   const flushDeferredCorrection = (): void => {
     if (deferredCorrection === 0 || !canWriteScroll()) return
 
+    const banked = deferredCorrection
     const offset = getContentOffset()
     const next = offset + deferredCorrection
     // At the bottom clamp a negative correction has already been absorbed by the
     // browser; replaying it would lift the list off the end.
     const max = viewport.getMaxScrollOffset()
     deferredCorrection = 0
-    if (offset >= max && next < offset) return
-    write(Math.min(Math.max(next, 0), max))
+    const skipped = offset >= max && next < offset
+    // After the early return above, so the common case — nothing banked — costs nothing, and
+    // `max` is already read. `skipped` is the bottom-clamp refusal, which is otherwise
+    // indistinguishable from a flush that never happened.
+    if (DEBUG) trace('scroll.flush', () => ({ banked, from: offset, next, max, skipped }))
+    if (skipped) return
+    write(Math.min(Math.max(next, 0), max), offset)
   }
 
   const finish = (settled: boolean, reason: ScrollEndReason): void => {
@@ -582,7 +614,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     const actual = getContentOffset()
     const deviation = finalTarget - actual
 
-    if (TRACING) {
+    if (DEBUG) {
       trace('scroll.finish', () => ({
         key: current.key,
         index: current.index,
@@ -626,9 +658,14 @@ export function createScroller(options: ScrollerOptions): Scroller {
       current.startedAt += sinceTick
       current.lastModelChangeAt += sinceTick
       current.lastStepAt += sinceTick
+      // Once per park, not once per frame — which is the same property the sleep below
+      // exists for, and the reason this event is affordable at all. A reader seeing
+      // `scroll.park` immediately followed by `scroll.wake` and a `scroll.commit` knows the
+      // convergence loop wrote during a gesture, which is one of the ways momentum dies.
+      if (DEBUG) trace('scroll.park', () => ({ elapsed: tick - current.startedAt, suspended: sinceTick }))
       // Sleep rather than spin. The gate stays shut for the length of a fling, so
       // re-requesting here would schedule a main-thread wakeup every frame for up to
-      // `MOMENTUM_MAX_MS` — hundreds of them, all guaranteed to do nothing — during the
+      // `MOMENTUM_IDLE_MS` — hundreds of them, all guaranteed to do nothing — during the
       // one moment on iOS where contention is most visible. `attach` subscribes the
       // resume to `gate.onOpen`, which is the event that ends the wait.
       return
@@ -671,7 +708,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // arrives, and it usually arrives sooner.
     const quiet = settledExternally || tick - current.lastModelChangeAt > MODEL_QUIET_MS
 
-    if (isTracing()) {
+    if (DEBUG && isTracing()) {
       traceStep({
         key: current.key,
         index,
@@ -692,7 +729,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
       if (current.stableFrames >= STABLE_FRAMES) {
         // Converged at tolerance; commit the exact float so the landing is not
         // left a fraction short of where it was asked to be.
-        write(target)
+        write(target, actual)
         finish(true, 'converged')
         return
       }
@@ -730,9 +767,9 @@ export function createScroller(options: ScrollerOptions): Scroller {
           // frame computes the same advance and the animation stalls short of its
           // target forever. See SMOOTH_MIN_STEP.
           current.lastStepAt = tick
-          write(Math.abs(advance) <= SMOOTH_MIN_STEP ? target : actual + advance)
+          write(Math.abs(advance) <= SMOOTH_MIN_STEP ? target : actual + advance, actual)
         } else {
-          write(target)
+          write(target, actual)
         }
       }
     }
@@ -806,20 +843,29 @@ export function createScroller(options: ScrollerOptions): Scroller {
 
       const target = targetFor(clamped, align, extra)
       pending.lastTarget = target
-      if (TRACING) {
+      // Read once, and *outside* the thunk. It was inside, which made it a layout read that
+      // happened only when someone was watching — the same defect as `scroll.write`'s three, and
+      // the write two lines below then read it a second time. Hoisting serves both.
+      const startedFrom = getContentOffset()
+      if (DEBUG) {
+        // `key` captured from the local rather than read off `pending`, which is a mutable
+        // module-level slot the thunk would close over: typed `ItemKey | undefined` and, if the
+        // scroll were ever cancelled before the thunk ran, reported as `undefined` for a scroll
+        // that certainly had a key. The generic signature on `trace` is what surfaced it.
+        const startKey = pending.key
         trace('scroll.start', () => ({
-          key: pending?.key,
+          key: startKey,
           index: clamped,
           align,
           smooth,
           target,
           // The same space as `target`: a diagnostic reporting two coordinate systems in
           // one line would be reading the bug rather than exposing it.
-          actual: getContentOffset(),
+          actual: startedFrom,
         }))
       }
 
-      if (!smooth) write(target)
+      if (!smooth) write(target, startedFrom)
 
       // Fast path: when every item is measured the target cannot move, so there
       // is nothing to converge towards and waiting out the quiet period would
@@ -837,8 +883,9 @@ export function createScroller(options: ScrollerOptions): Scroller {
       // whether or not the offset changed.
       const tolerance = convergenceTolerance(viewport.getDevicePixelRatio())
       const fullyMeasured = cache.measuredCount === cache.length
-      if (!smooth && fullyMeasured && Math.abs(getContentOffset() - target) <= tolerance) {
-        write(target)
+      const at = getContentOffset()
+      if (!smooth && fullyMeasured && Math.abs(at - target) <= tolerance) {
+        write(target, at)
         finish(true, 'converged')
         return promise
       }
@@ -848,7 +895,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     },
 
     notifyModelChanged() {
-      if (TRACING) trace('scroll.modelChanged', () => ({ pending: pending !== null }))
+      if (DEBUG) trace('scroll.modelChanged', () => ({ pending: pending !== null }))
       if (pending) {
         pending.lastModelChangeAt = now()
         // The scrolling may have stopped, but the model just moved — so the earlier
