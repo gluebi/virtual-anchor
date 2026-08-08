@@ -163,6 +163,13 @@ describe('ListGeometry visible area', () => {
     expect(g.bufferedBand(1000, 400)).toEqual({ start: 600, end: 2200 })
   })
 
+  it('grows it further ahead than behind when asked', () => {
+    const g = geometry({}, 800)
+    // The leading side is the one the compositor is scrolling toward, so it is the one that
+    // takes the lookahead; behind the reader stays at the plain buffer.
+    expect(g.bufferedBand(1000, 400, 2400)).toEqual({ start: 600, end: 4200 })
+  })
+
   it('keeps the buffered band a superset of the visible one', () => {
     fc.assert(
       fc.property(

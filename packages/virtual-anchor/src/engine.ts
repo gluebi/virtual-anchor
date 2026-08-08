@@ -155,7 +155,79 @@ export interface Engine {
   dispose(): void
 }
 
-const DEFAULT_BUFFER = 400
+/**
+ * How far beyond the visible band to mount, in px, in each direction.
+ *
+ * **2500 rather than the 400 this was, and the number is measured rather than chosen.** The
+ * symptom is a hard fling putting blank frames on screen: the browser scrolls on the compositor
+ * thread while the mounted range is recomputed on the main thread, so anything past the buffer is
+ * a region no row has been mounted for. `perf/blanking.spec.ts` counts those frames directly, and
+ * on the demo at 40,000 px/s the buffer is the whole story:
+ *
+ * | buffer | blank frames at 20x CPU | headroom at 20x CPU |
+ * | --- | --- | --- |
+ * | 400 | 13 of 79 | 42 fps, 8.2 ms per scroll event |
+ * | 1200 | 11 of 81 | 33 fps, 12.7 ms |
+ * | 2500 | 3 of 78 | 32 fps, 14.3 ms |
+ *
+ * 1200 is dominated — nearly all of the cost, almost none of the benefit — so the real choice was
+ * between 400 and 2500. At 1x and 6x emulated CPU, 2500 costs nothing measurable (60 fps, 0.2 ms)
+ * and removes the blanking; the headroom it spends only appears past 10x, where frames are being
+ * dropped regardless. Consumers who want the old trade still have `buffer`.
+ *
+ * What made this the fix rather than the lookahead below: the blank frames all land in the *first*
+ * few per cent of a gesture, and mounting is a burst of work at exactly that moment. A larger
+ * static buffer means the rows are already there — already mounted, already measured, already
+ * positioned — before the finger moves.
+ */
+const DEFAULT_BUFFER = 2500
+
+/**
+ * How far ahead of the reader to mount, expressed as time rather than pixels.
+ *
+ * The buffer above is a distance, and a distance is the wrong unit for this failure. The browser
+ * scrolls on the compositor thread while the mounted range is recomputed on the main thread from
+ * a scroll event, so what has to be covered is *main-thread latency* — and the pixels that latency
+ * costs depend entirely on how fast the content is moving. At 60 Hz a fixed 400 px is spent within
+ * a single frame by a scroll of 24,000 px/s, which is an ordinary hard fling; past that the
+ * compositor is presenting a region no row has been mounted for, and the reader sees blank.
+ *
+ * 50 ms is about three frames at 60 Hz.
+ *
+ * **This is not what fixed the blanking, and it is worth being clear about that.** Every blank
+ * frame `perf/blanking.spec.ts` catches lands in the first few per cent of a gesture — at onset,
+ * where two samples have not yet arrived and the velocity is therefore zero. A lookahead derived
+ * from velocity is necessarily nothing at exactly the moment it is wanted, and switching it on
+ * alone changed the count not at all (13 blank frames of 79 at a 20x slowdown, before and after).
+ * The buffer above is what fixed it.
+ *
+ * It is kept because it is cheap in the case the buffer is expensive in: it costs nothing at rest,
+ * and on top of the larger buffer it still took the 20x count from 5 to 3 and the 1x count from 1
+ * to 0. A steady fast scroll is the regime it covers, and the two together cover more than either.
+ */
+const LOOKAHEAD_MS = 50
+
+/**
+ * The most the lookahead may ever add, in pixels.
+ *
+ * Because the alternative to a cap is unbounded mounting at speed, and this file already records
+ * what that costs: widening the contiguous span to reach a distant target "mounted 7,798 rows in
+ * a single frame, which took 103 seconds and never scrolled at all". A fling fast enough to want
+ * 20,000 px of lookahead must be allowed to blank rather than to hang. At the demo's ~162 px
+ * average row this is roughly a dozen extra rows at full speed, and none at rest.
+ */
+const MAX_LOOKAHEAD = 2000
+
+/**
+ * How long a scroll sample stays evidence of motion.
+ *
+ * Two jobs, both load-bearing. It decays the lookahead to nothing once samples stop arriving —
+ * without it, a list flung once would keep mounting extra rows forever, paying for a speed it no
+ * longer has. And it rejects the gap *between* gestures: two scrolls a second apart are not one
+ * slow scroll, and dividing their offset difference by their time difference would invent a
+ * velocity that never happened.
+ */
+const VELOCITY_IDLE_MS = 100
 /**
  * How close to the end still counts as being at it.
  *
@@ -610,6 +682,47 @@ export function createEngine(initial: EngineOptions): Engine {
   /** Last sum handed to the surface, so an unchanged value is not re-written. */
   let paintOffset = 0
 
+  /**
+   * Scroll velocity in px/ms, signed: positive is toward the end of the list.
+   *
+   * Smoothed rather than taken raw. A single late frame doubles the instantaneous velocity, and an
+   * un-smoothed reading would widen the mounted band in response to the stall it is supposed to be
+   * absorbing — mounting most where the main thread is least able to afford it.
+   */
+  let velocity = 0
+  let velocityAt = 0
+  let velocityOffset = Number.NaN
+
+  const sampleVelocity = (offset: number): void => {
+    const at = now()
+    const elapsed = at - velocityAt
+    if (Number.isFinite(velocityOffset) && elapsed > 0) {
+      if (elapsed > VELOCITY_IDLE_MS) {
+        // A new gesture, not a slow one. See VELOCITY_IDLE_MS.
+        velocity = 0
+      } else {
+        const instant = (offset - velocityOffset) / elapsed
+        // An equal-weight EMA: enough to absorb one anomalous frame, short enough that the band
+        // is already wide two frames into a fling rather than half way through it.
+        velocity = velocity === 0 ? instant : (velocity + instant) / 2
+      }
+    }
+    velocityOffset = offset
+    velocityAt = at
+  }
+
+  /**
+   * How far past the visible band to mount, on the leading side only.
+   *
+   * Zero at rest, and zero once samples stop arriving, so nothing here costs a row until the
+   * reader is actually moving.
+   */
+  const lookahead = (): number => {
+    if (velocity === 0) return 0
+    if (now() - velocityAt > VELOCITY_IDLE_MS) return 0
+    return Math.min(Math.abs(velocity) * LOOKAHEAD_MS, MAX_LOOKAHEAD)
+  }
+
   const writePaintOffset = (): void => {
     const next = carry + pendingShift
     if (next === paintOffset) return
@@ -664,7 +777,14 @@ export function createEngine(initial: EngineOptions): Engine {
 
     const g = syncGeometry()
     const visible = g.visibleBand(contentAt)
-    const buffered = g.bufferedBand(contentAt, options.buffer ?? DEFAULT_BUFFER)
+    // Extended on the leading side only. Rows behind the reader are already measured and about to
+    // leave; the ones the compositor is scrolling toward are the ones nothing has mounted yet.
+    const buffer = options.buffer ?? DEFAULT_BUFFER
+    const lead = lookahead()
+    const buffered =
+      velocity < 0
+        ? g.bufferedBand(contentAt, buffer + lead, buffer)
+        : g.bufferedBand(contentAt, buffer, buffer + lead)
 
     // The pinned scroll target is deliberately *not* unioned in here. Widening the
     // contiguous span to reach a distant target mounts every item in between: a smooth
@@ -1755,6 +1875,10 @@ export function createEngine(initial: EngineOptions): Engine {
           // from their sum below, so a diagnostic that reported only the offset would be
           // reporting an input to the answer rather than the answer.
           if (DEBUG) trace('scroll.sample', () => ({ offset, carry, shift: pendingShift }))
+
+          // After the trace, so the stamp above still measures delivery rather than this; before
+          // the publish below, which is what reads the velocity to size the mounted band.
+          sampleVelocity(offset)
 
           scroller.notifyScroll(offset)
 

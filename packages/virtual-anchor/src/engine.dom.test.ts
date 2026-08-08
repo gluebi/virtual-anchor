@@ -324,10 +324,11 @@ describe('engine option plumbing', () => {
     const h = setup({ count: 1000 })
     const { renderedRange, visibleRange } = h.engine.store.getState()
 
-    // 800px viewport, 100px estimates, 400px default buffer either side.
+    // 800px viewport, 100px estimates, 2500px default buffer either side — so the mounted range
+    // reaches about 33 and the point stands: a window of a 1,000-item list, not the list.
     expect(visibleRange).toEqual([0, 8])
     expect(renderedRange[1]).toBeGreaterThan(visibleRange[1])
-    expect(renderedRange[1]).toBeLessThan(20)
+    expect(renderedRange[1]).toBeLessThan(40)
   })
 
   it('widens the rendered range with `buffer`', () => {
@@ -337,6 +338,89 @@ describe('engine option plumbing', () => {
     expect(wide.engine.store.getState().renderedRange[1]).toBeGreaterThan(
       narrow.engine.store.getState().renderedRange[1] + 15,
     )
+  })
+
+  /**
+   * The mounted band follows velocity, not just position.
+   *
+   * A fixed buffer is a distance, and the thing it has to cover is main-thread latency — whose
+   * cost in pixels depends entirely on how fast the content is moving. These assert the wiring in
+   * both directions and the decay, because a lookahead that never shrinks is a memory leak in row
+   * form. The measured symptom is in `perf/blanking.spec.ts`.
+   */
+  describe('velocity-aware overscan', () => {
+    /** Drive `steps` scrolls of `delta` px, `dt` ms apart, on an injectable clock. */
+    const fling = (dt: number, delta: number, steps = 4): Harness => {
+      let clock = 0
+      const h = setup({ count: 5000, now: () => clock })
+      for (let step = 1; step <= steps; step++) {
+        clock += dt
+        h.scroll(delta * step)
+      }
+      return h
+    }
+
+    it('mounts further ahead the faster the reader is moving', () => {
+      // Same offset reached by both, so the visible band is identical and only the velocity
+      // differs — otherwise this would be measuring position, which the plain buffer already
+      // handles.
+      const slow = fling(80, 800)
+      const fast = fling(16, 800)
+
+      const slowState = slow.engine.store.getState()
+      const fastState = fast.engine.store.getState()
+      expect(fastState.visibleRange).toEqual(slowState.visibleRange)
+      expect(fastState.renderedRange[1]).toBeGreaterThan(slowState.renderedRange[1])
+    })
+
+    it('mounts behind instead when the reader is moving backwards', () => {
+      let clock = 0
+      const h = setup({ count: 5000, now: () => clock })
+      // Out to the middle, then back up fast. The upward leg is what is being asserted.
+      for (let step = 1; step <= 6; step++) {
+        clock += 16
+        h.scroll(20_000 + 800 * step)
+      }
+      const downward = h.engine.store.getState()
+      for (let step = 1; step <= 6; step++) {
+        clock += 16
+        h.scroll(24_800 - 800 * step)
+      }
+      const upward = h.engine.store.getState()
+
+      // Travelling up, the band reaches further above the visible rows than it did travelling
+      // down through the same region.
+      expect(upward.visibleRange[0] - upward.renderedRange[0]).toBeGreaterThan(
+        downward.visibleRange[0] - downward.renderedRange[0],
+      )
+    })
+
+    it('stops mounting ahead once the gesture is over', () => {
+      let clock = 0
+      const h = setup({ count: 5000, now: () => clock })
+      for (let step = 1; step <= 4; step++) {
+        clock += 16
+        h.scroll(800 * step)
+      }
+      const moving = h.engine.store.getState().renderedRange[1]
+
+      // A scroll arriving long after the last one is a new gesture, not a slow one: dividing the
+      // offset difference by the time difference here would invent a velocity nobody produced.
+      clock += 1000
+      h.scroll(3200)
+      const stopped = h.engine.store.getState()
+
+      expect(stopped.renderedRange[1]).toBeLessThan(moving)
+
+      // And what is left is exactly the plain buffer. Compared against an engine that arrived at
+      // the same offset without ever moving fast, rather than against a number derived from
+      // `DEFAULT_BUFFER` — which would make this test a second copy of that constant.
+      let restClock = 0
+      const rest = setup({ count: 5000, now: () => restClock })
+      restClock += 1000
+      rest.scroll(3200)
+      expect(stopped.renderedRange).toEqual(rest.engine.store.getState().renderedRange)
+    })
   })
 
   it('shifts the visible range by `scrollMargin`', () => {
@@ -418,7 +502,9 @@ describe('engine option plumbing', () => {
     const h = setup({ count: 1000 })
     const before = h.engine.store.getState().renderedRange[1]
 
-    h.engine.setOptions({ buffer: 3000 })
+    // Well clear of the 2500px default, so this asserts that the option arrived rather than that
+    // it happens to differ from whatever the default is this month.
+    h.engine.setOptions({ buffer: 8000 })
     expect(h.engine.store.getState().renderedRange[1]).toBeGreaterThan(before + 20)
   })
 

@@ -217,10 +217,17 @@ export class ListGeometry {
     return { start, end: start + this.visibleSize() }
   }
 
-  /** {@link visibleBand} grown by `buffer` px in each direction, for mounting. */
-  bufferedBand(scrollOffset: number, buffer: number): Band {
+  /**
+   * {@link visibleBand} grown for mounting: `back` px above it and `ahead` px below.
+   *
+   * Asymmetric, because the two directions are not the same problem. Rows behind the reader have
+   * already been measured and are about to leave; rows ahead are the ones the compositor is
+   * scrolling toward, and it does not wait for the main thread to mount them. `ahead` defaults to
+   * `back` so a caller with no opinion gets the symmetric band this had before.
+   */
+  bufferedBand(scrollOffset: number, back: number, ahead = back): Band {
     const band = this.visibleBand(scrollOffset)
-    return { start: band.start - buffer, end: band.end + buffer }
+    return { start: band.start - back, end: band.end + ahead }
   }
 
   /**
