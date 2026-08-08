@@ -384,6 +384,92 @@ describe('the engine on iOS WebKit', () => {
     expect(h.scrollWrites().slice(before)).toHaveLength(1)
   })
 
+  it('does not write for an append that displaced nothing, mid-fling', () => {
+    // Issue #54, found on a device by `virtual-anchor/debug`.
+    //
+    // The anchor is re-derived on each scroll event, so `resolveAnchorOffset` answers "where the
+    // content was when the last one arrived" while `writeScroll` compares it against where the
+    // content is *now*. During momentum those differ by the fling's travel — and a `'model'`
+    // restore overrides the gate, so that difference gets written as though it were a correction.
+    // Measured on an iPhone: a 500-item append below the reader wrote `delta: -7`, nudging them
+    // backwards to a stale offset and cancelling a fling with a second still to run.
+    //
+    // The append is the case that must write *nothing*: it changed no offset above the anchor.
+    const h = setup()
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+
+    // Momentum carries on between scroll events. This is the whole condition.
+    h.advanceOffset(7)
+    const before = h.scrollWrites().length
+
+    h.engine.setOptions({ keys: [...KEYS(200), ...KEYS(500, 'newer')] })
+
+    expect(h.scrollWrites().slice(before)).toEqual([])
+  })
+
+  it('is unaffected by a correction already banked as a paint offset', () => {
+    // Edge case flagged with #54's report: with `pendingShift ≠ 0`, `contentOffset()` includes the
+    // paint offset while the anchor's offsets come from the cache. They are the same space —
+    // `anchor` was derived from `contentOffset()` in the first place — so the shift cancels out of
+    // the subtraction rather than being double-counted. Asserted rather than argued.
+    const h = setup()
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+
+    // Bank a correction: the gate is shut, so this is held rather than written.
+    h.measure('c10', 700)
+    expect(h.paintOffset()).not.toBe(0)
+
+    h.advanceOffset(7)
+    const before = h.scrollWrites().length
+
+    h.engine.setOptions({ keys: [...KEYS(200), ...KEYS(500, 'newer')] })
+
+    expect(h.scrollWrites().slice(before)).toEqual([])
+  })
+
+  it('holds position when the model change takes the anchored key away', () => {
+    // The other end of the same guard. `resolveAnchorOffset` returns null for a key that has left
+    // the collection, and holding beats jumping — so nothing is written, with or without lag.
+    const h = setup()
+    h.mountItem('c10', 100)
+    fling(h, 5000)
+    h.advanceOffset(7)
+    const before = h.scrollWrites().length
+
+    h.engine.setOptions({ keys: KEYS(200, 'replaced') })
+
+    expect(h.scrollWrites().slice(before)).toEqual([])
+  })
+
+  it('writes a prepend’s real height, uncontaminated by the fling’s lag', () => {
+    // The mirror of the test above, and the one that shows #54's fix writes the *right* number
+    // rather than merely a smaller one. The same prepend is run twice — once with the platform's
+    // offset where the last scroll event left it, once with it advanced 7px as momentum would —
+    // and the correction has to be identical. Before the fix the second was 7px short, because
+    // the travel was being subtracted from the inserted height.
+    const deltaFor = (lag: number): number => {
+      const events = traced()
+      const h = setup()
+      h.mountItem('c10', 100)
+      fling(h, 5000)
+      h.advanceOffset(lag)
+
+      h.engine.setOptions({ keys: [...KEYS(10, 'older'), ...KEYS(200)] })
+
+      const write = events.find(
+        (event) => event.topic === 'scroll.write' && event.data.reason === 'model',
+      )
+      expect(write).toBeDefined()
+      return Number(write?.data.delta)
+    }
+
+    const still = deltaFor(0)
+    expect(still).toBeGreaterThan(0)
+    expect(deltaFor(7)).toBe(still)
+  })
+
   it('writes for a prepend even mid-fling', () => {
     // The deliberate exception. Deferring a model change would move the reader by the
     // whole inserted height — the one thing an anchored list promises cannot happen —
@@ -1201,6 +1287,26 @@ describe('the engine off iOS', () => {
     } finally {
       setTraceSink(null)
     }
+  })
+
+  it('writes a prepend in full, as it always has', () => {
+    // #54's safety property, on the platform where the gate is inert: with the content still, the
+    // anchor is in sync, so `contentOffset() === priorAnchorOffset` and the target is bit-identical
+    // to the old form. The whole change is supposed to be invisible here.
+    const events = traced()
+    const h = setup()
+    h.mountItem('c30', 100)
+    h.scroll(2000)
+
+    h.engine.setOptions({ keys: [...KEYS(10, 'older'), ...KEYS(200)] })
+
+    // Keyed on `restore`, not `reason`: with the gate open this is a `gate-open` write that
+    // happens to have a model cause, which is exactly the distinction the two fields carry.
+    const write = events.find(
+      (event) => event.topic === 'scroll.write' && event.data.restore === 'model',
+    )
+    expect(write?.data.reason).toBe('gate-open')
+    expect(Number(write?.data.delta)).toBe(1000)
   })
 
   it('writes a measurement correction during a touch scroll, as it always has', () => {

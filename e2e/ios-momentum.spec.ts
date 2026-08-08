@@ -389,6 +389,79 @@ test.describe('the momentum gate, as the library reports it', () => {
     expect(verdict?.suspects.map((suspect) => suspect.id)).not.toContain('cap')
   })
 
+  test('an append landing mid-fling does not write, and does not stop the fling', async ({ page }) => {
+    // Issue #54, and the test that would have caught it. A windowed list pages *during* a user's
+    // fling — the app's own guard is `isScrolling()`, which reports a programmatic scroll and a
+    // fling is not one — so a page of items lands with momentum running.
+    //
+    // The engine's `'model'` restore overrides the write gate, correctly for a prepend. For an
+    // append below the reader it displaced nothing, and what got written was the fling's own travel
+    // since the last scroll event: `delta: -7` on the device recording, nudging the reader backwards
+    // and cancelling a fling with a second left in it.
+    await open(page, 'debug=1&overlay=0&comment=6018')
+    // Let the deep link's own paging finish before clearing, or its writes land in the recording.
+    await page.waitForTimeout(500)
+    await page.evaluate(() => {
+      window.__traceClear()
+    })
+
+    await holdFinger(page)
+    await liftFinger(page)
+    const { startedAt, samplesAfterAppend } = await page.evaluate(async () => {
+      const element = document.querySelector('.scroller')
+      if (!element) throw new Error('no scroller')
+      const started = performance.now()
+      const advance = async (steps: number): Promise<void> => {
+        for (let i = 0; i < steps; i++) {
+          element.scrollTop += 25
+          await new Promise(requestAnimationFrame)
+        }
+      }
+
+      await advance(30)
+
+      // Advance and page in within the *same task*, so the scroll event for this step has not been
+      // delivered when `setOptions` runs. That gap is the entire condition: it is what a real fling
+      // has continuously, and the only way to manufacture it here, because a synthesised scroll
+      // moves only when this line moves it. Deliberately not `advance(1)`, which would await a
+      // frame and let the event through.
+      element.scrollTop += 25
+      await window.__list.insert('below', 200)
+
+      const before = window.__trace('scroll.sample').length
+      await advance(30)
+      return { startedAt: started, samplesAfterAppend: window.__trace('scroll.sample').length - before }
+    })
+    await page.waitForTimeout(600)
+
+    // Asserted from the trace rather than from the `scrollTop` counter, because the synthetic fling
+    // above writes `scrollTop` sixty times itself and the counter cannot tell those from the
+    // library's.
+    //
+    // Bounded to the gesture rather than filtered by `reason`, and both halves of that matter.
+    //
+    // Bounded, because the demo pages a few times while the deep link settles and those writes are
+    // legitimate — one was landing at 380ms and failing this.
+    //
+    // Not filtered by `reason`, because `reason: 'model'` means "the gate was shut", and here it
+    // often is not: with no real momentum, WebKit fires `scrollend` the moment this test stops
+    // writing, so the gate reopens between steps. The lag is written either way — measured at
+    // `delta: -25`, exactly one step — and a write that cancels a fling does so whatever the gate
+    // thought. `restore` names the cause, which is what this is about.
+    const model = (await events(page, 'scroll.write')).filter(
+      (event) =>
+        event.data.restore === 'model' && event.data.took === true && event.at >= startedAt,
+    )
+    expect(model).toEqual([])
+    const committed = (await events(page, 'scroll.commit')).filter(
+      (event) => event.data.refused === false,
+    )
+    expect(committed).toEqual([])
+
+    // And the scroll events kept arriving, which is what "the fling survived" looks like from here.
+    expect(samplesAfterAppend).toBeGreaterThan(10)
+  })
+
   test('reports what it saw, without asserting the speed of the machine', async ({ page }) => {
     // Gap statistics are reported and never asserted. `af282b8` — "stop asserting the speed of the
     // machine" — is the precedent: a CI runner under load produces gaps a developer's laptop never
