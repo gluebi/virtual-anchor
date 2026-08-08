@@ -220,6 +220,14 @@ export interface StepPayload extends Record<string, unknown> {
   /** Signed distance still to travel, after everything already moving the content. */
   remaining: number
   arrived: boolean
+  /**
+   * Whether a row on screen is still waiting to be measured.
+   *
+   * Here because its absence is invisible in every other field: a loop converging against
+   * estimated heights reports `arrived: true` and `remaining: 0`, and is indistinguishable from
+   * one that landed correctly. That is #67, and this is the field that separates them.
+   */
+  awaitingMeasurement: boolean
   targetMoved: boolean
   quiet: boolean
   settledExternally: boolean
