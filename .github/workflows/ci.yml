@@ -28,8 +28,41 @@ jobs:
       # configuration, and no other job here would notice it being wrong.
       - run: pnpm check:package
 
+  # The e2e container image has to carry exactly the browser revisions the installed
+  # @playwright/test asks for, and Dependabot cannot bump an image tag inside a workflow
+  # file (dependabot-core#5819) — so the weekly dev-tooling PR would break e2e every time
+  # it moved Playwright. Reading the tag out of the lockfile instead means it never drifts.
+  playwright-image:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - id: resolve
+        run: |
+          version=$(grep -m1 -oE "@playwright/test@[0-9.]+" pnpm-lock.yaml | cut -d@ -f3)
+          # Without this, a lockfile format change would quietly resolve to `:v-noble` and
+          # surface as an image-pull failure rather than as a sentence. `bash -e` does not
+          # cover it: GitHub does not set `pipefail`, so `cut` exiting 0 hides a `grep`
+          # that matched nothing.
+          test -n "$version" || { echo "::error::no @playwright/test version in pnpm-lock.yaml"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
   e2e:
     runs-on: ubuntu-latest
+    needs: playwright-image
+    container:
+      # Browsers and their system libraries ship in the image, which is why there is no
+      # `playwright install --with-deps` step below. Do not read that as the point: that
+      # step cost 1m59s of the last green run, and pulling a ~950MB image costs most of
+      # it back. The point is that the image pins the browser builds, the fonts and the
+      # OS libraries that the geometry assertions measure against — which a bare
+      # `ubuntu-latest` leaves free to move underneath a suite asserting to 0.5px.
+      image: mcr.microsoft.com/playwright:v${{ needs.playwright-image.outputs.version }}-noble
+      # 1001 is the runner's own uid: it keeps the checkout and playwright-report/ owned
+      # by the user upload-artifact runs as. --ipc=host is what Playwright recommends for
+      # Chromium in Docker, which can otherwise exhaust the default 64MB /dev/shm and crash.
+      options: --user 1001 --ipc=host
     steps:
       - uses: actions/checkout@v7
       - uses: pnpm/action-setup@v6
@@ -39,7 +72,6 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
-      - run: pnpm exec playwright install --with-deps chromium webkit firefox
       - run: pnpm test:e2e
       - uses: actions/upload-artifact@v7
         if: ${{ !cancelled() }}
