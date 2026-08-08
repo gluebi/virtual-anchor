@@ -53,11 +53,11 @@ jobs:
     needs: playwright-image
     container:
       # Browsers and their system libraries ship in the image, which is why there is no
-      # `playwright install --with-deps` step below. Do not read that as the point: that
-      # step cost 1m59s of the last green run, and pulling a ~950MB image costs most of
-      # it back. The point is that the image pins the browser builds, the fonts and the
-      # OS libraries that the geometry assertions measure against — which a bare
-      # `ubuntu-latest` leaves free to move underneath a suite asserting to 0.5px.
+      # `playwright install --with-deps` step below — 1m59s of the last run before this
+      # one, against 43s to pull the image. Take the ~76s, but it is not the point: the
+      # point is that the image pins the browser builds, the fonts and the OS libraries
+      # that the geometry assertions measure against — which a bare `ubuntu-latest`
+      # leaves free to move underneath a suite asserting to 0.5px.
       image: mcr.microsoft.com/playwright:v${{ needs.playwright-image.outputs.version }}-noble
       # 1001 is the runner's own uid: it keeps the checkout and playwright-report/ owned
       # by the user upload-artifact runs as. --ipc=host is what Playwright recommends for
