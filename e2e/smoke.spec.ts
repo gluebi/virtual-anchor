@@ -21,6 +21,26 @@ test.describe('demo smoke', () => {
     expect(mounted).toBeLessThan(60)
   })
 
+  /**
+   * Guards the guard.
+   *
+   * The demo's frame-rate readout costs one `requestAnimationFrame` wakeup per frame, and it is
+   * switched off for a driven browser by `navigator.webdriver` rather than by a query parameter —
+   * because a parameter only reaches the pages that remember to pass it, and half this suite
+   * calls `page.goto('/')` directly. That makes the invariant invisible: if `navigator.webdriver`
+   * ever stopped being true here, the meter would quietly start running inside every timing and
+   * sub-pixel assertion in this directory, and nothing would say so. This says so.
+   */
+  test('runs no frame-rate meter under automation', async ({ page }) => {
+    await page.goto('/')
+    await expect(page.locator('[role="article"]').first()).toBeVisible()
+    await expect(page.locator('.fps-meter')).toHaveCount(0)
+
+    // And the opt-in still works, so the mechanism is off rather than absent.
+    await page.goto('/?fps=1')
+    await expect(page.locator('.fps-meter')).toHaveCount(1)
+  })
+
   test('reports the full thread size to assistive technology', async ({ page }) => {
     await page.goto('/')
     const first = page.locator('[role="article"]').first()

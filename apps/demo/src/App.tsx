@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from 'react'
+import { FpsMeter } from './FpsMeter.js'
 import {
   VirtualList,
   type VirtualListHandle,
@@ -736,6 +737,8 @@ export function App(): ReactNode {
           </ol>
         </aside>
       </main>
+
+      {CONFIG.fps && <FpsMeter />}
     </div>
   )
 }
