@@ -199,6 +199,64 @@ describe('the scroll write gate', () => {
     expect(h.opens()).toBe(1)
   })
 
+  it('does not cap a fling that is still scrolling', () => {
+    // Issue #53, and the reason the timer is a watchdog rather than a ceiling. Measured on an
+    // iPhone: flings through this demo's twelve thousand rows run three to eight and a half
+    // seconds, and *every* one that passed three seconds used to be cut off here — the gate
+    // reopening mid-fling, the next measurement writing `scrollTop`, and WebKit cancelling the
+    // momentum. Which is the exact symptom the gate exists to prevent.
+    const h = harness()
+    touch(h.element, 'touchstart')
+    touch(h.element, 'touchend')
+    h.advance(50)
+    h.scroll()
+
+    // Eight seconds of fling, delivering an event every 16ms as a real one does.
+    for (let frame = 0; frame < 500; frame++) {
+      h.advance(16)
+      h.scroll()
+    }
+
+    expect(h.gate.canWrite()).toBe(false)
+    expect(h.opens()).toBe(0)
+  })
+
+  it('still reopens once a fling that never settles goes quiet', () => {
+    // The other half: the watchdog has to keep doing the job the ceiling was there for. A gate
+    // that stayed shut because no settle ever arrived would refuse every correction forever.
+    const h = harness()
+    touch(h.element, 'touchstart')
+    touch(h.element, 'touchend')
+    h.advance(50)
+    h.scroll()
+    h.advance(1000)
+    h.scroll()
+
+    // Silence from here. The window runs from the *last* event, not from onset.
+    h.advance(2999)
+    expect(h.gate.canWrite()).toBe(false)
+
+    h.advance(1)
+    expect(h.gate.canWrite()).toBe(true)
+    expect(h.opens()).toBe(1)
+  })
+
+  it('tolerates a stall mid-fling without concluding the fling is over', () => {
+    // Measured worst gaps: 205ms on a device, 202ms on the simulator, both while the fling was
+    // still visibly running. The window has to clear that comfortably, or the watchdog re-creates
+    // the bug it fixes.
+    const h = harness()
+    touch(h.element, 'touchstart')
+    touch(h.element, 'touchend')
+    h.advance(50)
+    h.scroll()
+
+    h.advance(250)
+    h.scroll()
+
+    expect(h.gate.canWrite()).toBe(false)
+  })
+
   it('does not promote a scroll arriving after the grace period to momentum', () => {
     // By then the gate is already open and the event is either the reader starting
     // afresh or the echo of a write. Treating it as momentum onset would shut the
