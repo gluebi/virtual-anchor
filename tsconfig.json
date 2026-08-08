@@ -11,6 +11,7 @@
     "vitest.setup.ts",
     "eslint.config.js",
     "e2e/**/*.ts",
+    "perf/**/*.ts",
     "spike/**/*.ts",
     "packages/*/tsup.config.ts",
     "apps/*/vite.config.ts"

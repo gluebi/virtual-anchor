@@ -5,6 +5,10 @@ docs-api/
 .turbo/
 *.tsbuildinfo
 
+# Benchmark records. Kept out of the repo because a frame time is a fact about the machine that
+# produced it, and a committed one would invite comparison across machines that never met.
+perf/results/
+
 # Playwright
 test-results/
 playwright-report/

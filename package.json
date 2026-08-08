@@ -15,6 +15,8 @@
     "test:coverage": "vitest run --coverage",
     "//test:e2e": "Builds with `build:trace`, not `build`, because the momentum spec now asserts on the library's own trace stream — which names *why* each scroll write did or did not happen, where a write counter could only say that one did. The rest of the suite is unaffected: with no listener installed, `trace()` returns on its first line.",
     "test:e2e": "pnpm --filter demo build:trace && playwright test",
+    "//perf": "The scroll benchmark. Builds the demo *without* instrumentation — unlike `test:e2e`, which needs `build:trace` to read the trace stream — because measuring frame time on an instrumented build measures the instrumentation. Local only, and deliberately not in CI: see perf/playwright.perf.config.ts.",
+    "perf": "pnpm --filter demo build && playwright test -c perf/playwright.perf.config.ts",
     "lint": "eslint .",
     "size": "pnpm build && size-limit",
     "docs": "typedoc",

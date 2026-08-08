@@ -195,6 +195,28 @@ body {
   font-size: 12px;
 }
 
+/*
+ * The frame-rate readout.
+ *
+ * Fixed rather than in the layout, because it has to stay legible while the thing it reports on
+ * is moving — and out of the flow, because a meter that reflowed the list would change the
+ * measurement. `pointer-events: none` so it can never intercept a scroll aimed at the content
+ * underneath it, and tabular figures so the number does not jitter sideways four times a second.
+ */
+.fps-meter {
+  position: fixed;
+  top: 10px;
+  right: 12px;
+  z-index: 10;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgb(17 24 39 / 82%);
+  color: #f3f4f6;
+  font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
 .panel {
   width: 330px;
   flex: none;

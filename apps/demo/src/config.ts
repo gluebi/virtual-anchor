@@ -108,6 +108,24 @@ export interface DemoConfig {
    * confirm a timing finding without it.
    */
   probe: boolean
+  /**
+   * Show the live frame-rate readout. On for a person, off under automation; `fps=0`/`fps=1`
+   * override either way.
+   *
+   * On by default because "how does it scroll" is the first question anyone opens this demo to
+   * answer. Off under automation because it costs one `requestAnimationFrame` wakeup per frame —
+   * the same price as {@link probe} — and both suites that drive this demo are measuring
+   * something the wakeup would perturb: the accuracy suite asserts sub-pixel landings, and
+   * `perf/` times frames.
+   *
+   * **Keyed on `navigator.webdriver` rather than on a query parameter, because the parameter did
+   * not hold.** The first version defaulted this on and had `e2e/helpers.ts`'s `open()` inject
+   * `fps=0`; but a good part of that suite calls `page.goto('/')` directly — `smoke.spec.ts:41`
+   * and `:54` among them — so the opt-out covered some pages and not others, and the meter ran
+   * inside tests that never asked for it. One predicate the browser itself supplies covers every
+   * entry point, including ones nobody has written yet.
+   */
+  fps: boolean
   /** Which overlay panes to show. `verdict` is the useful one; `live` is for watching counters move. */
   mode: 'live' | 'verdict' | 'both'
   /** Trace ring capacity. Larger reaches further back; the toolkit says when it has dropped events. */
@@ -167,6 +185,9 @@ export const CONFIG: DemoConfig = {
   debug,
   overlay: params.get('overlay') !== '0',
   probe: params.get('probe') !== '0',
+  // Explicit either way wins, so a spec can still ask for the meter with `fps=1`; otherwise it
+  // follows whether a person or a driver is looking at the page.
+  fps: params.get('fps') === '1' || (params.get('fps') !== '0' && !navigator.webdriver),
   mode: params.get('mode') === 'live' ? 'live' : params.get('mode') === 'verdict' ? 'verdict' : 'both',
   record: Math.max(100, number('record', 5000)),
   topics: params.get('topics')?.split(',').filter(Boolean),

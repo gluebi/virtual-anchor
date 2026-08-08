@@ -496,6 +496,52 @@ several modules away, where a rename would otherwise compile clean and report no
 Every bug found in this library so far was found by measuring rather than by reasoning about the
 code. This is that, made repeatable.
 
+### The benchmark
+
+The toolkit above answers *why this gesture misbehaved*. It cannot answer *how fast does this
+scroll*, and deliberately so: it records only outlier frames, because a ring buffer that also held
+the ordinary 16 ms case would push the gesture that matters out of it. A percentile needs the
+frames it throws away.
+
+For watching rather than measuring, the demo carries a live frame-rate readout in its corner —
+current rate and the worst frame in the last quarter-second. It writes `textContent` on a node it
+owns rather than re-rendering, because a meter that re-rendered the page every frame would cause
+the jank it displays. `fps=0` turns it off: it still costs one `requestAnimationFrame` wakeup per
+frame, the same price as `probe`, and the benchmark below passes it for that reason.
+
+`pnpm perf` is the other question. It builds the demo **without** instrumentation — measuring
+frame time on an instrumented build measures the instrumentation — serves it on its own port, and
+drives it in headed Chromium with CDP-synthesized input at a stated speed:
+
+```bash
+pnpm perf                       # the whole thing, about four minutes
+```
+
+Three reports come out of `perf/`:
+
+| spec | question |
+|---|---|
+| `scroll-fps.spec.ts` | frame rate and per-event handler cost, for wheel, `scrollToKey` and a fling, across three dataset sizes |
+| `headroom.spec.ts` | how much slower the machine could be before frames start dropping |
+| `blanking.spec.ts` | whether a hard fling outruns the mounted rows, and what it takes |
+
+**It is not in CI, and must not be.** This repo settled that in `af282b8` — "stop asserting the
+speed of the machine": a shared two-core runner produces gaps a laptop never will, and a threshold
+there fails for the wrong reason. So the specs report and do not assert, exactly as
+`ios-momentum.spec.ts` does. What they *do* assert is that the measurement happened — that the
+gesture moved the scroller, that frames were recorded, that the recorder did not overflow, and
+that the idle frame period is a plausible display period. That last one is not pedantry: an
+occluded Chromium window throttles `requestAnimationFrame` to about 1 Hz, and every figure after
+it would be catastrophic and meaningless.
+
+Two things the harness had to learn the hard way, both preserved in the specs' comments because
+they are easy to repeat. A per-frame count of *sample points with no row under them* measures the
+demo's 12 px inter-item `gap`, not blanking, and reports a flat 7% at every speed from a crawl to
+50,000 px/s. And a `requestAnimationFrame` probe cannot see blanking at all: it runs after the
+scroll handler in the same frame, so it only ever observes a world the handler has already made
+consistent. Blanking lives in the frames the compositor presented on its own, which takes a
+screencast to see.
+
 ## Coming from another library
 
 | | equivalent here |
