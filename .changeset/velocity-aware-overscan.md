@@ -42,4 +42,8 @@ fixed it was having the rows *already mounted* before the finger moved, which on
 resting buffer can do. The lookahead is kept because it is cheap where the buffer is expensive —
 on top of it, the 20x count went from 5 to 3 and the 1x count from 1 to 0.
 
-The published bundle grows by about 40 bytes.
+Measured after the change: 9.97 kB for the core entry and 12.24 kB with the React adapter,
+minified and brotlied. Both size budgets move up to match. The README's stated figures were
+already behind the budgets they claim cannot drift — 9.38 and 11.65 against limits of 9.9 and
+12.2 — so they now say what the build actually produces rather than what it produced some
+releases ago.

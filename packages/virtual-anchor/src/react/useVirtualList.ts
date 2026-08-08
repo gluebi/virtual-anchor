@@ -117,7 +117,14 @@ export interface UseVirtualListOptions<T> {
   defaultEstimate?: number
   /** Uniform spacing between items. Item margins are unsupported — see README. */
   gap?: number
-  /** Extra px mounted beyond the viewport in each direction. Default 400. */
+  /**
+   * Extra px mounted beyond the viewport, widened in the direction of travel.
+   *
+   * Carries no number on purpose: the default is measured rather than chosen, and this doc is
+   * what typedoc publishes — a literal here is a copy that goes stale the next time it is
+   * re-measured. `DEFAULT_BUFFER` in `engine.ts` states it, and says what it was measured
+   * against.
+   */
   buffer?: number
   /** Height of sticky chrome overlapping the top of the scrollport. */
   scrollPaddingStart?: number

@@ -46,7 +46,7 @@ export interface EngineOptions {
   estimateSize?: (index: number, key: ItemKey) => number | undefined
   defaultEstimate?: number
   gap?: number
-  /** Extra px of items mounted beyond the viewport, in each direction. */
+  /** Extra px of items mounted beyond the viewport, widened in the direction of travel. */
   buffer?: number
   geometry?: ListInsets
   /**
@@ -156,7 +156,7 @@ export interface Engine {
 }
 
 /**
- * How far beyond the visible band to mount, in px, in each direction.
+ * How far beyond the visible band to mount, in px, before the direction of travel widens it.
  *
  * **2500 rather than the 400 this was, and the number is measured rather than chosen.** The
  * symptom is a hard fling putting blank frames on screen: the browser scrolls on the compositor
@@ -217,6 +217,21 @@ const LOOKAHEAD_MS = 50
  * average row this is roughly a dozen extra rows at full speed, and none at rest.
  */
 const MAX_LOOKAHEAD = 2000
+
+/**
+ * Most rows the *default* buffer may mount on each side.
+ *
+ * `DEFAULT_BUFFER` is a distance, which is right for what it buys — latency times velocity is a
+ * distance — and wrong for what it costs, which is rows. Calibrated on this demo's ~162px
+ * comments, 2500px is about fifteen rows a side. On a list of 20px chips the same constant is a
+ * hundred and twenty-five, for a list whose rows were never the expensive part.
+ *
+ * So the default is whichever is smaller. A caller who states `buffer` outright is not second
+ * guessed — this bounds the number nobody chose. `MAX_LOOKAHEAD` is capped for the same reason
+ * and cites the same incident: an unbounded mounted range once put 7,798 rows on screen in a
+ * single frame.
+ */
+const MAX_DEFAULT_BUFFER_ROWS = 24
 
 /**
  * How long a scroll sample stays evidence of motion.
@@ -704,24 +719,34 @@ export function createEngine(initial: EngineOptions): Engine {
         const instant = (offset - velocityOffset) / elapsed
         // An equal-weight EMA: enough to absorb one anomalous frame, short enough that the band
         // is already wide two frames into a fling rather than half way through it.
-        velocity = velocity === 0 ? instant : (velocity + instant) / 2
+        //
+        // The first sample of a gesture is halved rather than taken whole, because otherwise the
+        // one reading this smoothing exists to distrust — the opening frame, where a stall and a
+        // fling look identical — would be the one reading that skipped it. And by measurement,
+        // gesture onset is where every blank frame lands.
+        velocity = velocity === 0 ? instant / 2 : (velocity + instant) / 2
       }
     }
     velocityOffset = offset
     velocityAt = at
+    lead = Math.min(Math.abs(velocity) * LOOKAHEAD_MS, MAX_LOOKAHEAD)
   }
 
   /**
-   * How far past the visible band to mount, on the leading side only.
+   * How far past the visible band to mount, on the leading side only. Zero at rest.
    *
-   * Zero at rest, and zero once samples stop arriving, so nothing here costs a row until the
-   * reader is actually moving.
+   * Computed when a sample arrives rather than when it is read, and the difference is not
+   * bookkeeping: `publish` is not once per frame — during a fling it runs once per newly
+   * mounted row whose measurement differs from its estimate, which is very nearly all of them —
+   * so a clock read here would be ten to thirty `performance.now()` calls per frame of the one
+   * gesture this exists for. It is cleared when the scrolling settles, so the extra rows are
+   * given back eagerly instead of surviving until whatever publishes next.
    */
-  const lookahead = (): number => {
-    if (velocity === 0) return 0
-    if (now() - velocityAt > VELOCITY_IDLE_MS) return 0
-    return Math.min(Math.abs(velocity) * LOOKAHEAD_MS, MAX_LOOKAHEAD)
-  }
+  let lead = 0
+
+  /** {@link DEFAULT_BUFFER}, bounded by {@link MAX_DEFAULT_BUFFER_ROWS} rows of the current estimate. */
+  const defaultBuffer = (): number =>
+    Math.min(DEFAULT_BUFFER, MAX_DEFAULT_BUFFER_ROWS * cache.estimate)
 
   const writePaintOffset = (): void => {
     const next = carry + pendingShift
@@ -779,12 +804,13 @@ export function createEngine(initial: EngineOptions): Engine {
     const visible = g.visibleBand(contentAt)
     // Extended on the leading side only. Rows behind the reader are already measured and about to
     // leave; the ones the compositor is scrolling toward are the ones nothing has mounted yet.
-    const buffer = options.buffer ?? DEFAULT_BUFFER
-    const lead = lookahead()
-    const buffered =
-      velocity < 0
-        ? g.bufferedBand(contentAt, buffer + lead, buffer)
-        : g.bufferedBand(contentAt, buffer, buffer + lead)
+    const buffer = options.buffer ?? defaultBuffer()
+    const upward = velocity < 0
+    const buffered = g.bufferedBand(
+      contentAt,
+      buffer + (upward ? lead : 0),
+      buffer + (upward ? 0 : lead),
+    )
 
     // The pinned scroll target is deliberately *not* unioned in here. Widening the
     // contiguous span to reach a distant target mounts every item in between: a smooth
@@ -1658,12 +1684,28 @@ export function createEngine(initial: EngineOptions): Engine {
      * Over the rendered range only, which is tens of rows and only while a programmatic scroll
      * is converging. The scroller bounds the wait, so a row that never reports cannot hang it.
      */
-    hasPendingMeasurement() {
+    hasPendingMeasurement(destination) {
+      const mountedButUnmeasured = (index: number): boolean => {
+        if (index < 0 || index >= cache.length || cache.isMeasured(index)) return false
+        const key = cache.keyAt(index)
+        return key !== undefined && surface.hasItem(key)
+      }
+      // The destination explicitly, and first. `itemsFor` mounts it as a segment of its own
+      // rather than widening the contiguous span to reach it — the comment on `computeRanges`
+      // explains why, and the consequence here is that the row whose height decides the landing
+      // is the one row `lastRendered` does not name. Scanning only the range left the defect
+      // this predicate exists for entirely invisible.
+      // The destination is tested on measurement alone, without asking whether it is mounted.
+      // The scroller pins it, so it is about to be — and the window it is being aimed into may
+      // have been replaced a frame ago, which is exactly when the surface has not yet been told
+      // about the row and the cache still holds an estimate for it. Requiring `hasItem` here
+      // made the predicate answer "nothing pending" in the one situation it exists for.
+      if (destination >= 0 && destination < cache.length && !cache.isMeasured(destination)) {
+        return true
+      }
       const [from, to] = lastRendered
       for (let index = from; index <= to; index++) {
-        if (cache.isMeasured(index)) continue
-        const key = cache.keyAt(index)
-        if (key !== undefined && surface.hasItem(key)) return true
+        if (mountedButUnmeasured(index)) return true
       }
       return false
     },
@@ -1876,10 +1918,6 @@ export function createEngine(initial: EngineOptions): Engine {
           // reporting an input to the answer rather than the answer.
           if (DEBUG) trace('scroll.sample', () => ({ offset, carry, shift: pendingShift }))
 
-          // After the trace, so the stamp above still measures delivery rather than this; before
-          // the publish below, which is what reads the velocity to size the mounted band.
-          sampleVelocity(offset)
-
           scroller.notifyScroll(offset)
 
           // The anchor records where the view *is*, so it follows every intentional
@@ -1889,6 +1927,11 @@ export function createEngine(initial: EngineOptions): Engine {
           // anchor and undo the carry.
           const restoreIndex = restoreIntents.findIndex((value) => isSelfWrite(offset, value))
           if (restoreIndex === -1) {
+            // Inside this branch deliberately: it is the one that has already established the
+            // event was the reader moving rather than our own anchor restore reading back. A
+            // several-hundred-pixel corrective write sampled as reader velocity would widen the
+            // band in response to the library's own correction.
+            sampleVelocity(offset)
             // From where the content visually *is*: the offset the platform accepted plus the
             // carry compensating for the fraction it refused. `carryFor` is `desired - actual`,
             // so their sum is the position we asked for.
@@ -1950,7 +1993,17 @@ export function createEngine(initial: EngineOptions): Engine {
        * soon as the platform says the scrolling is over, rather than a further
        * quiet window later.
        */
-      cleanups.push(onScrollSettled(viewport, repin))
+      cleanups.push(
+        onScrollSettled(viewport, () => {
+          // Give the lookahead's extra rows back as soon as the platform says the scrolling is
+          // over, rather than leaving them mounted until whatever publishes next. `lead` is only
+          // ever recomputed by a scroll sample, so without this a fling's last value outlives the
+          // fling.
+          lead = 0
+          velocity = 0
+          repin()
+        }),
+      )
 
       const onPageHide = (): void => {
         // The only reliable unload hook: report anything visible but not yet

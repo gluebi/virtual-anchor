@@ -158,7 +158,7 @@ export async function installPerf(page: Page): Promise<void> {
      * real, constant, and about the wrong thing.
      *
      * The spans are sorted rather than trusted in DOM order. Rows are absolutely positioned by
-     * `surface.ts`, and `itemsFor` (`engine.ts:687`) deliberately mounts the pinned destination
+     * `surface.ts`, and `itemsFor` in `engine.ts` deliberately mounts the pinned destination
      * and the focus-held row as *separate segments* outside the contiguous range — so document
      * order is not guaranteed to be top-to-bottom, and a sweep that assumed it would report a
      * gap that is not there.
@@ -247,7 +247,7 @@ export async function installPerf(page: Page): Promise<void> {
        * listener on `document` runs before any listener on the target. So the first listener
        * stamps the moment dispatch began, and a listener registered on the scroller *after* the
        * library's runs once the library's has returned. The difference is the engine's per-event
-       * cost: `engine.ts:1717`'s handler and the `publish()` it ends with.
+       * cost: `engine.ts`'s scroll handler and the `publish()` it ends with.
        *
        * **Ordering is the whole contract, and it is why this cannot be armed from
        * `addInitScript`.** Target-phase listeners fire in registration order, so this must be

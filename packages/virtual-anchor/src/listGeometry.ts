@@ -218,16 +218,18 @@ export class ListGeometry {
   }
 
   /**
-   * {@link visibleBand} grown for mounting: `back` px above it and `ahead` px below.
+   * {@link visibleBand} grown for mounting: `before` px above it and `after` px below.
    *
-   * Asymmetric, because the two directions are not the same problem. Rows behind the reader have
-   * already been measured and are about to leave; rows ahead are the ones the compositor is
-   * scrolling toward, and it does not wait for the main thread to mount them. `ahead` defaults to
-   * `back` so a caller with no opinion gets the symmetric band this had before.
+   * Asymmetric, because a caller mounting for a moving reader wants more on the side being
+   * scrolled toward — the compositor gets there without waiting for the main thread to mount it.
+   *
+   * Named for the axis, not for the reader: which side is "ahead" depends on which way they are
+   * going, so a parameter called that is read backwards half the time. `after` defaults to
+   * `before`, so a caller with no opinion gets the symmetric band this had before.
    */
-  bufferedBand(scrollOffset: number, back: number, ahead = back): Band {
+  bufferedBand(scrollOffset: number, before: number, after = before): Band {
     const band = this.visibleBand(scrollOffset)
-    return { start: band.start - back, end: band.end + ahead }
+    return { start: band.start - before, end: band.end + after }
   }
 
   /**

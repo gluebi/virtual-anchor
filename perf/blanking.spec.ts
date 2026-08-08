@@ -8,11 +8,12 @@
  * ## The mechanism
  *
  * The browser scrolls on the **compositor** thread; the set of mounted rows is recomputed on the
- * **main** thread from a scroll event. Overscan buys the main thread time — `DEFAULT_BUFFER = 400`
- * px either side, `engine.ts:158` — and it is a fixed number of pixels, not adaptive to velocity.
- * At 60 Hz, a scroll of 24,000 px/s covers 400 px in a single frame, so one frame of main-thread
- * latency is all the budget there is; beyond that the compositor is presenting a region no row
- * has been mounted for.
+ * **main** thread from a scroll event. Overscan is what buys the main thread time, and it is a
+ * distance — `DEFAULT_BUFFER` in `engine.ts` — while what has to be covered is *latency*. The
+ * pixels a given latency costs depend entirely on how fast the content is moving, so for any
+ * fixed buffer there is a speed that spends the whole of it inside one frame; past that the
+ * compositor is presenting a region no row has been mounted for. This measures where that speed
+ * is, which is the only thing a number for the buffer can honestly be chosen against.
  *
  * ## Why a wheel gesture will not show it, and a fling will
  *
