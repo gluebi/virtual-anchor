@@ -29,6 +29,24 @@ import type { Viewport } from './viewport.js'
  * the gap after a prepend.
  */
 const MODEL_QUIET_MS = 150
+
+/**
+ * How long into a scroll a pending measurement may still hold the landing back.
+ *
+ * A cut-off on the age of the whole scroll, not a timer that starts when the wait does — which
+ * is the useful shape: the race this closes is a `ResizeObserver` delivery for a row that has
+ * just mounted, one or two frames after the scroll begins, so anything still unmeasured well
+ * past that is not arriving.
+ *
+ * Bounded rather than absolute because "never measured" is a legitimate state: a caller can aim
+ * at a row the list will not mount, and waiting indefinitely would turn a landing that used to
+ * report `converged` into one that reports `deadline` five seconds later. Past this the model is
+ * as good as it is going to get, and converging against it is the honest answer.
+ *
+ * The same 150ms as {@link MODEL_QUIET_MS}, and for the same reason: it is the window in which
+ * the model is still expected to move.
+ */
+const MEASURE_GRACE_MS = 150
 /**
  * Longest step the smooth approach will integrate over.
  *
@@ -82,6 +100,18 @@ export interface ScrollerOptions {
    * starts.
    */
   requestRange?: (startIndex: number, endIndex: number) => void
+  /**
+   * Whether a row is mounted but not yet measured, so its real height is still coming.
+   *
+   * The scroller cannot answer this from the cache alone: an unmeasured row is either one whose
+   * `ResizeObserver` delivery is a frame away, or one the list will never mount at all, and the
+   * two want opposite treatment. Only the engine knows which, because only the engine knows what
+   * is on screen.
+   *
+   * Optional, and absent means "nothing is pending" — a caller driving the scroller directly is
+   * not running a surface for it to ask about.
+   */
+  hasPendingMeasurement?: () => boolean
   /** Notified when a programmatic scroll starts and stops. */
   onScrollingChange?: (scrolling: boolean) => void
   /**
@@ -221,6 +251,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     getGeometry,
     applyCarry,
     requestRange,
+    hasPendingMeasurement,
     onScrollingChange,
     now = () => performance.now(),
   } = options
@@ -690,6 +721,27 @@ export function createScroller(options: ScrollerOptions): Scroller {
     const tolerance = convergenceTolerance(viewport.getDevicePixelRatio())
     const targetMoved = Math.abs(target - current.lastTarget) > tolerance
 
+    /**
+     * Whether the model is still learning the heights the landing is computed from.
+     *
+     * Every offset a landing aims at is a sum of row heights, so declaring arrival while any row
+     * on screen is still an estimate is declaring it against a model that is about to change.
+     * The loop then agrees perfectly with a target that is simply wrong: it writes the offset the
+     * model asked for, reads back the offset it wrote, and reports `deviation: 0` because the
+     * model and the offset agree with each other while both disagree with the DOM.
+     *
+     * Measured on the demo: comment #137 estimates at 162px (`56 + 2 * 53`) and measures 141.
+     * Landing before that arrives is out by the 21px difference — none of it for `start`, half
+     * for `center`, all of it for `end` — which is exactly the -1.25 / -11.75 / -22.25 the
+     * accuracy matrix reported while every landing claimed to have converged. See #67.
+     *
+     * Asked of the engine rather than read from the cache, because an unmeasured row is either
+     * one whose delivery is a frame away or one the list will never mount, and only the surface
+     * can tell those apart. The fast path in `scrollToKey` already refuses to shortcut an
+     * unmeasured list on the same reasoning.
+     */
+
+
     // Arrival is judged on where the content *appears*, not on the raw scroll
     // offset. Both compensations move it there: the carry is what makes the visual
     // position exact on an engine that will not accept a fractional offset — on WebKit
@@ -716,6 +768,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
         actual,
         remaining,
         arrived,
+        awaitingMeasurement: hasPendingMeasurement?.() ?? false,
         targetMoved,
         quiet,
         settledExternally,
@@ -724,7 +777,16 @@ export function createScroller(options: ScrollerOptions): Scroller {
       })
     }
 
-    if (!targetMoved && arrived && quiet) {
+    // The age test first, so the scan below costs nothing for the rest of the scroll: it walks
+    // the rendered range, which the larger default buffer made about six times longer, and its
+    // answer can only matter inside the grace.
+    //
+    // Named for what it is rather than what it wishes: past the grace the heights are not known,
+    // the loop has simply stopped waiting for them.
+    const heightsSettled =
+      elapsed > MEASURE_GRACE_MS || !(hasPendingMeasurement?.() ?? false)
+
+    if (!targetMoved && arrived && quiet && heightsSettled) {
       current.stableFrames++
       if (current.stableFrames >= STABLE_FRAMES) {
         // Converged at tolerance; commit the exact float so the landing is not

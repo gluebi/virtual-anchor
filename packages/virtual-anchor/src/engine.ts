@@ -1525,6 +1525,28 @@ export function createEngine(initial: EngineOptions): Engine {
           : [Math.max(0, startIndex - 1), Math.min(cache.length - 1, endIndex + 1)]
       publish('none')
     },
+    /**
+     * Is any row on screen still waiting to be measured.
+     *
+     * Answered here because the scroller cannot: an unmeasured row is either one whose
+     * `ResizeObserver` delivery is a frame away or one the list will never mount, and only the
+     * surface knows which. Every offset the landing is computed from is a sum of row heights, so
+     * a landing declared while any of them is still an estimate is a landing against a model
+     * that is about to change — which is #67, and why it reported `deviation: 0` while sitting
+     * 22px away.
+     *
+     * Over the rendered range only, which is tens of rows and only while a programmatic scroll
+     * is converging. The scroller bounds the wait, so a row that never reports cannot hang it.
+     */
+    hasPendingMeasurement() {
+      const [from, to] = lastRendered
+      for (let index = from; index <= to; index++) {
+        if (cache.isMeasured(index)) continue
+        const key = cache.keyAt(index)
+        if (key !== undefined && surface.hasItem(key)) return true
+      }
+      return false
+    },
     onUserInput() {
       // Recorded, not acted on. The scroll event that follows is where the
       // decision happens, because only then is there a position to judge.
