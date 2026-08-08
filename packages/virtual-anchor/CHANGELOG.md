@@ -1,5 +1,328 @@
 # virtual-anchor
 
+## 0.7.0
+
+### Minor Changes
+
+- 0ba0678: Instrument the fling, and make the instrumentation free when it is off.
+
+  This ships measurement, **not a fix**. A fling on iOS jumps, stutters and sometimes stops
+  abruptly while slow scrolling is perfect, and the reason it was not already diagnosed is that
+  every tool for diagnosing it was broken in a different way. Four of those, each verified against
+  the source or the shipped artifact rather than reasoned about:
+
+  **The instrumentation was compiled out of the build under test.** `TRACING` was
+  `process.env.NODE_ENV !== 'production'`, and a phone is served a production build. `setTraceSink`
+  returned `false`, the demo's overlay printed "tracing is compiled out of this build", and there
+  was nothing to read. Running a dev server instead is not the answer: dev-mode React and
+  `StrictMode`'s double invoke are themselves a source of jank, which makes them a confound when
+  the symptom _is_ smoothness.
+
+  **`deferred` meant _wanted_, not _did_.** In `writeScroll` the flag was computed, and traced,
+  before the test that decides whether the write actually happens — `Math.abs(held) <= room`, forty
+  lines further down. So a correction that escaped because the bank's bound fired was recorded as
+  `deferred: true`, and the demo's on-device readout printed it as `DEFER`. That readout's own
+  comment said the case was "worth naming rather than leaving to be inferred from a WRITE among
+  DEFERs", and then named it as its opposite — while it is the leading suspect for the abrupt stop.
+  `scroll.write` now carries `reason` (`held`, `gate-open`, `model`, `no-room`) and `took`, keyed on
+  the _gate_ rather than on the intent. Keying on intent is not merely less informative but wrong:
+  `deferred` is already `false` for a model change, so a prepend overriding a shut gate reported
+  `gate-open` and looked like an ordinary write on an idle platform. The type checker caught that as
+  an impossible comparison.
+
+  **There was a second writer, entirely untraced.** `scroller.ts` writes `scrollTop` and emitted
+  nothing; `scroll.step` says the convergence loop _ran_, which is not the same claim. The overlay
+  filtered on `scroll.write`, the engine's door. Every conclusion of the form "no write escaped
+  during that gesture" was drawn from half the writers. It now emits `scroll.commit`, plus
+  `scroll.park`, `wake` and `flush`, which together make "the parked loop woke and wrote during
+  momentum" legible.
+
+  **And the instrument perturbed the experiment.** The `scroll.write` thunk called
+  `contentOffset()` and then `getScrollOffset()` twice more inside `room` — three forced synchronous
+  layouts per traced write, in a thunk that runs after `publish` has written styles, on the hottest
+  path in the library. On a gesture this file's own comments record at 43 deferrals, that is 129
+  layouts that existed only because someone was watching. The values are now hoisted and the thunk
+  reads nothing.
+
+  Four more of the same kind went with it, three of them found by reviewing this change rather than
+  the code it replaced. `anchor.restore` and `measure.batch` dropped their `scrollOffset` field, which
+  `scroll.sample` now reports at higher fidelity anyway. `scroll.start` had one inside its thunk, and
+  the write two lines below it read the same value again. And the new `scroll.commit` had reintroduced
+  the defect in the sibling module: once per convergence frame, and once on the gate-open path — which
+  runs immediately after a style write, making it a _guaranteed_ forced layout at the exact moment a
+  fling ends. `write()` now takes the offset its caller already holds. An engine-level test asserts
+  that a traced measurement performs the same number of scroll-offset reads as an untraced one.
+
+  `reconcileGestureShift` — the fold of a banked correction back into `scrollTop`, and the most
+  plausible cause of a visible jump — emitted nothing at all. Worth knowing when reading a trace:
+  the fold _is_ a `scrollTop` write, and it is deliberately not a `scroll.write`, because it is not a
+  correction — it is a correction already taken being converted from a paint offset back into a real
+  offset. Three topics therefore account for every write the library makes: `scroll.write` from the
+  engine, `scroll.commit` from the scroller, and `gesture.fold`. An e2e assertion reconciles all three
+  against a patched `scrollTop` setter, which is what stops the trace from quietly disagreeing with
+  the platform.
+
+  The event carries `clamped`, which tests an invariant the function's own doc comment asserts cannot
+  be violated: `room` was checked per deferral against an offset the fling has since moved, so by the
+  time the fold lands its target may sit past the maximum. Precisely because the invariant is asserted
+  in prose, nothing would have reported it broken.
+
+  Also new: `scroll.sample` (every scroll event, stamped at _delivery_, so the inter-arrival gap is
+  not contaminated by the handler's own duration), `paint.offset` (which of the two addends moved the
+  container), `gate.attach` (emitted _before_ the off-iOS early return, because otherwise "the gate
+  stayed idle" and "there is no gate on this platform" are the same observation — and off iOS every
+  correction writes unconditionally), `measure.done` with a duration, and `layout.signature`, whose
+  strings name which term moved and so separate a URL bar collapsing from a webfont landing.
+
+  ### What is new for a consumer
+
+  `addTraceListener(fn)` returns an unsubscribe and composes, so your own listener and the debug
+  overlay can coexist. `setTraceSink` is unchanged in signature, return value and replace-the-last
+  semantics; it simply no longer evicts listeners it did not install, which no correct caller could
+  have depended on. The demo was the proof that one slot was not enough: it installed a ring buffer
+  and then replaced it with a HUD that re-implemented the buffer by hand.
+
+  `virtual-anchor/debug` is a new entry point — a trace recorder, a frame probe, a touch probe, an
+  on-page readout, and a **pure** `analyzeGestures` that ranks the ways a fling is known to be able
+  to misbehave and says which one the recording shows. It prints a verdict to the console as each
+  gesture settles. Every hypothesis has a unit-test fixture that must produce it and a second that
+  must not; that second half caught a confident false positive during development, reporting a
+  permanent anchor displacement where the trace showed a quarter of a pixel.
+
+  `trace` is now generic over its topic, checked against a map of payload shapes. That is not
+  ceremony: the analyzer reads payloads by field name from several modules away, so a renamed field
+  would leave everything compiling and the diagnosis silently empty. Turning the map into a
+  constraint immediately found that eight emitted topics were missing from it, that `scroll.start` was
+  sending a possibly-`undefined` key where its declaration promised one, and that `frame.long` was
+  spreading in a field it never declared. The gate's `state` and `reason` are unions rather than
+  `string` for the same reason — they are what segmentation keys on.
+
+  ### What it costs when off
+
+  Less than before. The default entry is **9.7 kB** brotlied, down from 10.24 kB, and the React
+  entry 12.07 kB from 12.56 kB — because the topic strings and guards now actually vanish, where
+  previously about 2 kB of them shipped. `scripts/check-package.mjs` greps the published artifact and
+  fails the build if a single topic string survives, so the claim is enforced rather than stated.
+
+  The reason it did not work before is worth recording, because a doc comment in this package
+  asserted the opposite and a reader may have relied on it. It blamed minifiers for not propagating a
+  module-level constant across modules. What actually happens is narrower: esbuild's bundler prints
+  every top-level `const` as `var`, so the shipped chunk read
+  `var TRACING = process.env.NODE_ENV !== "production"` and a `var` is not a constant. The const-ness
+  was destroyed by this package's own build, before any consumer's minifier saw the file — so no
+  consumer-side configuration could ever have recovered it, and the fold has to happen here.
+  `minifySyntax` in `tsup.config.ts` is what enables it, and it costs nothing in readability because
+  the existing Rollup pass re-prints.
+
+  `virtual-anchor/debug` ships only if imported, so a consumer who never writes that import ships
+  none of it. Both facts have size budgets in CI.
+
+  ### Turning it on
+
+  Off by default. To keep the instrumentation in a _production_ build, resolve the new `development`
+  export condition — one line of resolver config, and the README has it per bundler. Your app stays a
+  production build: React 19 ships no `development` condition, so nothing about this flips React.
+
+  The published tarball grows, because two builds ship: 412 kB, of which `dist/dev` is 668 kB of the
+  1,464 kB unpacked — mostly source maps. That is a download-once cost for whoever installs the
+  package; what a consumer _bundles_ went down, which is the number in the section above.
+
+  An export condition rather than an alias, deliberately: a condition switches the whole export map
+  at once, so the package cannot be half-switched into two module instances — which is the same
+  hazard the ESM-only decision exists to prevent, since the trace sink is module state.
+
+  ### What it found
+
+  Two defects, both on a real device, both fixed in the two changes stacked on top of this one: the
+  momentum gate's
+  ceiling cutting off every fling longer than three seconds, and a model change during momentum
+  writing the fling's own lag. Neither was the mechanism predicted before there was any data — that
+  was `overscroll-write`, which never fired once. The second was found by a consumer reading a
+  recording this produced, which is the case the toolkit was built for.
+
+  `overscroll-write` remains ranked and unobserved: `writeScroll` consults `writeGate.canWrite()` but
+  never `writeGate.isActive()`, whose only caller is the scroller, so nothing applies the rubber-band
+  refusal on the engine's path. It stays in the table because the reasoning still holds and the signal
+  is now recorded if it ever happens.
+
+- 9ec925e: Stop a hard fling putting blank frames on screen.
+
+  The symptom, reported from use and then reproduced: scroll fast enough and the content
+  disappears — empty space where rows should be, filling in once the gesture slows. The mechanism
+  is a race that is always present and only sometimes visible. The browser scrolls on the
+  **compositor** thread; the mounted range is recomputed on the **main** thread from a scroll
+  event. Overscan buys the main thread time, and it was a fixed 400 px, so at 60 Hz a scroll of
+  24,000 px/s spent the entire buffer within a single frame of latency. Past that the compositor is
+  presenting a region no row has been mounted for.
+
+  **The default buffer is now 2500 px, and the number is measured rather than argued.**
+  `perf/blanking.spec.ts` counts blank composited frames directly — through a screencast, because
+  the obvious instrument cannot see this at all. A `requestAnimationFrame` probe runs _after_ the
+  scroll handler in the same frame, so it only ever observes a world the handler has already made
+  consistent; it reports ~2% for gestures that visibly blank. On the demo at 40,000 px/s:
+
+  | buffer | blank frames at 20x CPU | headroom at 20x CPU             |
+  | ------ | ----------------------- | ------------------------------- |
+  | 400    | 13 of 79                | 42 fps, 8.2 ms per scroll event |
+  | 1200   | 11 of 81                | 33 fps, 12.7 ms                 |
+  | 2500   | 3 of 78                 | 32 fps, 14.3 ms                 |
+
+  1200 is dominated — nearly all of the cost, almost none of the benefit. At 1x and 6x emulated CPU
+  2500 costs nothing measurable (60 fps, 0.2 ms per scroll event) and removes the blanking; the
+  headroom it spends appears only past 10x, where frames are being dropped regardless. `buffer` is
+  still yours to set if you want the old trade.
+
+  Mounting is now also **asymmetric**: the band extends further in the direction of travel, by the
+  distance the content will cover in the next 50 ms, capped at 2000 px and decaying to nothing once
+  scrolling stops. It costs no rows at rest.
+
+  Worth recording that this second part is _not_ what fixed the blanking, because the obvious story
+  about it is wrong. Every blank frame lands in the first few per cent of a gesture — at onset,
+  where two samples have not yet arrived and the velocity is therefore zero. A lookahead derived
+  from velocity is necessarily nothing at exactly the moment it is wanted, and switching it on alone
+  changed the count not at all: 13 blank frames of 79 at a 20x slowdown, before and after. What
+  fixed it was having the rows _already mounted_ before the finger moved, which only a larger
+  resting buffer can do. The lookahead is kept because it is cheap where the buffer is expensive —
+  on top of it, the 20x count went from 5 to 3 and the 1x count from 1 to 0.
+
+  Measured after the change: 10.03 kB for the core entry and 12.35 kB with the React adapter,
+  minified and brotlied. Both size budgets move up to match. The README's stated figures were
+  already behind the budgets they claim cannot drift — 9.38 and 11.65 against limits of 9.9 and
+  12.2 — so they now say what the build actually produces rather than what it produced some
+  releases ago.
+
+### Patch Changes
+
+- 9ec925e: Stop reporting a landing as converged against heights the list has not measured.
+
+  `scrollToKey` could resolve `{ settled: true, reason: 'converged', deviation: 0 }` while sitting
+  22px from where it was asked to go. The accuracy matrix caught it in a paged window: comment #137
+  off by 1.25px for `align: 'start'`, 11.75px for `'center'` and 22.25px for `'end'`.
+
+  That progression is the diagnosis rather than three separate faults. #137 estimates at 162px and
+  measures 141, and the error is none of the 21px difference for `start`, half for `center` and all
+  of it for `end` — which is how much of a row's height each alignment puts on screen. The landing
+  was computed against the estimate.
+
+  The cause is one line, and it is a counting argument. `scrollToKey` has a fast path that skips
+  the convergence loop when the destination is already in place, guarded by
+  `cache.measuredCount === cache.length`. A count cannot say _which_ rows were measured. The cache
+  keeps sizes by key across a change of loaded window — deliberately, because keys outlive
+  windows — so after the window moves it can hold as many measurements as there are items while
+  every item now on screen is freshly mounted and still an estimate. The guard read that as fully
+  measured, took the shortcut, and resolved.
+
+  Nothing downstream could notice. The write puts the offset the model asked for, reads back the
+  offset it wrote, and finds them equal — so `deviation` is zero. It measures the scroller's
+  consistency with itself, not where the row is.
+
+  The guard now also asks whether anything is still awaiting measurement, which a count cannot
+  answer and the size cache cannot either: an unmeasured row is either one whose `ResizeObserver`
+  delivery is a frame away or one the list will never mount, and only the surface can tell those
+  apart. The engine answers it — the destination first, because `itemsFor` mounts the pinned
+  destination as its own segment rather than widening the contiguous span, so the one row whose
+  height decides the landing is the row the rendered range does not name.
+
+  `scroll.step` gains `awaitingMeasurement`, because the defect is invisible in every other field:
+  a loop converging against estimates reports `arrived: true` and `remaining: 0`, and is otherwise
+  indistinguishable from one that landed correctly.
+
+- a22a5e2: Stop a model change during momentum writing the fling's own lag.
+
+  A `'model'` restore — `setOptions` with new keys, a gap, an estimate or geometry — overrides
+  the write gate, which is right for a prepend and wrong for anything that leaves the reader
+  where they are. When one landed during an iOS fling, the engine wrote `scrollTop` even though
+  the change had displaced nothing, and what it wrote was not a correction at all: it was the
+  distance the fling had travelled since the last scroll event.
+
+  The cause is a coordinate-space mismatch between two lines. `resolveAnchorOffset(anchor, …)`
+  answers _where the content was at the last scroll event_, because that is when the anchor was
+  last derived. `writeScroll` compares it against `contentOffset()` read _now_. During momentum
+  those are never equal, so
+
+  ```
+  delta = (what the model change displaced) − (travel since the last scroll event)
+  ```
+
+  On the device recording that found this, the first term was zero — 500 items appended _below_
+  the reader, `firstKey` unchanged, the anchor byte-identical before and after — and the second
+  was 7px. So `-7` was written, clearing the `0.01` no-op guard, nudging the reader backwards to
+  a stale offset and cancelling a fling with about a second and 250px of travel still in it.
+
+  Now the displacement is taken where it is knowable — the anchor's resolved offset before the
+  change versus after it, captured at the top of `setOptions` before the merge and before any
+  cache mutation — and applied to wherever the content has since got to:
+
+  ```ts
+  target = contentOffset() + (restored - priorAnchorOffset);
+  ```
+
+  Both terms of the subtraction are content-space, so an outstanding carry or paint offset
+  cancels out rather than having to be reasoned about. When the content is still the anchor is in
+  sync, `contentOffset() === priorAnchorOffset`, and the target is bit-identical to before — the
+  two forms diverge only while the content is moving under the write, which is the case being
+  fixed. A displacement of zero then falls inside the existing no-op threshold, so "changed
+  nothing, wrote nothing" needs no branch of its own. Cost is one Fenwick prefix sum per
+  `setOptions`, O(log n).
+
+  This also fixes a case the report predicted but could not observe: a real prepend landing
+  mid-fling was writing `inserted height − travel`. Measured in a unit test, a 1000px prepend
+  with 7px of lag wrote **993**; it now writes 1000, and the same prepend with and without lag
+  produces an identical correction.
+
+  Covered by unit tests for the append (writes nothing), the prepend (writes its real height,
+  twice, with and without lag), an outstanding banked paint offset, an anchored key the change
+  removes, and the off-iOS path where the gate is inert and nothing should change. Plus an
+  end-to-end test in real WebKit that pages 200 items in mid-fling and asserts no write and that
+  scroll events keep arriving — which fails without the fix.
+
+  Fixes #54. Reported against the unreleased instrumentation branch by a consumer, diagnosed from a
+  `virtual-anchor/debug` recording, and confirmed by reverting the fix under both suites.
+
+  Uncovered by #53: under the old momentum ceiling the same fling was already being killed 326ms
+  earlier, so this never got the chance to show.
+
+- 78f6dcf: Stop the momentum gate cutting off flings longer than three seconds.
+
+  `MOMENTUM_MAX_MS` was armed once at momentum onset and fired 3000ms later regardless of what
+  else had happened. Its own doc called it "a safety valve, not a duration" — but on a
+  twelve-thousand-row thread it was not a safety valve, it was the common case. Measured on an
+  iPhone, the correlation with fling duration is exact:
+
+  | fling                                | outcome |
+  | ------------------------------------ | ------- |
+  | 837ms, 2266ms                        | settled |
+  | 3032, 3251, 3782, 4504, 4721, 8467ms | **cap** |
+
+  And firing mid-fling does precisely what the gate exists to prevent. `canWrite()` starts
+  answering `true` again with the fling still running, the next measurement writes `scrollTop`,
+  and WebKit cancels the momentum — which is the "stops abruptly, sometimes" the whole mechanism
+  was built for. On the worst recordings three or four writes landed in the moments after the
+  cap fired.
+
+  The timer is now re-armed by every scroll event during momentum, making it an inactivity
+  watchdog — and inactivity is the right predicate for the thing it actually guards against. A
+  fling still delivering two hundred scroll events is self-evidently not a wedged gate; three
+  seconds of silence is. Renamed `MOMENTUM_IDLE_MS`, because a constant that changes meaning
+  while keeping its name is a trap.
+
+  Three seconds of _silence_ rather than something tighter, because a blocked main thread can
+  stop delivering scroll events without the fling being over: the worst gaps measured were 205ms
+  on a device and 202ms on a simulator. The window has to clear that comfortably or the watchdog
+  re-creates the bug it fixes.
+
+  The old note that this sat "deliberately below the scroller's `HARD_DEADLINE_MS` of 5000" no
+  longer applies, and was already obsolete before this change: the convergence loop suspends its
+  deadline clock while parked, so a longer gate-shut window costs a programmatic scroll nothing.
+
+  Verified on a device — the same upward flings that previously reported `cap` at 3032ms now run
+  to `settled` at 3354ms and 3355ms with no suspect at all, folding 1044px and 1178px of banked
+  correction cleanly at the end. Covered by three unit tests (an eight-second fling is not
+  capped; a fling that goes quiet still reopens the gate; a 250ms stall does not trip it) and an
+  end-to-end test in real WebKit.
+
+  Fixes #53. Found with `virtual-anchor/debug`.
+
 ## 0.6.1
 
 ### Patch Changes
