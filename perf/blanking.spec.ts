@@ -74,6 +74,8 @@ interface Finding {
   minRatio: number
   frameCount: number
   blankShots: number
+  /** Where the blank frames fell, as a share of the way through the gesture. */
+  blankAt: number[]
 }
 
 const findings: Finding[] = []
@@ -148,6 +150,9 @@ for (const throttle of THROTTLES) {
         minRatio: ratios.reduce((least, ratio) => Math.min(least, ratio), Infinity),
         frameCount: ratios.length,
         blankShots: ratios.filter((ratio) => ratio <= blankThreshold).length,
+        blankAt: ratios
+          .map((ratio, index) => (ratio <= blankThreshold ? index / ratios.length : -1))
+          .filter((position) => position >= 0),
       })
     })
   }
@@ -162,7 +167,7 @@ test.afterAll(() => {
       `${`${String(finding.throttle)}×`.padEnd(6)} ${String(finding.speed).padEnd(12)} ` +
       `${String(Math.round(finding.travelPx)).padEnd(11)} ${`${finding.worstFrameMs.toFixed(0)} ms`.padEnd(13)} ` +
       `${`${finding.probeBlankPct.toFixed(0)}%`.padEnd(19)} ${finding.minRatio.toFixed(2).padEnd(16)} ` +
-      `${String(finding.blankShots)}/${String(finding.frameCount)}`,
+      `${String(finding.blankShots)}/${String(finding.frameCount)}  at ${finding.blankAt.map((p) => `${(p * 100).toFixed(0)}%`).join(',') || '-'}`,
   )
 
   // eslint-disable-next-line no-console -- the report is the point of the run
