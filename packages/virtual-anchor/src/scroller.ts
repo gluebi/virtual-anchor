@@ -31,23 +31,6 @@ import type { Viewport } from './viewport.js'
 const MODEL_QUIET_MS = 150
 
 /**
- * How long into a scroll a pending measurement may still hold the landing back.
- *
- * A cut-off on the age of the whole scroll, not a timer that starts when the wait does — which
- * is the useful shape: the race this closes is a `ResizeObserver` delivery for a row that has
- * just mounted, one or two frames after the scroll begins, so anything still unmeasured well
- * past that is not arriving.
- *
- * Bounded rather than absolute because "never measured" is a legitimate state: a caller can aim
- * at a row the list will not mount, and waiting indefinitely would turn a landing that used to
- * report `converged` into one that reports `deadline` five seconds later. Past this the model is
- * as good as it is going to get, and converging against it is the honest answer.
- *
- * The same 150ms as {@link MODEL_QUIET_MS}, and for the same reason: it is the window in which
- * the model is still expected to move.
- */
-const MEASURE_GRACE_MS = 150
-/**
  * Longest step the smooth approach will integrate over.
  *
  * After a stall — a background tab, a long task — the honest thing is to cover the ground
@@ -108,10 +91,15 @@ export interface ScrollerOptions {
    * two want opposite treatment. Only the engine knows which, because only the engine knows what
    * is on screen.
    *
+   * Takes the destination index, which a scan of the rendered range cannot cover: `itemsFor`
+   * mounts the pinned destination as a segment of its own rather than widening the contiguous
+   * span to reach it, so the one row whose height decides the landing is the row that range does
+   * not name.
+   *
    * Optional, and absent means "nothing is pending" — a caller driving the scroller directly is
    * not running a surface for it to ask about.
    */
-  hasPendingMeasurement?: () => boolean
+  hasPendingMeasurement?: (destination: number) => boolean
   /** Notified when a programmatic scroll starts and stops. */
   onScrollingChange?: (scrolling: boolean) => void
   /**
@@ -768,7 +756,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
         actual,
         remaining,
         arrived,
-        awaitingMeasurement: hasPendingMeasurement?.() ?? false,
+        awaitingMeasurement: hasPendingMeasurement?.(index) ?? false,
         targetMoved,
         quiet,
         settledExternally,
@@ -777,16 +765,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
       })
     }
 
-    // The age test first, so the scan below costs nothing for the rest of the scroll: it walks
-    // the rendered range, which the larger default buffer made about six times longer, and its
-    // answer can only matter inside the grace.
-    //
-    // Named for what it is rather than what it wishes: past the grace the heights are not known,
-    // the loop has simply stopped waiting for them.
-    const heightsSettled =
-      elapsed > MEASURE_GRACE_MS || !(hasPendingMeasurement?.() ?? false)
-
-    if (!targetMoved && arrived && quiet && heightsSettled) {
+    if (!targetMoved && arrived && quiet) {
       current.stableFrames++
       if (current.stableFrames >= STABLE_FRAMES) {
         // Converged at tolerance; commit the exact float so the landing is not
@@ -944,7 +923,14 @@ export function createScroller(options: ScrollerOptions): Scroller {
       // guard that event-driven implementations hang without. Frames keep coming
       // whether or not the offset changed.
       const tolerance = convergenceTolerance(viewport.getDevicePixelRatio())
-      const fullyMeasured = cache.measuredCount === cache.length
+      // `measuredCount === length` is a count, and a count cannot say *which* rows were measured.
+      // The cache keeps sizes by key across a window change, so once the loaded window moves it
+      // can hold as many measurements as there are items while the items now on screen are
+      // freshly mounted and still estimates — the state this shortcut then took for fully known,
+      // landing against an estimate and reporting `converged`. Asking the surface closes it, and
+      // is the same predicate the loop below converges on.
+      const fullyMeasured =
+        cache.measuredCount === cache.length && !(hasPendingMeasurement?.(index) ?? false)
       const at = getContentOffset()
       if (!smooth && fullyMeasured && Math.abs(at - target) <= tolerance) {
         write(target, at)

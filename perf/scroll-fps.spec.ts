@@ -90,9 +90,10 @@ for (const scenario of SCENARIOS) {
 
     test(label, async ({ page }) => {
       await installPerf(page)
-      // `open` switches the demo's frame-rate readout off for every automated load — see
-      // `e2e/helpers.ts`. Nothing here needs to restate it, and an earlier version that did sent
-      // readers looking in the wrong file for the mechanism.
+      // The demo's frame-rate readout switches itself off for a driven browser, keyed on
+      // `navigator.webdriver` in `apps/demo/src/config.ts`. Nothing here needs to ask for that,
+      // and an earlier version passed `fps=0` in every query — which read as the mechanism and
+      // was not; the parameter only ever reached the pages that remembered to pass it.
       await open(page, `${scenario.query}${quiet ? '&quiet=1' : ''}`)
       // After `open`, never before: target-phase scroll listeners fire in registration order, so
       // this has to be registered behind the library's. See `measure.ts`.

@@ -249,9 +249,12 @@ test.describe('a restored size snapshot', () => {
     // snapshot is refused — restoring it would put the list confidently in the wrong place.
     await open(page, 'comment=4000&snapshot=1')
 
-    await page.evaluate((key) => {
+    // How many sizes this page measures for itself, captured before the store is poisoned. The
+    // assertion below is relative to it rather than to a literal, which is the whole of this
+    // change — see there.
+    const own = await page.evaluate((key) => {
       const snapshot = window.__list.takeSizeSnapshot()
-      if (!snapshot) return
+      if (!snapshot) return 0
       sessionStorage.setItem(
         key,
         JSON.stringify({
@@ -260,14 +263,23 @@ test.describe('a restored size snapshot', () => {
           sizes: Array.from({ length: 40 }, (_, i) => [`comment-${String(3980 + i)}`, 999]),
         }),
       )
+      return snapshot.sizes.length
     }, SNAPSHOT_KEY)
+    expect(own, 'this page measured nothing, so there is nothing to compare against').toBeGreaterThan(0)
 
     await open(page, 'comment=4000&snapshot=1')
     const measured = await page.evaluate(
       () => window.__list.takeSizeSnapshot()?.sizes.length ?? 0,
     )
-    // Only what this page measured for itself, nowhere near the 40 offered.
-    expect(measured).toBeLessThan(40)
+
+    // Only what this page measured for itself — it did not gain the 40 it was offered.
+    //
+    // This read `toBeLessThan(40)`, and the literal quietly encoded `DEFAULT_BUFFER`: how many
+    // rows a page measures for itself is how many it mounts, so raising the buffer made this
+    // page measure 40 of its own and the bound stopped separating the two cases while still
+    // reading like an assertion about snapshots. Comparing against what this same page measured
+    // a moment ago says the intended thing and cannot drift with the mounted range.
+    expect(measured).toBeLessThan(own + 40)
   })
 })
 

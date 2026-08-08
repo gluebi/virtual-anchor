@@ -46,7 +46,7 @@ export interface EngineOptions {
   estimateSize?: (index: number, key: ItemKey) => number | undefined
   defaultEstimate?: number
   gap?: number
-  /** Extra px of items mounted beyond the viewport, in each direction. */
+  /** Extra px of items mounted beyond the viewport, widened in the direction of travel. */
   buffer?: number
   geometry?: ListInsets
   /**
@@ -155,7 +155,50 @@ export interface Engine {
   dispose(): void
 }
 
-const DEFAULT_BUFFER = 400
+/**
+ * How far beyond the visible band to mount, in px, before the direction of travel widens it.
+ *
+ * **2500 rather than the 400 this was, and the number is measured rather than chosen.** The
+ * symptom is a hard fling putting blank frames on screen: the browser scrolls on the compositor
+ * thread while the mounted range is recomputed on the main thread, so anything past the buffer is
+ * a region no row has been mounted for. `perf/blanking.spec.ts` counts those frames directly, and
+ * on the demo at 40,000 px/s the buffer is the whole story:
+ *
+ * | buffer | blank frames at 20x CPU | headroom at 20x CPU |
+ * | --- | --- | --- |
+ * | 400 | 13 of 79 | 42 fps, 8.2 ms per scroll event |
+ * | 1200 | 11 of 81 | 33 fps, 12.7 ms |
+ * | 2500 | 3 of 78 | 32 fps, 14.3 ms |
+ *
+ * 1200 is dominated — nearly all of the cost, almost none of the benefit — so the real choice was
+ * between 400 and 2500. At 1x and 6x emulated CPU, 2500 costs nothing measurable (60 fps, 0.2 ms)
+ * and removes the blanking; the headroom it spends only appears past 10x, where frames are being
+ * dropped regardless. Consumers who want the old trade still have `buffer`.
+ *
+ * What made this the fix rather than the lookahead below: the blank frames all land in the *first*
+ * few per cent of a gesture, and mounting is a burst of work at exactly that moment. A larger
+ * static buffer means the rows are already there — already mounted, already measured, already
+ * positioned — before the finger moves.
+ */
+const DEFAULT_BUFFER = 2500
+
+
+
+/**
+ * Most rows the *default* buffer may mount on each side.
+ *
+ * `DEFAULT_BUFFER` is a distance, which is right for what it buys — latency times velocity is a
+ * distance — and wrong for what it costs, which is rows. Calibrated on this demo's ~162px
+ * comments, 2500px is about fifteen rows a side. On a list of 20px chips the same constant is a
+ * hundred and twenty-five, for a list whose rows were never the expensive part.
+ *
+ * So the default is whichever is smaller. A caller who states `buffer` outright is not second
+ * guessed — this bounds the number nobody chose. The incident it exists against is on record in
+ * `computeRanges`: an unbounded mounted range once put 7,798 rows on screen in a single frame,
+ * which took 103 seconds and never scrolled at all.
+ */
+const MAX_DEFAULT_BUFFER_ROWS = 24
+
 /**
  * How close to the end still counts as being at it.
  *
@@ -610,6 +653,11 @@ export function createEngine(initial: EngineOptions): Engine {
   /** Last sum handed to the surface, so an unchanged value is not re-written. */
   let paintOffset = 0
 
+
+  /** {@link DEFAULT_BUFFER}, bounded by {@link MAX_DEFAULT_BUFFER_ROWS} rows of the current estimate. */
+  const defaultBuffer = (): number =>
+    Math.min(DEFAULT_BUFFER, MAX_DEFAULT_BUFFER_ROWS * cache.estimate)
+
   const writePaintOffset = (): void => {
     const next = carry + pendingShift
     if (next === paintOffset) return
@@ -664,7 +712,7 @@ export function createEngine(initial: EngineOptions): Engine {
 
     const g = syncGeometry()
     const visible = g.visibleBand(contentAt)
-    const buffered = g.bufferedBand(contentAt, options.buffer ?? DEFAULT_BUFFER)
+    const buffered = g.bufferedBand(contentAt, options.buffer ?? defaultBuffer())
 
     // The pinned scroll target is deliberately *not* unioned in here. Widening the
     // contiguous span to reach a distant target mounts every item in between: a smooth
@@ -1538,12 +1586,28 @@ export function createEngine(initial: EngineOptions): Engine {
      * Over the rendered range only, which is tens of rows and only while a programmatic scroll
      * is converging. The scroller bounds the wait, so a row that never reports cannot hang it.
      */
-    hasPendingMeasurement() {
+    hasPendingMeasurement(destination) {
+      const mountedButUnmeasured = (index: number): boolean => {
+        if (index < 0 || index >= cache.length || cache.isMeasured(index)) return false
+        const key = cache.keyAt(index)
+        return key !== undefined && surface.hasItem(key)
+      }
+      // The destination explicitly, and first. `itemsFor` mounts it as a segment of its own
+      // rather than widening the contiguous span to reach it — the comment on `computeRanges`
+      // explains why, and the consequence here is that the row whose height decides the landing
+      // is the one row `lastRendered` does not name. Scanning only the range left the defect
+      // this predicate exists for entirely invisible.
+      // The destination is tested on measurement alone, without asking whether it is mounted.
+      // The scroller pins it, so it is about to be — and the window it is being aimed into may
+      // have been replaced a frame ago, which is exactly when the surface has not yet been told
+      // about the row and the cache still holds an estimate for it. Requiring `hasItem` here
+      // made the predicate answer "nothing pending" in the one situation it exists for.
+      if (destination >= 0 && destination < cache.length && !cache.isMeasured(destination)) {
+        return true
+      }
       const [from, to] = lastRendered
       for (let index = from; index <= to; index++) {
-        if (cache.isMeasured(index)) continue
-        const key = cache.keyAt(index)
-        if (key !== undefined && surface.hasItem(key)) return true
+        if (mountedButUnmeasured(index)) return true
       }
       return false
     },

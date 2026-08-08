@@ -324,10 +324,11 @@ describe('engine option plumbing', () => {
     const h = setup({ count: 1000 })
     const { renderedRange, visibleRange } = h.engine.store.getState()
 
-    // 800px viewport, 100px estimates, 400px default buffer either side.
+    // 800px viewport, 100px estimates, 2500px default buffer either side — so the mounted range
+    // reaches about 33 and the point stands: a window of a 1,000-item list, not the list.
     expect(visibleRange).toEqual([0, 8])
     expect(renderedRange[1]).toBeGreaterThan(visibleRange[1])
-    expect(renderedRange[1]).toBeLessThan(20)
+    expect(renderedRange[1]).toBeLessThan(40)
   })
 
   it('widens the rendered range with `buffer`', () => {
@@ -337,6 +338,48 @@ describe('engine option plumbing', () => {
     expect(wide.engine.store.getState().renderedRange[1]).toBeGreaterThan(
       narrow.engine.store.getState().renderedRange[1] + 15,
     )
+  })
+
+  it('does not shortcut a landing while the destination is still an estimate', async () => {
+    // The fast path used to key on `measuredCount === length`, which is a count and cannot say
+    // *which* rows were measured — so a window whose rows are all freshly mounted estimates read
+    // as fully known. This drives the path that asks the surface instead.
+    const h = setup({ count: 500 })
+    const result = await h.engine.scrollToIndex(120, { align: 'end' })
+    expect(result.reason === 'converged' || result.reason === 'deadline').toBe(true)
+    h.unmount()
+  })
+
+  it('bounds the default buffer in rows, not only in pixels', () => {
+    // The default is a distance, which is right for what it buys and wrong for what it costs:
+    // 2500px of 162px comments is about fifteen rows a side, and of 20px chips a hundred and
+    // twenty-five. Mounting is charged per row, so the default is whichever bound is smaller.
+    const tall = setup({ count: 5000, defaultEstimate: 400 })
+    const short = setup({ count: 5000, defaultEstimate: 20 })
+
+    const rowsOf = (h: Harness): number => {
+      const { renderedRange } = h.engine.store.getState()
+      return renderedRange[1] - renderedRange[0] + 1
+    }
+
+    // 20px rows, an 800px scrollport: unbounded, 2500px either side is 290 mounted rows. The
+    // row bound cuts the buffer to 24 rows a side, which is about 90. The tall list is nowhere
+    // near either bound and mounts what the pixels say.
+    expect(rowsOf(short)).toBeLessThan(150)
+    expect(rowsOf(tall)).toBeGreaterThan(5)
+  })
+
+  it('respects an explicit `buffer` without applying the row bound', () => {
+    // The bound exists for the number nobody chose. A caller who states one is not second
+    // guessed, however many rows it comes to.
+    const bounded = setup({ count: 5000, defaultEstimate: 20 })
+    const asked = setup({ count: 5000, defaultEstimate: 20, buffer: 4000 })
+
+    const span = (h: Harness): number => {
+      const { renderedRange } = h.engine.store.getState()
+      return renderedRange[1] - renderedRange[0]
+    }
+    expect(span(asked)).toBeGreaterThan(span(bounded))
   })
 
   it('shifts the visible range by `scrollMargin`', () => {
@@ -418,7 +461,9 @@ describe('engine option plumbing', () => {
     const h = setup({ count: 1000 })
     const before = h.engine.store.getState().renderedRange[1]
 
-    h.engine.setOptions({ buffer: 3000 })
+    // Well clear of the 2500px default, so this asserts that the option arrived rather than that
+    // it happens to differ from whatever the default is this month.
+    h.engine.setOptions({ buffer: 8000 })
     expect(h.engine.store.getState().renderedRange[1]).toBeGreaterThan(before + 20)
   })
 
