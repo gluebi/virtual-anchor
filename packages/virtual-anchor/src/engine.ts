@@ -182,41 +182,7 @@ export interface Engine {
  */
 const DEFAULT_BUFFER = 2500
 
-/**
- * How far ahead of the reader to mount, expressed as time rather than pixels.
- *
- * The buffer above is a distance, and a distance is the wrong unit for this failure. The browser
- * scrolls on the compositor thread while the mounted range is recomputed on the main thread from
- * a scroll event, so what has to be covered is *main-thread latency* — and the pixels that latency
- * costs depend entirely on how fast the content is moving. At 60 Hz a fixed 400 px is spent within
- * a single frame by a scroll of 24,000 px/s, which is an ordinary hard fling; past that the
- * compositor is presenting a region no row has been mounted for, and the reader sees blank.
- *
- * 50 ms is about three frames at 60 Hz.
- *
- * **This is not what fixed the blanking, and it is worth being clear about that.** Every blank
- * frame `perf/blanking.spec.ts` catches lands in the first few per cent of a gesture — at onset,
- * where two samples have not yet arrived and the velocity is therefore zero. A lookahead derived
- * from velocity is necessarily nothing at exactly the moment it is wanted, and switching it on
- * alone changed the count not at all (13 blank frames of 79 at a 20x slowdown, before and after).
- * The buffer above is what fixed it.
- *
- * It is kept because it is cheap in the case the buffer is expensive in: it costs nothing at rest,
- * and on top of the larger buffer it still took the 20x count from 5 to 3 and the 1x count from 1
- * to 0. A steady fast scroll is the regime it covers, and the two together cover more than either.
- */
-const LOOKAHEAD_MS = 50
 
-/**
- * The most the lookahead may ever add, in pixels.
- *
- * Because the alternative to a cap is unbounded mounting at speed, and this file already records
- * what that costs: widening the contiguous span to reach a distant target "mounted 7,798 rows in
- * a single frame, which took 103 seconds and never scrolled at all". A fling fast enough to want
- * 20,000 px of lookahead must be allowed to blank rather than to hang. At the demo's ~162 px
- * average row this is roughly a dozen extra rows at full speed, and none at rest.
- */
-const MAX_LOOKAHEAD = 2000
 
 /**
  * Most rows the *default* buffer may mount on each side.
@@ -227,22 +193,12 @@ const MAX_LOOKAHEAD = 2000
  * hundred and twenty-five, for a list whose rows were never the expensive part.
  *
  * So the default is whichever is smaller. A caller who states `buffer` outright is not second
- * guessed — this bounds the number nobody chose. `MAX_LOOKAHEAD` is capped for the same reason
- * and cites the same incident: an unbounded mounted range once put 7,798 rows on screen in a
- * single frame.
+ * guessed — this bounds the number nobody chose. The incident it exists against is on record in
+ * `computeRanges`: an unbounded mounted range once put 7,798 rows on screen in a single frame,
+ * which took 103 seconds and never scrolled at all.
  */
 const MAX_DEFAULT_BUFFER_ROWS = 24
 
-/**
- * How long a scroll sample stays evidence of motion.
- *
- * Two jobs, both load-bearing. It decays the lookahead to nothing once samples stop arriving —
- * without it, a list flung once would keep mounting extra rows forever, paying for a speed it no
- * longer has. And it rejects the gap *between* gestures: two scrolls a second apart are not one
- * slow scroll, and dividing their offset difference by their time difference would invent a
- * velocity that never happened.
- */
-const VELOCITY_IDLE_MS = 100
 /**
  * How close to the end still counts as being at it.
  *
@@ -697,52 +653,6 @@ export function createEngine(initial: EngineOptions): Engine {
   /** Last sum handed to the surface, so an unchanged value is not re-written. */
   let paintOffset = 0
 
-  /**
-   * Scroll velocity in px/ms, signed: positive is toward the end of the list.
-   *
-   * Smoothed rather than taken raw. A single late frame doubles the instantaneous velocity, and an
-   * un-smoothed reading would widen the mounted band in response to the stall it is supposed to be
-   * absorbing — mounting most where the main thread is least able to afford it.
-   */
-  let velocity = 0
-  let velocityAt = 0
-  let velocityOffset = Number.NaN
-
-  const sampleVelocity = (offset: number): void => {
-    const at = now()
-    const elapsed = at - velocityAt
-    if (Number.isFinite(velocityOffset) && elapsed > 0) {
-      if (elapsed > VELOCITY_IDLE_MS) {
-        // A new gesture, not a slow one. See VELOCITY_IDLE_MS.
-        velocity = 0
-      } else {
-        const instant = (offset - velocityOffset) / elapsed
-        // An equal-weight EMA: enough to absorb one anomalous frame, short enough that the band
-        // is already wide two frames into a fling rather than half way through it.
-        //
-        // The first sample of a gesture is halved rather than taken whole, because otherwise the
-        // one reading this smoothing exists to distrust — the opening frame, where a stall and a
-        // fling look identical — would be the one reading that skipped it. And by measurement,
-        // gesture onset is where every blank frame lands.
-        velocity = velocity === 0 ? instant / 2 : (velocity + instant) / 2
-      }
-    }
-    velocityOffset = offset
-    velocityAt = at
-    lead = Math.min(Math.abs(velocity) * LOOKAHEAD_MS, MAX_LOOKAHEAD)
-  }
-
-  /**
-   * How far past the visible band to mount, on the leading side only. Zero at rest.
-   *
-   * Computed when a sample arrives rather than when it is read, and the difference is not
-   * bookkeeping: `publish` is not once per frame — during a fling it runs once per newly
-   * mounted row whose measurement differs from its estimate, which is very nearly all of them —
-   * so a clock read here would be ten to thirty `performance.now()` calls per frame of the one
-   * gesture this exists for. It is cleared when the scrolling settles, so the extra rows are
-   * given back eagerly instead of surviving until whatever publishes next.
-   */
-  let lead = 0
 
   /** {@link DEFAULT_BUFFER}, bounded by {@link MAX_DEFAULT_BUFFER_ROWS} rows of the current estimate. */
   const defaultBuffer = (): number =>
@@ -802,15 +712,7 @@ export function createEngine(initial: EngineOptions): Engine {
 
     const g = syncGeometry()
     const visible = g.visibleBand(contentAt)
-    // Extended on the leading side only. Rows behind the reader are already measured and about to
-    // leave; the ones the compositor is scrolling toward are the ones nothing has mounted yet.
-    const buffer = options.buffer ?? defaultBuffer()
-    const upward = velocity < 0
-    const buffered = g.bufferedBand(
-      contentAt,
-      buffer + (upward ? lead : 0),
-      buffer + (upward ? 0 : lead),
-    )
+    const buffered = g.bufferedBand(contentAt, options.buffer ?? defaultBuffer())
 
     // The pinned scroll target is deliberately *not* unioned in here. Widening the
     // contiguous span to reach a distant target mounts every item in between: a smooth
@@ -1927,11 +1829,6 @@ export function createEngine(initial: EngineOptions): Engine {
           // anchor and undo the carry.
           const restoreIndex = restoreIntents.findIndex((value) => isSelfWrite(offset, value))
           if (restoreIndex === -1) {
-            // Inside this branch deliberately: it is the one that has already established the
-            // event was the reader moving rather than our own anchor restore reading back. A
-            // several-hundred-pixel corrective write sampled as reader velocity would widen the
-            // band in response to the library's own correction.
-            sampleVelocity(offset)
             // From where the content visually *is*: the offset the platform accepted plus the
             // carry compensating for the fraction it refused. `carryFor` is `desired - actual`,
             // so their sum is the position we asked for.
@@ -1993,17 +1890,7 @@ export function createEngine(initial: EngineOptions): Engine {
        * soon as the platform says the scrolling is over, rather than a further
        * quiet window later.
        */
-      cleanups.push(
-        onScrollSettled(viewport, () => {
-          // Give the lookahead's extra rows back as soon as the platform says the scrolling is
-          // over, rather than leaving them mounted until whatever publishes next. `lead` is only
-          // ever recomputed by a scroll sample, so without this a fling's last value outlives the
-          // fling.
-          lead = 0
-          velocity = 0
-          repin()
-        }),
-      )
+      cleanups.push(onScrollSettled(viewport, repin))
 
       const onPageHide = (): void => {
         // The only reliable unload hook: report anything visible but not yet
