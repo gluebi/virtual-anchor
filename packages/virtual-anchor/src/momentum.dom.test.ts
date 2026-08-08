@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { pretendIPhone, touch, unpretendIPhone } from './iosPlatform.test.helpers.js'
 import { createScrollWriteGate, type ScrollWriteGate } from './momentum.js'
+import { collectTrace } from './trace.test.helpers.js'
+import type { TraceEvent } from './trace.js'
 import type { Viewport } from './viewport.js'
 
 /**
@@ -341,5 +343,82 @@ describe('the scroll write gate', () => {
     // refusing those writes stalled an ordinary scroll outright.
     expect(harness().gate.isActive()).toBe(true)
     expect(harness({ isIOS: false }).gate.isActive()).toBe(false)
+  })
+})
+
+describe('what it reports about itself', () => {
+  const stopped: (() => void)[] = []
+  const traced = (): TraceEvent[] => {
+    const { events, stop } = collectTrace()
+    stopped.push(stop)
+    return events
+  }
+
+  afterEach(() => {
+    for (const stop of stopped) stop()
+    stopped.length = 0
+  })
+
+  it('says it attached, and on which platform', () => {
+    const events = traced()
+    harness().gate.attach()
+
+    expect(events.find((event) => event.topic === 'gate.attach')?.data).toMatchObject({
+      ios: true,
+    })
+  })
+
+  it('says so even where it binds nothing at all', () => {
+    // Emitted *before* the off-iOS early return, and that ordering is the whole point: off iOS
+    // this gate makes no transitions, so "the gate stayed idle for the gesture" and "there is no
+    // gate on this platform" are otherwise the same observation. They could not be more
+    // different — off iOS every correction writes `scrollTop` unconditionally, and Chrome cancels
+    // a compositor fling on such a write too. This one event is what tells a reader on Android
+    // that none of the momentum machinery is running.
+    const events = traced()
+    harness({ isIOS: false }).gate.attach()
+
+    expect(events.find((event) => event.topic === 'gate.attach')?.data).toMatchObject({
+      ios: false,
+    })
+  })
+
+  it('narrates every transition with the reason for it', () => {
+    const events = traced()
+    const h = harness()
+    h.gate.attach()
+
+    touch(h.element, 'touchstart')
+    touch(h.element, 'touchend')
+    h.scroll()
+    h.settle()
+
+    expect(
+      events
+        .filter((event) => event.topic === 'scroll.gate')
+        .map((event) => `${String(event.data.state)}:${String(event.data.reason)}`),
+    ).toEqual([
+      'touching:touchstart',
+      'grace:touchend',
+      'momentum:momentum-onset',
+      'idle:settled',
+    ])
+  })
+
+  it('still keeps no clock of its own', () => {
+    // The gate's own doc says "there is deliberately no `now`": every transition out of a shut
+    // state is an event or a timer firing. Adding one for tracing alone would break that to buy
+    // arithmetic the analyzer does for free from `TraceEvent.at`.
+    const clock = vi.spyOn(performance, 'now')
+    const h = harness()
+    h.gate.attach()
+    const before = clock.mock.calls.length
+
+    touch(h.element, 'touchstart')
+    touch(h.element, 'touchend')
+    h.scroll()
+
+    // Whatever `trace` itself stamps is not this module's doing; nothing else may read a clock.
+    expect(clock.mock.calls.length).toBe(before)
   })
 })

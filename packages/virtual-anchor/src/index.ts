@@ -67,5 +67,9 @@ export type { DomSurfaceOptions, Surface } from './surface.js'
 export { createEngine, layoutSignatureFor } from './engine.js'
 export type { Engine, EngineOptions } from './engine.js'
 
-export { isTracing, setTraceSink, TRACING } from './trace.js'
+// `TRACING` keeps its published name while the value moves to its own module, and the alias
+// lives here rather than in `trace.ts` because this is an export list — nothing guards on it,
+// so no optimizer has to see through the rename to fold a call site.
+export { DEBUG as TRACING } from './debugFlag.js'
+export { addTraceListener, isTracing, setTraceSink } from './trace.js'
 export type { TraceEvent, TraceSink } from './trace.js'

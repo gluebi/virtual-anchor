@@ -82,6 +82,21 @@ export default defineConfig(
     },
   },
 
+  {
+    // The debug entry is a developer tool, and printing its conclusion is its job.
+    //
+    // Everywhere else in this package `console.log` is rightly an error: a library that
+    // narrates itself in a consumer's console is a nuisence they cannot turn off. Here the
+    // output *is* the product, it only exists in a build that opted into instrumentation, and
+    // it is reached only by importing `virtual-anchor/debug` deliberately. `warn` would be the
+    // available alternative and is the wrong semantics — a gesture with no suspect is not a
+    // warning, and if every conclusion were one, the ones that matter would stop standing out.
+    files: ['packages/virtual-anchor/src/debug/**/*.ts'],
+    rules: {
+      'no-console': 'off',
+    },
+  },
+
   // Tests and tooling: the strictest rules exist to protect production code, and
   // in tests they mostly obstruct constructing deliberately awkward inputs.
   {

@@ -3,6 +3,8 @@ import { pretendIPhone, touch, unpretendIPhone } from './iosPlatform.test.helper
 import { createScrollWriteGate } from './momentum.js'
 import { createScroller, type Scroller } from './scroller.js'
 import { SizeCache } from './sizeCache.js'
+import { collectTrace } from './trace.test.helpers.js'
+import type { TraceEvent } from './trace.js'
 import type { ItemKey } from './types.js'
 import type { Viewport } from './viewport.js'
 
@@ -558,5 +560,96 @@ describe('scroller on iOS WebKit', () => {
     for (const type of ['wheel', 'touchstart', 'pointerdown', 'keydown']) {
       expect(remove).toHaveBeenCalledWith(type, expect.any(Function))
     }
+  })
+
+  /**
+   * What this module says it is doing.
+   *
+   * It wrote `scrollTop` and reported nothing about it for as long as there has been tracing at
+   * all — `scroll.step` says the convergence loop *ran*, which is not the same claim. The demo's
+   * on-device readout filtered on `scroll.write`, the engine's door, so every conclusion of the
+   * form "no write escaped during that gesture" was drawn from half the writers.
+   */
+  describe('what it reports about itself', () => {
+    const stopped: (() => void)[] = []
+    const traced = (): TraceEvent[] => {
+      const { events, stop } = collectTrace()
+      stopped.push(stop)
+      return events
+    }
+
+    afterEach(() => {
+      for (const stop of stopped) stop()
+      stopped.length = 0
+    })
+
+    const topics = (events: TraceEvent[]): string[] => events.map((event) => event.topic)
+
+    it('reports a write it made', async () => {
+      const h = harness()
+      const events = traced()
+
+      const promise = h.scroller.scrollToIndex(5)
+      h.advance(16)
+      h.scroller.cancel()
+      await promise
+
+      const commit = events.find((event) => event.topic === 'scroll.commit')
+      expect(commit?.data).toMatchObject({ refused: false, offset: 500 })
+    })
+
+    it('reports a write it was refused, and what it banked instead', () => {
+      const h = harness()
+      const events = traced()
+
+      touch(h.element, 'touchstart')
+      void h.scroller.scrollToIndex(5)
+      h.advance(16)
+
+      // Refused rather than absent: the distinction matters because a refusal banks a delta that
+      // gets replayed the moment the gate reopens, and that replay is a write during a moment
+      // nobody was watching.
+      const commit = events.find((event) => event.topic === 'scroll.commit')
+      expect(commit?.data.refused).toBe(true)
+      h.scroller.cancel()
+    })
+
+    it('reports parking once, not once a frame', () => {
+      const h = harness()
+      touch(h.element, 'touchstart')
+      void h.scroller.scrollToIndex(5)
+      const events = traced()
+
+      // The loop stops requesting frames while the gate is shut, which is what makes this event
+      // affordable — and what the assertion protects. Three frames' worth of clock, and the loop
+      // must have reported parking exactly once, because after the first it queued nothing.
+      h.frames(3)
+
+      expect(topics(events).filter((topic) => topic === 'scroll.park')).toHaveLength(1)
+      expect(h.queued()).toBe(0)
+      h.scroller.cancel()
+    })
+
+    it('reports waking, and the flush that follows it', async () => {
+      const h = harness()
+      touch(h.element, 'touchstart')
+      const promise = h.scroller.scrollToIndex(5)
+      h.advance(16)
+
+      const events = traced()
+      touch(h.element, 'touchend')
+      h.advance(200)
+      h.settle()
+      h.advance(64)
+
+      // park → wake → flush → commit is the shape that makes a programmatic scroll writing during
+      // momentum legible, and it was invisible before.
+      const seen = topics(events)
+      expect(seen).toContain('scroll.wake')
+      expect(seen).toContain('scroll.flush')
+
+      h.scroller.cancel()
+      await promise
+    })
   })
 })

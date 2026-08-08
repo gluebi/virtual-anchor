@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview --port 4173 --strictPort",
+    "//build:trace": "The same production build with the library's instrumentation left in, which is what makes a real device diagnosable: production React, so StrictMode's double invoke is not adding jank of its own, and a full trace of the library's decisions. Serve it with `preview` and open it from the phone.",
+    "build:trace": "VA_TRACE=1 vite build",
+    "preview": "vite preview --port 4173 --strictPort --host",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
