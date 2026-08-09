@@ -811,21 +811,22 @@ export function createEngine(initial: EngineOptions): Engine {
    * reported no change, leaving the DOM holding rows the range no longer named. Far enough into
    * a scroll that was enough to leave the scrollport with no mounted row over it at all.
    *
-   * Caught by `follow.spec.ts` and `smoke.spec.ts` in CI and not locally, because it needs a
-   * main thread slow enough for the timer to land between publishes.
+   * Caught by `follow.spec.ts` in CI and not locally, because it needs a main thread slow
+   * enough for the timer to land between publishes.
+   *
+   * It **returns** rather than assigning, which is the same rule one field further on:
+   * `lastVisible` is publish-identity state too — the React adapter dedupes
+   * `onVisibleRangeChange` on its identity — so letting the timer move it would fire a range
+   * change for a range that never published. `computeRanges` commits both.
    */
   const computeVisible = (contentAt: number): readonly [number, number] => {
-    if (cache.length === 0) {
-      lastVisible = EMPTY_RANGE
-      return EMPTY_RANGE
-    }
+    if (cache.length === 0) return EMPTY_RANGE
     const visible = listGeometry.visibleBand(contentAt)
-    lastVisible = sameRange(
+    return sameRange(
       lastVisible,
       cache.indexAt(visible.start),
       cache.indexAt(Math.max(visible.start, visible.end)),
     )
-    return lastVisible
   }
 
   const computeRanges = (
@@ -838,7 +839,7 @@ export function createEngine(initial: EngineOptions): Engine {
       lastVisible = EMPTY_RANGE
       heldStartKey = undefined
       heldEndKey = undefined
-      return { rendered: EMPTY_RANGE, visible: EMPTY_RANGE }
+      return { rendered: lastRendered, visible: lastVisible }
     }
 
     // Already pointed at this pass's insets and scrollport height; see {@link syncGeometry}.
@@ -870,7 +871,8 @@ export function createEngine(initial: EngineOptions): Engine {
       heldEndKey = cache.keyAt(held[1])
     }
     lastRendered = sameRange(lastRendered, held[0], held[1])
-    return { rendered: lastRendered, visible: computeVisible(contentAt) }
+    lastVisible = computeVisible(contentAt)
+    return { rendered: lastRendered, visible: lastVisible }
   }
 
   const itemsFor = (range: readonly [number, number]): VirtualItem[] => {
@@ -1441,9 +1443,8 @@ export function createEngine(initial: EngineOptions): Engine {
         // Content space, like every other sample: this fires when nothing else is
         // happening, so during a held correction it is usually the *only* sample taken.
         const contentAt = contentOffset()
-        // Its own pass, so its own sync: this fires when no publish is running. And the
-        // *visible* range only — moving the mounted range from here would move it with nothing
-        // rendering the result; see {@link computeVisible}.
+        // Its own pass, so its own sync; and the *visible* range only, which is the half of
+        // `computeRanges` that moves no published state. See {@link computeVisible}.
         syncGeometry(viewport.getViewportSize())
         sampleVisibility(computeVisible(contentAt), contentAt)
       },

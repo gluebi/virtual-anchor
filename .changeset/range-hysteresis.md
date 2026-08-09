@@ -56,6 +56,11 @@ append, a window that paged away) are caught by the keys, and geometry changes (
 re-estimate, a discarded measurement cache, a resize, a slot appearing) by the containment test,
 which is computed from live offsets every pass. Neither needs a flag.
 
+There is a third fact the hold rests on, and it is the one that had to be found the hard way:
+only a publish may move it. The visibility deadline timer wants a visible range and fires from
+outside any publish, so it now asks for exactly that and nothing else — moving the mounted range
+from there moved it with nothing rendering the result.
+
 `MAX_DEFAULT_BUFFER_ROWS` now bounds the rows the default actually *mounts* rather than the rows
 its guarantee covers, since the slack is what mounts a row. On the demo's comments the pixel
 limit still wins and coverage stays at 2500; on a list of short rows the cap binds where it

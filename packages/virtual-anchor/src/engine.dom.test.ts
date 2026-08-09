@@ -837,26 +837,39 @@ describe('engine range hysteresis', () => {
     expect(rendered(h)).toEqual([from + 10, to + 10])
   })
 
-  it('never holds a range the store has not been told about', () => {
-    // The invariant holding rests on: whatever moves the held ends must also render the result,
-    // or `items` and `renderedRange` describe different sets. The visibility deadline timer used
-    // to move them from outside a publish — so the next publish found the hold covering, handed
-    // back the same tuple, and `needsRerender` reported nothing to do while the DOM still held
-    // the old rows. Far enough into a scroll that left the scrollport with no mounted row at all.
+  it('does not let the visibility deadline move the mounted range', async () => {
+    // Holding only works if whatever moves the held ends also renders the result. The
+    // visibility deadline timer wants a visible range and fires from `setTimeout`, outside any
+    // publish — so calling the full `computeRanges` there moved the hold with nothing rendering
+    // it. The next publish then found the hold covering, handed back the same tuple, and
+    // `needsRerender` reported nothing to do while the DOM still held the previous rows. Far
+    // enough into a scroll that leaves the scrollport with no mounted row over it at all.
     //
-    // Asserted as an identity between the two things that must agree, rather than by reaching
-    // for the timer: any future caller that moves the hold without publishing fails this too.
-    const h = setup({ count: 2000, buffer: 1000, visibility: { rule: { mode: 'any' } } })
+    // Two ingredients, and both are needed or this passes against the broken code: a `dwellMs`
+    // so the tracker actually arms a deadline, and content that moves *without* a publish
+    // behind it so the timer recomputes at an offset the last publish never saw.
+    //
+    // Asserted against an engine that reached the same place without a timer ever firing,
+    // rather than against a literal — the claim is that the deadline changed nothing.
+    vi.useFakeTimers()
+    try {
+      const withTimer = setup({
+        count: 2000,
+        buffer: 1000,
+        visibility: { rule: { mode: 'any' }, dwellMs: 50 },
+      })
+      withTimer.scroll(100)
+      withTimer.setOffset(5000)
+      await vi.advanceTimersByTimeAsync(60)
+      withTimer.scroll(5300)
 
-    for (let offset = 0; offset <= 6_000; offset += 311) {
-      h.scroll(offset)
-      const state = h.engine.store.getState()
-      const first = state.items[0]?.index
-      const last = state.items[state.items.length - 1]?.index
-      expect([first, last], `at ${String(offset)}`).toEqual([
-        state.renderedRange[0],
-        state.renderedRange[1],
-      ])
+      const without = setup({ count: 2000, buffer: 1000 })
+      without.scroll(100)
+      without.scroll(5300)
+
+      expect(rendered(withTimer)).toEqual(rendered(without))
+    } finally {
+      vi.useRealTimers()
     }
   })
 
