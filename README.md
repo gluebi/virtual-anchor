@@ -118,7 +118,7 @@ The headless `useVirtualList` gives the same engine with your own markup, includ
 attach them in that order around `containerRef`, since that is the layout their measured
 heights are composed for.
 
-## Four contracts worth reading before you start
+## Five contracts worth reading before you start
 
 **Item margins are not supported.** Use the `gap` option. No ResizeObserver box
 includes margins, and margin collapsing between adjacent items is not observable
@@ -154,6 +154,16 @@ The library still cannot decide *whether* to fetch — that is a product questio
 can refuse to ask at the one moment the answer must be no, which is the half of this
 contract that used to be yours to remember. If you are watching `onScroll` yourself
 instead, `listRef.current?.isScrolling()` is the same guard by hand.
+
+**A row that changes height while unmounted, and is never scrolled back to, keeps its old
+size.** Measured sizes are keyed and survive the loaded window, which is what makes a prepend
+free — and the same property means a size nobody re-measures is kept rather than forgotten. A
+row you scroll back to corrects itself the frame it remounts. One you never return to does
+not, and its stale height sits in the scrollbar's length and in every landing past it. The fix
+elsewhere is to re-measure every row on its way out (catamphetamine/virtual-scroller does
+this); it costs a forced layout per unmounting row, which is a worse trade than the error, so
+this library does not. If you mutate the height of rows in bulk — an "expand all" — take a
+fresh `sizeSnapshot` afterwards rather than trusting the cache.
 
 **The first aim at an unmeasured target is always a guess.** You cannot know the
 height of something that has never been laid out. Error scales with
@@ -584,6 +594,14 @@ Tracing is no longer keyed to it. It has its own build-time flag, off in the pub
 build and reachable through the `development` export condition, so that a *production* app can
 carry an instrumented library — which is what diagnosing a real device requires. See
 [Debugging](#debugging).
+
+**Roughly 200,000 rows, at the default estimate.** The total height is written straight onto
+the item container, and browsers cap an element's height at about 33.5 million px (less in some
+builds). Past that the geometry silently stops matching the DOM: the scrollbar is wrong and
+landings drift. It is a ceiling on `rows × average height`, so short rows reach further and a
+thread of long comments reaches less far. Libraries that scale a 1×1px spacer instead
+(ngx-virtual-scroller) avoid it; that is not available here, because the element whose height is
+written is also the items' positioning context.
 
 Client-only: there is no SSR path. A virtual list cannot render meaningfully on a server
 that has no viewport, and pretending otherwise produces markup the client immediately

@@ -14,12 +14,15 @@ opt in.
 ## Prior art
 
 This library is a clean-room implementation, but its design was informed by reading
-the source of four existing virtual scrollers. Algorithms, data structures and API
+the source of existing virtual scrollers. Algorithms, data structures and API
 shapes are not copyrightable, and nothing here is copied — but the debt is real and
 worth recording, not least because several decisions in this codebase exist
 *because* of a bug one of these projects had already found and fixed.
 
-All four are MIT licensed.
+The first four below shaped the original design. The rest were read later, looking
+specifically for what this library still spent per frame that they did not; each is
+listed against the change it produced, and a library that produced none is not listed
+at all. All are MIT licensed.
 
 ### [react-virtuoso](https://github.com/petyosi/react-virtuoso) — © Petyo Ivanov
 
@@ -86,6 +89,20 @@ The most instructive to read, because its comments document why each guard exist
 - the three-way `defaultShouldAdjust` predicate, whose existence is the clearest
   argument for not modelling position as an offset in the first place
 
+Its `measureElement` is also where the mount path's forced layout went. It returns a
+cached size rather than reading the DOM when it is called without a `ResizeObserverEntry`
+— "This avoids a synchronous layout read on re-renders. The ResizeObserver is already
+observing the element and will deliver the accurate size asynchronously if it changed."
+`observeItem` here measured every mounting row unconditionally, which is a
+`getBoundingClientRect` per row from inside React's commit, immediately after writing that
+row's `top`. It now measures only a row whose height it does not already know.
+
+Its `main` has moved a long way past what the rest of this entry describes — lazy
+`Float64Array` measurements behind a materialising `Proxy`, an iOS momentum state machine
+and a rAF reconcile loop. The typed-array work was read and not adopted: it is a way to
+avoid allocating a `VirtualItem` per *item*, and this library only ever allocates for the
+rendered range.
+
 Also the source of the plainest statement of the underlying problem, from a user
 rather than a maintainer, on issue #216:
 
@@ -107,6 +124,64 @@ Its `itemCount × runningAverage` total is a documented anti-pattern that shaped
 decision here: bvaughn's own analysis of issue #863 explains how a changing average
 moves every unmeasured offset and therefore the view. Sizes here are exact prefix
 sums for that reason.
+
+### [Vuetify](https://github.com/vuetifyjs/vuetify) `VVirtualScroll` — © John Leider
+
+Two ideas, both about not touching the DOM on the scroll path.
+
+It reads the layout-forcing `markerRef.offsetTop` only at the *start* of a scroll sequence
+— "Not super important, only update at the start of a scroll sequence to avoid reflows" —
+and everything after that is arithmetic on a cached offset. `publish` here read the
+scrollport's box three times per pass, and the third read came after every mounted row's
+`top` had been written, which made it a forced synchronous layout once per scroll event
+rather than a repeat. The pass now reads it once, before it writes anything.
+
+And it updates the rendered range only on the edge being scrolled toward, and only once the
+buffer is genuinely spent, rather than on every event. That is the shape the range hold
+here takes, because the buffered band this library already computes is the natural thing to
+test containment against.
+
+Its size cache is discarded wholesale on any `items` change, which is what makes it
+unusable for a feed — and a useful reminder of what keying sizes buys.
+
+### [PrimeVue](https://github.com/primefaces/primevue) `VirtualScroller` — © PrimeTek
+
+The same hysteresis, reached independently and from the other direction: a trigger index
+that the current index must cross before the window moves, with a deliberately asymmetric
+backward bound so that reversing direction does not immediately re-trigger. Fixed row sizes
+only, so none of its arithmetic transfers — but the convergence is most of the argument
+that holding the range is the right behaviour rather than a shortcut.
+
+### [holmberd/virtual-scroller](https://github.com/holmberd/virtual-scroller) — © Dan Holmberg
+
+The clearest statement of the goal both of the changes above serve. Its scroll handler
+precomputes how many pixels remain before the range must change, so the handler itself is
+two comparisons — and it says why in as many words: "Essentially calculates e.g.
+`elem.scrollHeight - elem.offsetHeight` since calling either of those API's would trigger
+browser forced reflow/layout."
+
+### [catamphetamine/virtual-scroller](https://github.com/catamphetamine/virtual-scroller) — © catamphetamine
+
+No code taken, and the remedy deliberately rejected — but the diagnosis is recorded in the
+README's limitations because it applies here.
+
+`validateWillBeHiddenItemHeightsAreAccurate` re-measures every item just before it is
+hidden, and carries a long comment on why: expanding many rows at once makes the first
+measurement trigger a re-layout that unmounts the rest, so their new heights are never
+recorded. The same hole exists here and is worse, because sizes are keyed and survive the
+window — a row that changes height and unmounts before its observer reports keeps the old
+size for good. Its fix is a `getBoundingClientRect` per unmounting row, which is the exact
+cost this library had just finished removing from the *mounting* path, so it was measured
+against that and not taken. A row scrolled back to corrects itself on remount; one never
+revisited does not, and the README says so.
+
+### [ngx-virtual-scroller](https://github.com/rintoj/ngx-virtual-scroller) — © Rinto Jose
+
+One fact, no code: it scales a 1×1px spacer instead of setting a height, to stay under the
+browser's maximum element height. This library writes the height directly, so that ceiling
+is a real limit on how long a list can be — now stated in the README rather than left to be
+discovered. Adopting the spacer is not straightforward here, because the element whose
+height is written is also the items' positioning context.
 
 ## Standards and specifications
 
