@@ -18,21 +18,22 @@ cache. Where the rect then disagreed with the snapshot by a pixel it cost the wh
 `publish` as well — three more layout reads and a re-render — again per row. The resting buffer
 has been 2500px since #65, so that is tens of rows per range change rather than a handful.
 
-Measured with `perf/`, median of 4 runs on an M1, `main` against this change. The wheel
-scenario at increasing emulated CPU slowdown, which is the axis that separates headroom from
-"already at the display ceiling":
+Measured with `perf/headroom.spec.ts`, medians of four runs, one session on an M1, against
+`main`. The wheel scenario at increasing emulated CPU slowdown is the axis that separates
+headroom from "already at the display ceiling":
 
 | slowdown | demo | fps | drop% | handler p50 | handler p95 |
 | --- | --- | --- | --- | --- | --- |
-| 6× | live | 60.0 → 60.0 | 0 → 0 | 1.20 → 1.20 | 4.60 → 3.30 |
-| 10× | live | 58.5 → 60.0 | 2.5 → 0.0 | 2.00 → 1.80 | 7.90 → 5.10 |
-| 20× | live | 34.1 → 37.3 | 43.2 → 37.9 | 12.40 → 7.60 | 22.10 → 13.30 |
-| 20× | quiet | 37.1 → 41.9 | 38.2 → 30.1 | 10.90 → 5.00 | 18.70 → 9.50 |
+| 1× | live | 60.0 → 60.0 | 0 → 0 | 0.50 → 0.40 | 2.50 → 1.80 |
+| 6× | live | 60.0 → 60.0 | 0 → 0 | 0.60 → 0.50 | 3.60 → 2.70 |
+| 10× | live | 60.0 → 60.0 | 0 → 0 | 1.10 → 0.90 | 6.70 → 4.50 |
+| 20× | live | 39.4 → 43.9 | 34.4 → 26.8 | 7.60 → 4.40 | 19.70 → 10.60 |
+| 20× | quiet | 47.3 → 47.3 | 21.1 → 21.1 | 4.30 → 2.80 | 13.50 → 8.50 |
 
-At 1× through 6× the display is the ceiling and nothing visible changes; the p95 handler still
-falls, which is the headroom the 10× and 20× rows spend. `scroll-fps` is unchanged at 60fps
-across every dataset, and `scrollToKey` still reports `settled=true deviation=0.000px` after
-the same 87 iterations — so none of this moved a landing.
+Below 10× the display is the ceiling and nothing visible changes; the p95 handler still falls,
+which is the headroom the 20× row spends. `scroll-fps` is unchanged at 60fps across every
+dataset, and `scrollToKey` still reports `settled=true deviation=0.000px` — so none of this
+moved a landing.
 
 Skipping the read is safe because of something `resizer` already did and had not written down:
 detaching deletes the element's `lastSizes` entry, so the synthetic first entry the observer
