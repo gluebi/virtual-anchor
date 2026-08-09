@@ -897,11 +897,21 @@ describe('useVirtualList before an engine exists', () => {
 })
 
 describe('useVirtualList render-storm detector', () => {
-  /** A list whose mounted window shifts on every scroll, so every publish needs a render. */
+  /**
+   * A list whose mounted window shifts on every scroll, so every publish needs a render.
+   *
+   * `buffer: 0` is what keeps that true, and it is the point rather than a detail. With the
+   * default buffer the mounted range is held until the buffered band leaves it, so the 200px
+   * steps below move the window about once every eight of them and no storm occurs — which is
+   * the feature, and would leave this detector with no coverage at all. Nothing here is about
+   * the buffer; it is about a publish that provokes a render that publishes again, and zero is
+   * the setting under which every publish does need one.
+   */
   const Harness = () => {
     const list = useVirtualList({
       items: comments(2000),
       getItemKey: (c) => c.id,
+      buffer: 0,
     })
     return (
       <div ref={list.scrollRef} data-testid="scroller">

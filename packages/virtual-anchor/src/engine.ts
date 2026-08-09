@@ -46,7 +46,13 @@ export interface EngineOptions {
   estimateSize?: (index: number, key: ItemKey) => number | undefined
   defaultEstimate?: number
   gap?: number
-  /** Extra px of items mounted beyond the viewport, widened in the direction of travel. */
+  /**
+   * Extra px of items mounted beyond the viewport, in each direction.
+   *
+   * This is the *coverage guarantee*: at least this much is mounted ahead of and behind the
+   * visible band at all times. Somewhat more is mounted in practice, because the range is held
+   * across a scroll rather than recomputed on every event — see {@link RANGE_SLACK_RATIO}.
+   */
   buffer?: number
   geometry?: ListInsets
   /**
@@ -156,7 +162,7 @@ export interface Engine {
 }
 
 /**
- * How far beyond the visible band to mount, in px, before the direction of travel widens it.
+ * How far beyond the visible band to mount, in px.
  *
  * **2500 rather than the 400 this was, and the number is measured rather than chosen.** The
  * symptom is a hard fling putting blank frames on screen: the browser scrolls on the compositor
@@ -175,17 +181,20 @@ export interface Engine {
  * and removes the blanking; the headroom it spends only appears past 10x, where frames are being
  * dropped regardless. Consumers who want the old trade still have `buffer`.
  *
- * What made this the fix rather than the lookahead below: the blank frames all land in the *first*
- * few per cent of a gesture, and mounting is a burst of work at exactly that moment. A larger
- * static buffer means the rows are already there — already mounted, already measured, already
- * positioned — before the finger moves.
+ * What made this the fix rather than a velocity lookahead — which was written, measured and
+ * dropped — is that the blank frames all land in the *first* few per cent of a gesture, where a
+ * lookahead derived from velocity is necessarily zero. A larger static buffer means the rows are
+ * already there before the finger moves.
+ *
+ * This is the guaranteed coverage, not the mounted distance: {@link RANGE_SLACK_RATIO} mounts
+ * further so the range can be held still across a scroll.
  */
 const DEFAULT_BUFFER = 2500
 
 
 
 /**
- * Most rows the *default* buffer may mount on each side.
+ * Most rows the default may mount on each side — including the slack, not just the guarantee.
  *
  * `DEFAULT_BUFFER` is a distance, which is right for what it buys — latency times velocity is a
  * distance — and wrong for what it costs, which is rows. Calibrated on this demo's ~162px
@@ -198,6 +207,44 @@ const DEFAULT_BUFFER = 2500
  * which took 103 seconds and never scrolled at all.
  */
 const MAX_DEFAULT_BUFFER_ROWS = 24
+
+/**
+ * Extra distance mounted beyond {@link EngineOptions.buffer}, as a fraction of it, so that the
+ * mounted range can be *held* across a scroll instead of recomputed on every event.
+ *
+ * The problem this solves is not layout, it is React. `computeRanges` ran on every scroll event
+ * and the mounted range moved the instant the buffered band crossed a row boundary — and
+ * `needsRerender` trips on exactly that. Browsers coalesce scroll events to one per frame, so
+ * the ceiling is a render per frame rather than per row; the cost is how *often* that ceiling is
+ * reached. Recomputing now happens once per `buffer * RANGE_SLACK_RATIO` px of travel instead of
+ * once per row, which on the demo's ~162px comments is 60 renders a second down to 32 during a
+ * 40,000px/s fling, and 11.5 down to 1.6 at an ordinary reading speed of 2,000px/s.
+ *
+ * A skipped render is the whole of React's work — no reconcile, no commit, no effects — for
+ * every mounted row. What it costs is rows resident: the mounted band grows by the slack, and
+ * `itemsFor` still allocates one object per mounted row on every publish, held or not. The trade
+ * is favourable at both speeds and lopsidedly so at reading speed, which is where a reader
+ * actually is.
+ *
+ * The shape is Vuetify's — hold until the buffer is spent — because the buffered band this
+ * library already computes is the natural thing to test containment against. PrimeVue and
+ * holmberd reach the same behaviour through a trigger index and through precomputed
+ * pixels-remaining respectively; three independent arrivals is most of the argument for doing
+ * it at all.
+ *
+ * **Why the slack is on the recompute and not on the trigger.** The tempting version holds the
+ * range until the *visible* band approaches its edge, which needs no extra rows — and quietly
+ * halves the coverage the buffer promises, because the mounted set is then anywhere between one
+ * buffer and none of it ahead of the reader. `blanking.spec.ts` chose `DEFAULT_BUFFER` against
+ * that coverage directly. So the trigger stays exactly where it was, at the buffered band, and
+ * the recompute mounts wider: coverage never falls below `buffer`, and a recompute happens once
+ * per `buffer * RANGE_SLACK_RATIO` px of travel rather than once per row.
+ *
+ * The cost is rows resident at rest, which is why this is a ratio of the buffer rather than a
+ * constant: whatever bounds the buffer — a caller's own number, or `MAX_DEFAULT_BUFFER_ROWS` for
+ * a list of short rows — bounds this in proportion.
+ */
+const RANGE_SLACK_RATIO = 0.5
 
 /**
  * How close to the end still counts as being at it.
@@ -392,6 +439,25 @@ export function createEngine(initial: EngineOptions): Engine {
    */
   let lastRendered: readonly [number, number] = EMPTY_RANGE
   let lastVisible: readonly [number, number] = EMPTY_RANGE
+  /**
+   * The ends of the mounted range, remembered by key so that a prepend cannot renumber them.
+   *
+   * By key for the same reason the anchor is a key. Two integers would name two different rows
+   * the moment anything is inserted above, and the range would then hold the wrong ones mounted;
+   * two keys either still name their rows — in which case the hold survives a prepend intact,
+   * which is the behaviour worth having — or stop resolving, which reads as nothing held and
+   * recomputes.
+   *
+   * That is one of the two mechanisms, and it is worth being clear about which is which, since
+   * a reader deciding whether some new event needs a flag will look here. **Identity** changes —
+   * a prepend, an append, a window that paged away — are caught here. **Geometry** changes — a
+   * gap, a re-estimate, a discarded measurement cache, a resize, a slot appearing — are caught
+   * by the containment test in `computeRanges`, which is computed from live offsets and a
+   * geometry `syncGeometry` has already re-pointed at this pass. Neither needs a flag; between
+   * them there is nothing left that can move a row without one of them noticing.
+   */
+  let heldStartKey: ItemKey | undefined
+  let heldEndKey: ItemKey | undefined
   let gate: ScrollerGate | null = null
   let disposed = false
   /** Whether a size snapshot has been taken up; see `setOptions`. */
@@ -672,9 +738,19 @@ export function createEngine(initial: EngineOptions): Engine {
   let paintOffset = 0
 
 
-  /** {@link DEFAULT_BUFFER}, bounded by {@link MAX_DEFAULT_BUFFER_ROWS} rows of the current estimate. */
+  /**
+   * {@link DEFAULT_BUFFER}, bounded so that {@link MAX_DEFAULT_BUFFER_ROWS} still bounds the rows
+   * actually mounted.
+   *
+   * The division is the whole of that: the cap is written in *rows*, and what mounts a row is the
+   * band including {@link RANGE_SLACK_RATIO}, not the coverage guarantee underneath it. Capping
+   * the guarantee instead would let a list of short rows mount half as many again as the number
+   * that constant names. It binds only where the row cap already bound — on the demo's ~162px
+   * comments `24 * 162 / 1.5` is 2592, so the px limit still wins and coverage stays at the 2500
+   * `blanking.spec.ts` measured.
+   */
   const defaultBuffer = (): number =>
-    Math.min(DEFAULT_BUFFER, MAX_DEFAULT_BUFFER_ROWS * cache.estimate)
+    Math.min(DEFAULT_BUFFER, (MAX_DEFAULT_BUFFER_ROWS * cache.estimate) / (1 + RANGE_SLACK_RATIO))
 
   const writePaintOffset = (): void => {
     const next = carry + pendingShift
@@ -708,7 +784,6 @@ export function createEngine(initial: EngineOptions): Engine {
     options.onVisibilityChange?.(events)
   }
 
-  /** Items to mount: everything within the viewport plus the buffer. */
   /** The previous tuple when it still describes the range, so identity survives. */
   const sameRange = (
     previous: readonly [number, number],
@@ -716,6 +791,14 @@ export function createEngine(initial: EngineOptions): Engine {
     to: number,
   ): readonly [number, number] =>
     previous[0] === from && previous[1] === to ? previous : [from, to]
+
+  /** The held range as live indices, or `null` if it no longer names two loaded rows. */
+  const heldRange = (): [number, number] | null => {
+    if (heldStartKey === undefined || heldEndKey === undefined) return null
+    const from = cache.indexOf(heldStartKey)
+    const to = cache.indexOf(heldEndKey)
+    return from >= 0 && to >= from ? [from, to] : null
+  }
 
   const computeRanges = (
     contentAt: number,
@@ -725,24 +808,41 @@ export function createEngine(initial: EngineOptions): Engine {
     if (cache.length === 0) {
       lastRendered = EMPTY_RANGE
       lastVisible = EMPTY_RANGE
+      heldStartKey = undefined
+      heldEndKey = undefined
       return { rendered: EMPTY_RANGE, visible: EMPTY_RANGE }
     }
 
     // Already pointed at this pass's insets and scrollport height; see {@link syncGeometry}.
     const g = listGeometry
     const visible = g.visibleBand(contentAt)
-    const buffered = g.bufferedBand(contentAt, options.buffer ?? defaultBuffer())
+    const buffer = options.buffer ?? defaultBuffer()
+    const buffered = g.bufferedBand(contentAt, buffer)
 
     // The pinned scroll target is deliberately *not* unioned in here. Widening the
     // contiguous span to reach a distant target mounts every item in between: a smooth
     // scroll from comment 0 to comment 7,777 mounted 7,798 rows in a single frame,
     // which took 103 seconds and never scrolled at all. It is mounted as an extra
     // segment by `itemsFor` instead.
-    lastRendered = sameRange(
-      lastRendered,
-      cache.indexAt(buffered.start),
-      cache.indexAt(buffered.end),
-    )
+    // Held while it still covers what the buffer asks for. This pass is not cheaper for holding
+    // — it trades two `indexAt` walks for two `indexOf` lookups — the saving is downstream, in
+    // the React render `renderedRange` no longer provokes. See {@link RANGE_SLACK_RATIO}.
+    //
+    // `needFrom`/`needTo` are the rows the buffer demands right now: the coverage guarantee,
+    // unchanged from when this was the mounted range itself. Resolved after the hold so that a
+    // pass with nothing held does not walk the tree for an answer it cannot use.
+    let held = heldRange()
+    if (
+      held === null ||
+      held[0] > cache.indexAt(buffered.start) ||
+      held[1] < cache.indexAt(buffered.end)
+    ) {
+      const mounted = g.bufferedBand(contentAt, buffer * (1 + RANGE_SLACK_RATIO))
+      held = [cache.indexAt(mounted.start), cache.indexAt(mounted.end)]
+      heldStartKey = cache.keyAt(held[0])
+      heldEndKey = cache.keyAt(held[1])
+    }
+    lastRendered = sameRange(lastRendered, held[0], held[1])
     lastVisible = sameRange(
       lastVisible,
       cache.indexAt(visible.start),
