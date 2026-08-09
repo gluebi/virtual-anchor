@@ -10,9 +10,15 @@ events to one per frame, so the ceiling was a React render per frame, each recon
 mounted row; #65 raising the resting buffer to 2500px multiplied what each one cost.
 
 The range is now **held** while the buffered band still fits inside it, and recomputed to a
-wider band when it does not. On the demo's ~162px comments that is 60 renders a second down to
-32 during a 40,000px/s fling, and 11.5 down to 1.6 at an ordinary reading speed of 2,000px/s —
-the case a reader is actually in.
+wider band when it does not.
+
+The saving is arithmetic rather than a benchmark, and worth stating as such: a recompute now
+happens once per `buffer * RANGE_SLACK_RATIO` = 1250px of travel instead of once per row, and
+publishes are capped at one per frame. On the demo's ~162px comments that is 60 store-driven
+renders a second down to 32 during a 40,000px/s fling, and 12 down to 1.6 at an ordinary
+reading speed of 2,000px/s — the case a reader is actually in. What a unit test pins is the
+mechanism underneath it: that the range tuple does not move across a scroll of three rows, and
+that it does move once the buffer is spent.
 
 **The coverage guarantee is unchanged, deliberately.** The tempting version holds until the
 *visible* band nears the edge, which needs no extra rows and quietly halves the distance the
