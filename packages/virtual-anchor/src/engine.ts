@@ -1449,12 +1449,15 @@ export function createEngine(initial: EngineOptions): Engine {
       //
       // Two adjacent paths deliberately not hooked:
       //
-      // `observeItem` measures synchronously on attach and never reaches here, so a font size
-      // change with nothing mounted is not seen at mount time. It does not need to be: a
-      // newly observed element gets a synthetic first delivery, which lands in this batch a
-      // tick later, so the gap is one delivery plus at most one rate-limit window and it
-      // closes itself. Paying a `getComputedStyle` per row on the mount path — which runs for
-      // every row of every scroll — to buy that tick back would be a bad trade.
+      // `observeItem` measures synchronously on attach — for a row whose height it does not
+      // already know — and that path never reaches here, so a font size change with nothing
+      // mounted is not seen at mount time. It does not need to be: a newly observed element
+      // gets a synthetic first delivery, which lands in this batch a tick later, so the gap is
+      // one delivery plus at most one rate-limit window and it closes itself. Paying a
+      // `getComputedStyle` per row on the mount path — which runs for every row of every
+      // scroll — to buy that tick back would be a bad trade. A row that *is* already measured
+      // skips the synchronous read entirely and so arrives here on its first delivery, which
+      // is the same tick by another route.
       //
       // `onSlotResize` is not hooked either, and runs *before* this in the same callback. A
       // font size change that re-lays-out a slot re-lays-out any mounted row too, so this
@@ -1949,17 +1952,36 @@ export function createEngine(initial: EngineOptions): Engine {
       // not exist at the time.
       if (index >= 0) surface.setItemOffset(key, cache.offsetOf(index))
 
-      const measured = resizer.measure(element)
-      if (index >= 0 && measured > 0 && cache.setSize(index, measured)) {
-        // Measure synchronously on mount. ResizeObserver's first callback lands
-        // after the next rendering update, so waiting for it would paint one
-        // frame at the wrong offset.
-        //
-        // The hottest of the deferrable paths: during a fling this runs for every
-        // row that scrolls into view whose real height differs from its estimate,
-        // which in a list of variable-height text is very nearly all of them.
-        publish('measure')
-        scroller.notifyModelChanged()
+      // Measure synchronously on mount, but **only for a row whose height is not already
+      // known**. ResizeObserver's first callback lands after the next rendering update, so
+      // waiting for it would paint one frame at the wrong offset.
+      //
+      // `resizer.measure` is a `getBoundingClientRect`, called here from a ref callback and
+      // straight after the offset write above — so it is a forced synchronous layout in the
+      // middle of React's commit, one per row rather than one per commit. Paid for every
+      // mounting row it was paid on every row scrolled back over and on every row of a list
+      // restored from a `sizeSnapshot`, where the answer was already in the cache. And when
+      // the rect disagreed with the snapshot by a pixel it cost the whole of `publish` as
+      // well — three more layout reads and a re-render — again per row.
+      //
+      // Skipping it is safe because of `resizer`'s own detach: unobserving deletes the
+      // element's `lastSizes` entry, so the synthetic first entry ResizeObserver delivers for
+      // a re-observed element is *not* swallowed as a duplicate. A row whose height changed
+      // while it was unmounted is still reported, one frame later — which is the same latency
+      // any other library accepts for all rows, taken here only where the cache has nothing
+      // better.
+      //
+      // The remaining synchronous path is the hottest one and stays: during a fling it runs
+      // for every row scrolling into view for the first time, whose real height differs from
+      // its estimate — in variable-height text, very nearly all of them.
+      if (index >= 0 && !cache.isMeasured(index)) {
+        // No `> 0` test: `setSize` refuses a non-positive or non-finite size itself, and says
+        // in its own doc that the guard lives there rather than at each call site. The batch
+        // path below already relies on that.
+        if (cache.setSize(index, resizer.measure(element))) {
+          publish('measure')
+          scroller.notifyModelChanged()
+        }
       }
 
       const stopObserving = resizer.observeItem(element, key)
