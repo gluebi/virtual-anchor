@@ -837,6 +837,29 @@ describe('engine range hysteresis', () => {
     expect(rendered(h)).toEqual([from + 10, to + 10])
   })
 
+  it('never holds a range the store has not been told about', () => {
+    // The invariant holding rests on: whatever moves the held ends must also render the result,
+    // or `items` and `renderedRange` describe different sets. The visibility deadline timer used
+    // to move them from outside a publish — so the next publish found the hold covering, handed
+    // back the same tuple, and `needsRerender` reported nothing to do while the DOM still held
+    // the old rows. Far enough into a scroll that left the scrollport with no mounted row at all.
+    //
+    // Asserted as an identity between the two things that must agree, rather than by reaching
+    // for the timer: any future caller that moves the hold without publishing fails this too.
+    const h = setup({ count: 2000, buffer: 1000, visibility: { rule: { mode: 'any' } } })
+
+    for (let offset = 0; offset <= 6_000; offset += 311) {
+      h.scroll(offset)
+      const state = h.engine.store.getState()
+      const first = state.items[0]?.index
+      const last = state.items[state.items.length - 1]?.index
+      expect([first, last], `at ${String(offset)}`).toEqual([
+        state.renderedRange[0],
+        state.renderedRange[1],
+      ])
+    }
+  })
+
   it('recomputes when the window it was holding has paged away', () => {
     // The other half: no key resolves, which reads as nothing held.
     const h = setup({ count: 100 })

@@ -800,6 +800,34 @@ export function createEngine(initial: EngineOptions): Engine {
     return from >= 0 && to >= from ? [from, to] : null
   }
 
+  /**
+   * The rows genuinely on screen. **Side-effect free, which is the point of it existing.**
+   *
+   * `computeRanges` moves the held ends, and holding is only sound if whatever moved them also
+   * renders the result: the store's `items` and `renderedRange` have to describe the same set.
+   * The visibility deadline timer needs a visible range and nothing else, and it fires *outside*
+   * a publish — so calling the full thing there let it move the hold with nothing rendering it.
+   * The next publish then found the hold covering, returned the same tuple, and `needsRerender`
+   * reported no change, leaving the DOM holding rows the range no longer named. Far enough into
+   * a scroll that was enough to leave the scrollport with no mounted row over it at all.
+   *
+   * Caught by `follow.spec.ts` and `smoke.spec.ts` in CI and not locally, because it needs a
+   * main thread slow enough for the timer to land between publishes.
+   */
+  const computeVisible = (contentAt: number): readonly [number, number] => {
+    if (cache.length === 0) {
+      lastVisible = EMPTY_RANGE
+      return EMPTY_RANGE
+    }
+    const visible = listGeometry.visibleBand(contentAt)
+    lastVisible = sameRange(
+      lastVisible,
+      cache.indexAt(visible.start),
+      cache.indexAt(Math.max(visible.start, visible.end)),
+    )
+    return lastVisible
+  }
+
   const computeRanges = (
     contentAt: number,
   ): { rendered: readonly [number, number]; visible: readonly [number, number] } => {
@@ -815,7 +843,6 @@ export function createEngine(initial: EngineOptions): Engine {
 
     // Already pointed at this pass's insets and scrollport height; see {@link syncGeometry}.
     const g = listGeometry
-    const visible = g.visibleBand(contentAt)
     const buffer = options.buffer ?? defaultBuffer()
     const buffered = g.bufferedBand(contentAt, buffer)
 
@@ -843,12 +870,7 @@ export function createEngine(initial: EngineOptions): Engine {
       heldEndKey = cache.keyAt(held[1])
     }
     lastRendered = sameRange(lastRendered, held[0], held[1])
-    lastVisible = sameRange(
-      lastVisible,
-      cache.indexAt(visible.start),
-      cache.indexAt(Math.max(visible.start, visible.end)),
-    )
-    return { rendered: lastRendered, visible: lastVisible }
+    return { rendered: lastRendered, visible: computeVisible(contentAt) }
   }
 
   const itemsFor = (range: readonly [number, number]): VirtualItem[] => {
@@ -1419,9 +1441,11 @@ export function createEngine(initial: EngineOptions): Engine {
         // Content space, like every other sample: this fires when nothing else is
         // happening, so during a held correction it is usually the *only* sample taken.
         const contentAt = contentOffset()
-        // Its own pass, so its own sync: this fires when no publish is running.
+        // Its own pass, so its own sync: this fires when no publish is running. And the
+        // *visible* range only — moving the mounted range from here would move it with nothing
+        // rendering the result; see {@link computeVisible}.
         syncGeometry(viewport.getViewportSize())
-        sampleVisibility(computeRanges(contentAt).visible, contentAt)
+        sampleVisibility(computeVisible(contentAt), contentAt)
       },
       Math.max(0, due - stamp),
     )
