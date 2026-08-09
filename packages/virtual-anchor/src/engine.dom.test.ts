@@ -44,6 +44,15 @@ interface Harness {
   keys: (count: number, prefix?: string) => ItemKey[]
   /** Report a measured size for a key, as a ResizeObserver would. */
   measure: (key: ItemKey, size: number) => void
+  /**
+   * `writes.length` at each `getViewportSize` call, one entry per read.
+   *
+   * Both halves of what it records are the assertion: the *count* says the scrollport was
+   * read once for a pass rather than once per consumer of the answer, and the *position*
+   * says the read happened before that pass wrote anything — which is what keeps it off the
+   * far side of a style write, where it would force a layout instead of reading a flushed one.
+   */
+  viewportReadAt: number[]
   viewportSize: number
 }
 
@@ -129,6 +138,7 @@ const setup = (
     leadingSpace: 0,
   }
   const writes: string[] = []
+  const viewportReadAt: number[] = []
   const elements = new Map<ItemKey, HTMLElement>()
   const scrollListeners: (() => void)[] = []
   /**
@@ -173,7 +183,10 @@ const setup = (
 
   const viewport: Viewport = {
     getScrollOffset: () => state.offset,
-    getViewportSize: () => state.viewportSize,
+    getViewportSize: () => {
+      viewportReadAt.push(writes.length)
+      return state.viewportSize
+    },
     getMaxScrollOffset: () =>
       trackContent
         ? Math.max(0, state.contentSize + state.leadingSpace - state.viewportSize)
@@ -222,6 +235,7 @@ const setup = (
     engine,
     unmount,
     writes,
+    viewportReadAt,
     offset: () => state.offset,
     maxOffset: () => viewport.getMaxScrollOffset(),
     setOffset: (value) => {
@@ -762,6 +776,40 @@ describe('engine measurement invalidation', () => {
       },
     })
     expect(h.engine.cache.measuredCount).toBe(0)
+  })
+})
+
+describe('engine scrollport reads', () => {
+  it('reads the scrollport height once per publish, before anything is written', () => {
+    // `getViewportSize` is three DOM reads on an element scroller, and a publish reached it
+    // twice: once through `computeRanges` and once more through the visibility sample. The
+    // second runs after every mounted row's `top` has been written, so it was not a repeat but
+    // a forced synchronous layout — once per scroll event — to re-answer what the same pass
+    // had already answered.
+    //
+    // The zero is both halves of the claim: one entry says it was read once, and its position
+    // says the read came before that pass wrote anything.
+    const h = setup({ count: 50 })
+    for (const key of h.keys(6)) mountItem(h, key, 250)
+
+    h.writes.length = 0
+    h.viewportReadAt.length = 0
+    h.scroll(1000)
+
+    expect(h.viewportReadAt).toEqual([0])
+  })
+
+  it('still reads it once per publish with a leading spacer to size', () => {
+    // `alignToBottom` is a third reason to want the height, and the only one that runs before
+    // the content-size write rather than after — so a version that hoisted just the two above
+    // would still leave this one, and still leave it first.
+    const h = setup({ count: 50, alignToBottom: true, trackContent: true })
+
+    h.writes.length = 0
+    h.viewportReadAt.length = 0
+    h.scroll(400)
+
+    expect(h.viewportReadAt).toEqual([0])
   })
 })
 
