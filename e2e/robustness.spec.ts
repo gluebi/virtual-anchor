@@ -410,12 +410,26 @@ test.describe('a scrollport that changes width without changing height', () => {
     // assertions below would hold for the wrong reason.
     expect(measuredBefore).toBeGreaterThan(5)
 
-    // A row that is actually on screen, not merely in the snapshot: most of what has been
-    // measured was measured on the way past and is long unmounted, and an unmounted row has
-    // no box to report a height for.
-    const rowKey = await page.evaluate(
-      () => document.querySelector('[data-virtual-key]')?.getAttribute('data-virtual-key') ?? '',
-    )
+    // The tallest mounted row, because what this row has to carry is a *reflow*: narrowing
+    // 1280 to 1150 takes the scrollport from 950px to 820px, and at those widths the demo's
+    // short comments wrap identically — measured, they sit at 108px and 141px on both sides
+    // of the resize, while the long ones go 277px to 301px. So the row has to be one with
+    // enough text to rewrap, or it reports an unchanged height however correctly the library
+    // behaved.
+    //
+    // This read `document.querySelector('[data-virtual-key]')` — the first row in the DOM,
+    // which is the top of the mounted range and therefore well above the fold. That happened
+    // to be a long comment, so the case passed, but it was picking by position and depending
+    // on a property of whichever row overscan put there. Picking by height says what the case
+    // actually needs and cannot be broken by a change to how much is mounted.
+    const rowKey = await page.evaluate(() => {
+      const rows = [...document.querySelectorAll<HTMLElement>('[data-virtual-key]')]
+      const tallest = rows.sort(
+        (a, b) => b.getBoundingClientRect().height - a.getBoundingClientRect().height,
+      )[0]
+      return tallest?.dataset.virtualKey ?? ''
+    })
+    expect(rowKey, 'no row is mounted to measure').not.toBe('')
     const heightBefore = await rowHeight(page, rowKey)
     expect(heightBefore).toBeGreaterThan(0)
     const scrollportBefore = await scrollportHeight(page)
@@ -429,6 +443,12 @@ test.describe('a scrollport that changes width without changing height', () => {
     // The honest signal that the reflow happened, rather than a timeout: a row that really
     // is a different height than it was.
     await expect.poll(() => rowHeight(page, rowKey)).not.toBe(heightBefore)
+    // `rowHeight` reports -1 for a row that is no longer mounted, which is "not the height it
+    // was" and would satisfy the poll above without a reflow having happened at all.
+    expect(
+      await rowHeight(page, rowKey),
+      'the row unmounted, so the poll above proved nothing',
+    ).toBeGreaterThan(0)
 
     // Load-bearing. If the scrollport's height moved too, this would be an ordinary resize
     // that the pre-fix code already caught, and the case would pass against the defect

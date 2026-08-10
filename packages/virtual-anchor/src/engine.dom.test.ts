@@ -346,11 +346,12 @@ describe('engine option plumbing', () => {
     const h = setup({ count: 1000 })
     const { renderedRange, visibleRange } = h.engine.store.getState()
 
-    // 800px viewport, 100px estimates, 2500px default buffer either side — so the mounted range
-    // reaches about 33 and the point stands: a window of a 1,000-item list, not the list.
+    // 800px viewport, 100px estimates, a 2500px default buffer either side and half of that
+    // again in slack so the range can be held — so the mounted range reaches about 46, and the
+    // point stands: a window of a 1,000-item list, not the list.
     expect(visibleRange).toEqual([0, 8])
     expect(renderedRange[1]).toBeGreaterThan(visibleRange[1])
-    expect(renderedRange[1]).toBeLessThan(40)
+    expect(renderedRange[1]).toBeLessThan(60)
   })
 
   it('widens the rendered range with `buffer`', () => {
@@ -776,6 +777,138 @@ describe('engine measurement invalidation', () => {
       },
     })
     expect(h.engine.cache.measuredCount).toBe(0)
+  })
+})
+
+describe('engine range hysteresis', () => {
+  /** The rendered range as the store currently holds it. */
+  const rendered = (h: Harness): readonly [number, number] =>
+    h.engine.store.getState().renderedRange
+
+  it('holds the mounted range across a scroll, then recomputes once the buffer is spent', () => {
+    // The distance is the claim. `publishes the same range tuple while the range has not moved`
+    // above already covers a scroll too small to cross a row; this is a scroll of three rows
+    // that would have moved the range before, and no longer does.
+    const h = setup({ count: 2000, buffer: 1000 })
+    const before = rendered(h)
+
+    h.scroll(300)
+    expect(rendered(h)).toEqual(before)
+
+    h.scroll(4000)
+    expect(rendered(h)).not.toEqual(before)
+    expect(rendered(h)[0]).toBeGreaterThan(before[0])
+  })
+
+  it('never lets the mounted range fall inside the buffer', () => {
+    // The invariant `blanking.spec.ts` chose `DEFAULT_BUFFER` against. Holding the range is only
+    // allowed to spend *slack*; the coverage the buffer promises is not negotiable, so this
+    // walks a scroll across many hold-and-recompute cycles and checks it at every step.
+    const buffer = 1000
+    const h = setup({ count: 2000, buffer })
+
+    // A hold-and-recompute cycle is `buffer * RANGE_SLACK_RATIO` = 500px, so this walks eight of
+    // them and lands in every phase of one: freshly recomputed, mid-hold, and at the trigger.
+    for (let offset = 0; offset <= 4_000; offset += 137) {
+      h.scroll(offset)
+      const [from, to] = rendered(h)
+      // 800px viewport, so the band the buffer demands is [offset - 1000, offset + 800 + 1000].
+      const needFrom = h.engine.cache.indexAt(Math.max(0, offset - buffer))
+      const needTo = h.engine.cache.indexAt(offset + h.viewportSize + buffer)
+      expect(from, `mounted start at ${String(offset)}`).toBeLessThanOrEqual(needFrom)
+      expect(to, `mounted end at ${String(offset)}`).toBeGreaterThanOrEqual(needTo)
+    }
+  })
+
+  it('follows its own rows through a prepend rather than remounting around them', () => {
+    // What holding by key buys, and the case two integers would get wrong: after ten rows are
+    // inserted above, the held ends still name the same rows, so the mounted set is the same
+    // set — shifted by ten, which is what the indices say.
+    //
+    // A small buffer and a position deep in a long list, deliberately: with the whole list
+    // inside the buffer the range is [0, count-1] either way and the assertion would pass on a
+    // recompute, proving nothing.
+    const h = setup({ count: 2000, buffer: 200 })
+    h.scroll(5000)
+    const [from, to] = rendered(h)
+
+    h.engine.setOptions({ keys: [...h.keys(10, 'older'), ...h.keys(2000)] })
+
+    expect(rendered(h)).toEqual([from + 10, to + 10])
+  })
+
+  it('puts the slack on the edge that ran out, not behind the reader', () => {
+    // Which edge failed coverage says which way the reader is going, without the engine
+    // tracking a direction: coverage fails ahead of them, never behind. So a reader scrolling
+    // down carries slack below and exactly the buffer above — half the resident rows of a
+    // symmetric band, and one burst of first-measurements per recompute instead of two.
+    const buffer = 1000
+    const h = setup({ count: 4000, buffer })
+
+    // Far enough in that neither edge is clamped against an end of the list.
+    h.scroll(20_000)
+    const [from, to] = rendered(h)
+
+    const top = h.engine.cache.offsetOf(from)
+    // `+ 1` is the row's far edge: `offsetOf` is the top of a row, and what has to clear the
+    // band is the bottom of the last one.
+    const bottom = h.engine.cache.offsetOf(to + 1)
+    const visibleTop = 20_000
+    const visibleBottom = 20_000 + h.viewportSize
+
+    // Above: the guarantee and no more, within a row of rounding to a boundary.
+    expect(visibleTop - top).toBeGreaterThanOrEqual(buffer)
+    expect(visibleTop - top).toBeLessThan(buffer * (1 + 0.5))
+    // Below: the guarantee plus the slack.
+    expect(bottom - visibleBottom).toBeGreaterThanOrEqual(buffer * (1 + 0.5))
+  })
+
+  it('does not let the visibility deadline move the mounted range', async () => {
+    // Holding only works if whatever moves the held ends also renders the result. The
+    // visibility deadline timer wants a visible range and fires from `setTimeout`, outside any
+    // publish — so calling the full `computeRanges` there moved the hold with nothing rendering
+    // it. The next publish then found the hold covering, handed back the same tuple, and
+    // `needsRerender` reported nothing to do while the DOM still held the previous rows. Far
+    // enough into a scroll that leaves the scrollport with no mounted row over it at all.
+    //
+    // Two ingredients, and both are needed or this passes against the broken code: a `dwellMs`
+    // so the tracker actually arms a deadline, and content that moves *without* a publish
+    // behind it so the timer recomputes at an offset the last publish never saw.
+    //
+    // Asserted against an engine that reached the same place without a timer ever firing,
+    // rather than against a literal — the claim is that the deadline changed nothing.
+    vi.useFakeTimers()
+    try {
+      const withTimer = setup({
+        count: 2000,
+        buffer: 1000,
+        visibility: { rule: { mode: 'any' }, dwellMs: 50 },
+      })
+      withTimer.scroll(100)
+      withTimer.setOffset(5000)
+      await vi.advanceTimersByTimeAsync(60)
+      withTimer.scroll(5300)
+
+      const without = setup({ count: 2000, buffer: 1000 })
+      without.scroll(100)
+      without.scroll(5300)
+
+      expect(rendered(withTimer)).toEqual(rendered(without))
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('recomputes when the window it was holding has paged away', () => {
+    // The other half: no key resolves, which reads as nothing held.
+    const h = setup({ count: 100 })
+    h.scroll(600)
+    const before = rendered(h)
+
+    h.engine.setOptions({ keys: h.keys(100, 'other') })
+
+    expect(rendered(h)).not.toEqual(before)
+    expect(rendered(h)[0]).toBe(0)
   })
 })
 
