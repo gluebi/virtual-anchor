@@ -482,18 +482,16 @@ export function createEngine(initial: EngineOptions): Engine {
    * content, so the content still has the whole box to fill. The sticky slots are
    * the exception and they are already in the sum, because they are in flow.
    *
+   * `viewportSize` is passed rather than read, for the reason given at {@link syncGeometry}.
    */
-  const syncLeadingSpace = (totalSize: number): void => {
+  const syncLeadingSpace = (totalSize: number, viewportSize: number): void => {
     const occupied =
       slotSizes.header +
       slotSizes.stickyHeader +
       totalSize +
       slotSizes.footer +
       slotSizes.stickyFooter
-    const next =
-      options.alignToBottom === true
-        ? Math.max(0, viewport.getViewportSize() - occupied)
-        : 0
+    const next = options.alignToBottom === true ? Math.max(0, viewportSize - occupied) : 0
 
     if (next === leadingSpace) return
     leadingSpace = next
@@ -530,9 +528,29 @@ export function createEngine(initial: EngineOptions): Engine {
     scroller.notifyModelChanged()
   }
 
-  const syncGeometry = (): ListGeometry => {
-    listGeometry.update(geometry(), viewport.getViewportSize())
-    return listGeometry
+  /**
+   * Point the shared {@link ListGeometry} at the current insets and scrollport height.
+   *
+   * **Called once per pass, by the pass, and takes the height rather than reading it.** Both
+   * halves of that were costing something. `getViewportSize` is three DOM reads on an element
+   * scroller — a `getBoundingClientRect` plus `offsetHeight` and `clientHeight`, per
+   * `contentHeightOf` — and this used to make them itself, from each of its two callers:
+   * `computeRanges` and the visibility sample. The second of those runs *after* `publish` has
+   * written every mounted row's `top` and the paint offset, so its read was not a repeat but a
+   * forced synchronous layout, once per scroll event, to re-answer what the same pass had
+   * already answered. Its `update` was dead work on top, since nothing between the two calls
+   * moves an inset.
+   *
+   * A parameter rather than a cache inside `Viewport`, because the cache would need an
+   * invalidation signal that does not exist: `observeSize` watches the **border** box, and a
+   * horizontal scrollbar appearing changes `clientHeight` — and so the content height —
+   * without changing that box at all. A cache keyed on the observer would go quietly stale by
+   * the scrollbar's width; a parameter cannot.
+   *
+   * Must run *after* {@link syncLeadingSpace}, whose spacer `geometry()` folds in.
+   */
+  const syncGeometry = (viewportSize: number): void => {
+    listGeometry.update(geometry(), viewportSize)
   }
 
   /**
@@ -710,7 +728,8 @@ export function createEngine(initial: EngineOptions): Engine {
       return { rendered: EMPTY_RANGE, visible: EMPTY_RANGE }
     }
 
-    const g = syncGeometry()
+    // Already pointed at this pass's insets and scrollport height; see {@link syncGeometry}.
+    const g = listGeometry
     const visible = g.visibleBand(contentAt)
     const buffered = g.bufferedBand(contentAt, options.buffer ?? defaultBuffer())
 
@@ -1060,6 +1079,13 @@ export function createEngine(initial: EngineOptions): Engine {
     if (disposed) return
     const restoreScroll = restore !== 'none'
 
+    // **First, and before any write.** The scrollport's own box does not depend on the content
+    // size about to be written, so nothing requires this to come after — and coming *before*
+    // means it reads layout the browser already flushed for the last paint rather than forcing
+    // a fresh one. Why the whole pass shares one read is at {@link syncGeometry}; the other
+    // consumers are `syncLeadingSpace` below and the published snapshot.
+    const viewportSize = viewport.getViewportSize()
+
     // Grow (or shrink) the content *first*. A restored offset after a prepend is
     // larger than the old maximum, and the browser silently clamps a write that
     // exceeds it.
@@ -1067,7 +1093,9 @@ export function createEngine(initial: EngineOptions): Engine {
     // Before the content size and before any offset is derived: the spacer moves
     // the list's origin, so an anchor resolved against a stale one is wrong by
     // exactly the amount the spacer just changed by.
-    syncLeadingSpace(totalSize)
+    syncLeadingSpace(totalSize, viewportSize)
+    // After the spacer, whose height `geometry()` folds in, and before anything reads a band.
+    syncGeometry(viewportSize)
     surface.setLeadingSpace(leadingSpace)
     surface.setContentSize(totalSize)
 
@@ -1077,11 +1105,10 @@ export function createEngine(initial: EngineOptions): Engine {
     // from the same moment. Nothing between here and there changes it: the only
     // writes are `scrollTop` and the sub-pixel carry, neither of which alters the
     // scroller's extent by more than the threshold exists to absorb.
+    //
+    // This one genuinely has to stay on this side of the write, unlike the height above:
+    // the extent is exactly what `setContentSize` just changed.
     const maxOffset = viewport.getMaxScrollOffset()
-    // Hoisted for the same reason and read once for the same reason: the gesture-shift
-    // cap and the published state both want the same answer from the same moment, and
-    // `getViewportSize` is three layout reads on an element scroller.
-    const viewportSize = viewport.getViewportSize()
 
     // The anchor keeps the *user's* position stable. While a programmatic scroll
     // is in flight the scroller is authoritative instead — restoring an anchor
@@ -1292,6 +1319,8 @@ export function createEngine(initial: EngineOptions): Engine {
         // Content space, like every other sample: this fires when nothing else is
         // happening, so during a held correction it is usually the *only* sample taken.
         const contentAt = contentOffset()
+        // Its own pass, so its own sync: this fires when no publish is running.
+        syncGeometry(viewport.getViewportSize())
         sampleVisibility(computeRanges(contentAt).visible, contentAt)
       },
       Math.max(0, due - stamp),
@@ -1318,7 +1347,7 @@ export function createEngine(initial: EngineOptions): Engine {
     visible: readonly [number, number],
     contentAt: number,
   ): void => {
-    const g = syncGeometry()
+    const g = listGeometry
 
     // A closed gate means nothing is on screen — a collapsed accordion, a background
     // tab, a scroller scrolled off the page.
@@ -1914,7 +1943,7 @@ export function createEngine(initial: EngineOptions): Engine {
       // The spacer before the anchor, not after. `alignToBottom` moves the list's
       // origin, and an anchor derived against an origin of zero and then resolved
       // against the real one is wrong by the whole spacer.
-      syncLeadingSpace(cache.totalSize())
+      syncLeadingSpace(cache.totalSize(), viewport.getViewportSize())
       anchor = deriveAnchor(contentOffset(), cache, geometry())
       publish('none')
 
