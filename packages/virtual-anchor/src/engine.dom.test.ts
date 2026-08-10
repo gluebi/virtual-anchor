@@ -53,6 +53,14 @@ interface Harness {
    * far side of a style write, where it would force a layout instead of reading a flushed one.
    */
   viewportReadAt: number[]
+  /**
+   * `writes.length` at each `getScrollOffset` call, one entry per read.
+   *
+   * The same instrument as {@link viewportReadAt}, for the other layout-forcing read: it says
+   * where in a pass the scroll offset was consulted, so a case can assert that no style write
+   * landed in front of one.
+   */
+  scrollReadAt: number[]
   viewportSize: number
 }
 
@@ -121,9 +129,11 @@ const setup = (
      * fictional offset whatever the content did.
      */
     trackContent?: boolean
+    /** Truncate a written offset to an integer, as WebKit does. Same name and order as the iOS harness. */
+    truncateWrites?: boolean
   } = {},
 ): Harness => {
-  const { count = 50, trackContent = false, ...engineOptions } = options
+  const { count = 50, trackContent = false, truncateWrites = false, ...engineOptions } = options
 
   const scroller = document.createElement('div')
   const container = document.createElement('div')
@@ -139,6 +149,7 @@ const setup = (
   }
   const writes: string[] = []
   const viewportReadAt: number[] = []
+  const scrollReadAt: number[] = []
   const elements = new Map<ItemKey, HTMLElement>()
   const scrollListeners: (() => void)[] = []
   /**
@@ -182,7 +193,10 @@ const setup = (
   }
 
   const viewport: Viewport = {
-    getScrollOffset: () => state.offset,
+    getScrollOffset: () => {
+      scrollReadAt.push(writes.length)
+      return state.offset
+    },
     getViewportSize: () => {
       viewportReadAt.push(writes.length)
       return state.viewportSize
@@ -194,9 +208,12 @@ const setup = (
     setScrollOffset: (next) => {
       // Clamped, as a real scroller clamps: following writes the maximum, and a
       // fake that accepted anything would pass a test the browser would fail.
+      // Truncate then clamp, the order `engine.ios.dom.test.ts` uses. Identical here, where
+      // nothing sets both — but two harnesses that disagree on a fractional bound is a trap.
+      const accepted = truncateWrites ? Math.trunc(next) : next
       state.offset = trackContent
-        ? Math.min(Math.max(next, 0), Math.max(0, state.contentSize + state.leadingSpace - state.viewportSize))
-        : next
+        ? Math.min(Math.max(accepted, 0), Math.max(0, state.contentSize + state.leadingSpace - state.viewportSize))
+        : accepted
       writes.push(`scroll:${String(next)}`)
     },
     addEventListener: (type, listener) => {
@@ -236,6 +253,7 @@ const setup = (
     unmount,
     writes,
     viewportReadAt,
+    scrollReadAt,
     offset: () => state.offset,
     maxOffset: () => viewport.getMaxScrollOffset(),
     setOffset: (value) => {
@@ -909,6 +927,38 @@ describe('engine range hysteresis', () => {
 
     expect(rendered(h)).not.toEqual(before)
     expect(rendered(h)[0]).toBe(0)
+  })
+})
+
+describe('engine paint-offset write ordering', () => {
+  it('draws the paint offset after the last scroll read, not between', () => {
+    // `publish` writes the paint offset once, last, and after every read — the comment there
+    // says so, and the *banked* branch of `writeScroll` honoured it explicitly. The committed
+    // branch did not: `commitScroll` flushed the carry itself, and it sits between the scroll
+    // write and this pass's final two reads of `scrollTop`. A style write in front of a read is
+    // a forced synchronous layout, and on WebKit it is every commit, because a truncated write
+    // means the carry always moves — once per measured row through a fling.
+    //
+    // `truncateWrites` is what makes the carry non-zero at all, so this case cannot pass by the
+    // paint offset simply never being written.
+    const h = setup({ count: 200, truncateWrites: true })
+    for (const key of h.keys(8)) mountItem(h, key, 100)
+    h.scroll(900)
+
+    h.writes.length = 0
+    h.scrollReadAt.length = 0
+    // A row above the viewport growing: the anchor holds the view, so the offset is re-derived
+    // and committed — which is the path that carries.
+    h.measure('c0', 137.5)
+
+    const paintAt = h.writes.findIndex((write) => write.startsWith('paint:'))
+    expect(paintAt, 'no paint offset was written, so this proves nothing').toBeGreaterThanOrEqual(0)
+    // `Math.max()` of nothing is -Infinity, which would satisfy the bound below by the offset
+    // never having been read at all.
+    expect(h.scrollReadAt, 'nothing read the scroll offset, so this proves nothing').not.toHaveLength(0)
+    // Every read happened at or before the point the paint offset was drawn. A read *after* it
+    // would have been recorded at a `writes.length` past that index.
+    expect(Math.max(...h.scrollReadAt)).toBeLessThanOrEqual(paintAt)
   })
 })
 
