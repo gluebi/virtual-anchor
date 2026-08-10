@@ -1579,7 +1579,16 @@ export function createEngine(initial: EngineOptions): Engine {
         cleared: invalidated ? cache.length : 0,
       }))
     }
-    if (invalidated) cache.clearAll()
+    if (invalidated) {
+      cache.clearAll()
+      // And drop the hold. Every row is back on its estimate, so every offset the held range
+      // was judged against has moved — and unlike a prepend, the keys still resolve, so nothing
+      // else here would notice. The containment test would usually catch it on the next pass;
+      // "usually" is not the standard the rest of this file holds itself to, and a range held
+      // across a discarded cache is a range chosen for a layout that no longer exists.
+      heldStartKey = undefined
+      heldEndKey = undefined
+    }
     signatureKnown = true
     return invalidated
   }
