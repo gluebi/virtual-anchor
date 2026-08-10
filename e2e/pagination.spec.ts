@@ -97,8 +97,15 @@ test.describe('infinite scrolling', () => {
     }
 
     // Still a window, not the whole collection: appending must not mount everything.
+    //
+    // The bound is against the *collection*, not against a remembered row count. Four pages of
+    // `PER_PAGE` are loaded by now, and the claim is that the list mounts a fraction of them —
+    // so it is written as that fraction. It read `< 40`, which was the mounted count of the
+    // day and had to move the moment overscan did: 2500px of buffer plus the slack that lets
+    // the mounted range be held across a scroll puts it at 44 on this demo's rows.
+    const loaded = 4 * PER_PAGE
     const mounted = await page.locator('[data-virtual-key]').count()
-    expect(mounted).toBeLessThan(40)
+    expect(mounted).toBeLessThan(loaded / 2)
   })
 
   test('defers a fetch while a programmatic scroll is in flight', async ({ page }) => {
