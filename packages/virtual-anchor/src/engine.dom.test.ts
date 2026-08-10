@@ -837,6 +837,32 @@ describe('engine range hysteresis', () => {
     expect(rendered(h)).toEqual([from + 10, to + 10])
   })
 
+  it('puts the slack on the edge that ran out, not behind the reader', () => {
+    // Which edge failed coverage says which way the reader is going, without the engine
+    // tracking a direction: coverage fails ahead of them, never behind. So a reader scrolling
+    // down carries slack below and exactly the buffer above — half the resident rows of a
+    // symmetric band, and one burst of first-measurements per recompute instead of two.
+    const buffer = 1000
+    const h = setup({ count: 4000, buffer })
+
+    // Far enough in that neither edge is clamped against an end of the list.
+    h.scroll(20_000)
+    const [from, to] = rendered(h)
+
+    const top = h.engine.cache.offsetOf(from)
+    // `+ 1` is the row's far edge: `offsetOf` is the top of a row, and what has to clear the
+    // band is the bottom of the last one.
+    const bottom = h.engine.cache.offsetOf(to + 1)
+    const visibleTop = 20_000
+    const visibleBottom = 20_000 + h.viewportSize
+
+    // Above: the guarantee and no more, within a row of rounding to a boundary.
+    expect(visibleTop - top).toBeGreaterThanOrEqual(buffer)
+    expect(visibleTop - top).toBeLessThan(buffer * (1 + 0.5))
+    // Below: the guarantee plus the slack.
+    expect(bottom - visibleBottom).toBeGreaterThanOrEqual(buffer * (1 + 0.5))
+  })
+
   it('does not let the visibility deadline move the mounted range', async () => {
     // Holding only works if whatever moves the held ends also renders the result. The
     // visibility deadline timer wants a visible range and fires from `setTimeout`, outside any

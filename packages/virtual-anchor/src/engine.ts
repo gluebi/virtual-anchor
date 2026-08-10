@@ -194,7 +194,13 @@ const DEFAULT_BUFFER = 2500
 
 
 /**
- * Most rows the default may mount on each side — including the slack, not just the guarantee.
+ * Most rows the default may *guarantee* on each side.
+ *
+ * Bounds the mounted band too, at `1 + RANGE_SLACK_RATIO` times this — the slack is a fraction of
+ * the guarantee, so 24 rows of coverage is at most 36 rows resident and no separate cap is
+ * needed. Stated because an earlier attempt divided the guarantee to keep the *mounted* figure at
+ * 24, which quietly cut the coverage `blanking.spec.ts` calibrated from 2500px to 1920px on the
+ * demo — a 23% reduction in the one number that spec exists to choose.
  *
  * `DEFAULT_BUFFER` is a distance, which is right for what it buys — latency times velocity is a
  * distance — and wrong for what it costs, which is rows. Calibrated on this demo's ~162px
@@ -738,19 +744,9 @@ export function createEngine(initial: EngineOptions): Engine {
   let paintOffset = 0
 
 
-  /**
-   * {@link DEFAULT_BUFFER}, bounded so that {@link MAX_DEFAULT_BUFFER_ROWS} still bounds the rows
-   * actually mounted.
-   *
-   * The division is the whole of that: the cap is written in *rows*, and what mounts a row is the
-   * band including {@link RANGE_SLACK_RATIO}, not the coverage guarantee underneath it. Capping
-   * the guarantee instead would let a list of short rows mount half as many again as the number
-   * that constant names. It binds only where the row cap already bound — on the demo's ~162px
-   * comments `24 * 162 / 1.5` is 2592, so the px limit still wins and coverage stays at the 2500
-   * `blanking.spec.ts` measured.
-   */
+  /** {@link DEFAULT_BUFFER}, bounded by {@link MAX_DEFAULT_BUFFER_ROWS} rows of the current estimate. */
   const defaultBuffer = (): number =>
-    Math.min(DEFAULT_BUFFER, (MAX_DEFAULT_BUFFER_ROWS * cache.estimate) / (1 + RANGE_SLACK_RATIO))
+    Math.min(DEFAULT_BUFFER, MAX_DEFAULT_BUFFER_ROWS * cache.estimate)
 
   const writePaintOffset = (): void => {
     const next = carry + pendingShift
@@ -857,20 +853,32 @@ export function createEngine(initial: EngineOptions): Engine {
     // the React render `renderedRange` no longer provokes. See {@link RANGE_SLACK_RATIO}.
     //
     // `needFrom`/`needTo` are the rows the buffer demands right now: the coverage guarantee,
-    // unchanged from when this was the mounted range itself. Resolved after the hold so that a
-    // pass with nothing held does not walk the tree for an answer it cannot use.
+    // unchanged from when this was the mounted range itself.
     let held = heldRange()
-    if (
-      held === null ||
-      held[0] > cache.indexAt(buffered.start) ||
-      held[1] < cache.indexAt(buffered.end)
-    ) {
-      const mounted = g.bufferedBand(contentAt, buffer * (1 + RANGE_SLACK_RATIO))
+    const needFrom = held === null ? 0 : cache.indexAt(buffered.start)
+    const needTo = held === null ? 0 : cache.indexAt(buffered.end)
+    if (held === null || held[0] > needFrom || held[1] < needTo) {
+      // **The slack goes on the edge that ran out, not on both.** Which edge that is says which
+      // way the reader is going without the engine tracking a direction: coverage fails ahead of
+      // them, never behind. Growing both would carry the same slack behind the reader, where it
+      // buys nothing and costs rows on every publish for as long as they keep going — and it
+      // would make each recompute mount two bursts of first-measurements instead of one, which is
+      // the shape that makes a growing model lumpy near the end of a list.
+      //
+      // `bufferedBand` has taken `before` and `after` separately since #65 and had no caller that
+      // used them; this is the caller it was shaped for.
+      const slack = buffer * RANGE_SLACK_RATIO
+      const mounted = g.bufferedBand(
+        contentAt,
+        buffer + (held === null || held[0] > needFrom ? slack : 0),
+        buffer + (held === null || held[1] < needTo ? slack : 0),
+      )
       held = [cache.indexAt(mounted.start), cache.indexAt(mounted.end)]
       heldStartKey = cache.keyAt(held[0])
       heldEndKey = cache.keyAt(held[1])
     }
     lastRendered = sameRange(lastRendered, held[0], held[1])
+
     lastVisible = computeVisible(contentAt)
     return { rendered: lastRendered, visible: lastVisible }
   }
