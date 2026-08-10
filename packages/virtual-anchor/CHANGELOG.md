@@ -1,5 +1,200 @@
 # virtual-anchor
 
+## 0.7.1
+
+### Patch Changes
+
+- 3d93f6b: Make the committed scroll write honour the ordering the banked one already did.
+
+  `publish` writes the paint offset once, last, and after every read. Its own comment says so, and
+  the _banked_ branch of `writeScroll` honoured it explicitly — "Deliberately not written yet …
+  A style write here would force a second synchronous layout on the hottest path in the file."
+  The **committed** branch did not. `commitScroll` drew the carry itself, through `applyCarry`,
+  and it sits between the `scrollTop` write and this pass's final two reads of `scrollTop` — so
+  that draw turned both into a forced synchronous layout.
+
+  **It does not show on the benchmark, and this is not sold as a speed-up.** Measured back to
+  back against the change below it on a quiet machine, `perf/headroom.spec.ts` moves in both
+  directions and by less than its own run-to-run spread: at 6× CPU the handler p50 goes 0.40ms to
+  0.20ms, at 10× it goes 0.30ms to 0.90ms, at 20× the dropped-frame share goes 9.8% to 8.1% while
+  the p95 goes 5.90ms to 6.10ms. There is no signal there. The reason is the two changes below
+  this one: holding the mounted range made publishes that _commit_ a scroll much rarer, so the
+  layout this removes now fires seldom on the wheel scenario the harness drives.
+
+  What is not in doubt is that the layout was being forced, because a unit test discriminates
+  deterministically — the paint offset lands at write index 3 with a scroll read at 4, and after
+  the change the last read is at 3 with the paint at 48. And on WebKit it is _every_ commit rather
+  than an occasional one: it truncates a written offset to an integer, so the carry always moves
+  and the write is never deduped away.
+
+  So this is filed as restoring an invariant the file already states rather than as a measured
+  win. A reader deciding whether it is worth carrying should know both halves.
+
+  The carry is now recorded at the two call sites inside `publish` and drawn only by `publish`'s
+  terminal flush. `reconcileGestureShift` still draws on its own next line, because it runs from
+  the gate's `onOpen` with no publish behind it and needs both halves in one task; the scroller
+  keeps the drawing `applyCarry`, because its frame loop is outside a publish too.
+
+  The `follow` branch gains the same thing incidentally: its `contentOffset()` read used to sit
+  behind an `applyCarry(0)`.
+
+  Pinned by a case that fails against the old code — the paint offset lands at write index 3 with
+  a scroll read at 4, where it should be the other way round. Modelling the carry at all needed
+  the test harness to truncate written offsets the way WebKit does, which it now does under the
+  same option name and in the same order as the iOS harness that already had one.
+
+- 5bfea32: Hold the mounted range across a scroll instead of recomputing it on every event.
+
+  `computeRanges` ran per scroll event and the mounted range moved the instant the buffered band
+  crossed a row boundary — and `needsRerender` trips on exactly that. Browsers coalesce scroll
+  events to one per frame, so the ceiling was a React render per frame, each reconciling every
+  mounted row; #65 raising the resting buffer to 2500px multiplied what each one cost.
+
+  The range is now **held** while the buffered band still fits inside it, and recomputed to a
+  wider band when it does not.
+
+  The cadence is arithmetic: a recompute happens once per `buffer * RANGE_SLACK_RATIO` = 1250px
+  of travel instead of once per row, and publishes are capped at one per frame — so on the demo's
+  ~162px comments that is 60 store-driven renders a second down to 32 during a 40,000px/s fling,
+  and 12 down to 1.6 at an ordinary reading speed of 2,000px/s.
+
+  What that is worth was measured with `perf/headroom.spec.ts`, medians of three to four runs,
+  one session on an M1, against `main` — so this table is the whole stack, not this change alone:
+
+  | slowdown | demo  | fps         | drop%       | handler p50 | handler p95  |
+  | -------- | ----- | ----------- | ----------- | ----------- | ------------ |
+  | 1×       | live  | 60.0 → 60.0 | 0 → 0       | 0.30 → 0.20 | 1.70 → 0.70  |
+  | 4×       | live  | 60.0 → 60.0 | 0 → 0       | 0.70 → 0.40 | 3.00 → 1.00  |
+  | 6×       | live  | 60.0 → 60.0 | 0 → 0       | 1.30 → 0.50 | 4.60 → 1.50  |
+  | 10×      | live  | 59.0 → 58.5 | 1.6 → 2.4   | 2.10 → 1.10 | 7.60 → 2.80  |
+  | 20×      | live  | 37.7 → 52.7 | 37.1 → 12.2 | 7.80 → 1.20 | 18.80 → 4.90 |
+  | 20×      | quiet | 39.3 → 57.6 | 34.4 → 4.1  | 6.90 → 0.10 | 15.10 → 4.00 |
+
+  **`blanking.spec.ts` is within its own noise, and is reported rather than claimed.** Back to
+  back on the same machine at 40,000px/s it gave 0 blank captures of 79 against `main`'s 1 at 6×
+  CPU, and 2 of 78 against `main`'s 0 at 20×; three runs of this branch at 20× gave 0, 9 and 2.
+  That spec does not repeat and take a median — its own header says so — and single counts of
+  small integers cannot separate those. What can be said structurally is that the coverage
+  guarantee is byte-identical to `main` and the mounted band is strictly larger, so there is no
+  mechanism by which the compositor has _fewer_ rows ahead of it than before.
+
+  The held ends are remembered **by key**, for the same reason the anchor is a key: two integers
+  would name two different rows the moment anything is inserted above. Keeping keys means a
+  prepend does not remount the window at all — the ends still name their rows, so the same set
+  stays mounted, shifted. A key that stops resolving reads as nothing held and recomputes.
+
+  There are two invalidation mechanisms and they divide cleanly: identity changes (prepend,
+  append, a window that paged away) are caught by the keys, and geometry changes (a gap, a
+  re-estimate, a discarded measurement cache, a resize, a slot appearing) by the containment test,
+  which is computed from live offsets every pass. Neither needs a flag.
+
+  There is a third fact the hold rests on, and it is the one that had to be found the hard way:
+  only a publish may move it. The visibility deadline timer wants a visible range and fires from
+  outside any publish, so it now asks for exactly that and nothing else — moving the mounted range
+  from there moved it with nothing rendering the result.
+
+  `MAX_DEFAULT_BUFFER_ROWS` now bounds the rows the default actually _mounts_ rather than the rows
+  its guarantee covers, since the slack is what mounts a row. On the demo's comments the pixel
+  limit still wins and coverage stays at 2500; on a list of short rows the cap binds where it
+  always meant to.
+
+  Costs rows resident — the mounted band grows by half the buffer on each side, and `itemsFor`
+  still allocates one object per mounted row on every publish whether the range moved or not. A
+  skipped render is the whole of React's work for every mounted row, so the trade is favourable at
+  fling speed and lopsidedly so at reading speed.
+
+- f3f27da: Read the scrollport's height once per pass, instead of three times.
+
+  `getViewportSize` is three DOM reads on an element scroller — a `getBoundingClientRect` plus
+  `offsetHeight` and `clientHeight`, per `contentHeightOf` — and a publish reached it from three
+  places: `syncLeadingSpace` for the `alignToBottom` spacer, `computeRanges` through
+  `syncGeometry`, and the visibility sample through `syncGeometry` again.
+
+  The third one is the one that cost something. `sampleVisibility` is the last thing `publish`
+  does, so it runs **after** every mounted row's `top` and the paint offset have been written.
+  A read there is not a repeat, it is a forced synchronous layout — once per scroll event — to
+  re-answer a question the same pass had already answered. `engine.dom.test.ts` pins it: with the
+  old code the reads land at write-counts `[220, 220, 254]`, and that third entry is thirty-four
+  style writes after the pass began.
+
+  The pass now reads it once, before it writes anything, and hands it down. `syncGeometry` also
+  moves up to the pass rather than being called by each consumer, which removes a second
+  `listGeometry.update` with identical arguments in every path that existed.
+
+  Measured with `perf/headroom.spec.ts`, medians of four runs, same session and same machine as
+  the change below it in the stack. Against that parent, so this is what removing the forced
+  layout buys on its own:
+
+  | slowdown | demo  | fps         | drop%       | handler p50 | handler p95  |
+  | -------- | ----- | ----------- | ----------- | ----------- | ------------ |
+  | 1×       | live  | 60.0 → 60.0 | 0 → 0       | 0.40 → 0.40 | 1.80 → 1.60  |
+  | 6×       | live  | 60.0 → 60.0 | 0 → 0       | 0.50 → 0.50 | 2.70 → 2.40  |
+  | 10×      | live  | 60.0 → 60.0 | 0 → 0       | 0.90 → 0.90 | 4.50 → 4.00  |
+  | 20×      | live  | 43.9 → 46.3 | 26.8 → 22.8 | 4.40 → 4.00 | 10.60 → 9.80 |
+  | 20×      | quiet | 47.3 → 49.8 | 21.1 → 17.1 | 2.80 → 1.90 | 8.50 → 7.80  |
+
+  The smallest of the three steps, and honestly so: one forced layout per publish is one frame's
+  worth of headroom, not a frame rate. What makes it worth having is that it is monotonic — every
+  CPU level and both demo modes improve, none regresses — and that the thing removed was work
+  nobody had asked for.
+
+  Deliberately **not** a cache inside `Viewport`, which is the obvious alternative: it would need
+  an invalidation signal that does not exist. `observeSize` watches the _border_ box, and a
+  horizontal scrollbar appearing changes `clientHeight` — and so the content height — without
+  moving that box at all. A cache keyed on that observer would go quietly stale by the
+  scrollbar's width. A parameter cannot.
+
+  One path still reads for itself, and should: the visibility deadline timer is not inside a
+  publish, so it has no pass to take the number from. It fires when nothing else is happening, so
+  the read is neither hot nor forced.
+
+  No behaviour changes. `getMaxScrollOffset` still reads the DOM after the content-size write,
+  because the extent is exactly what that write changed — deriving it from our own total is
+  TanStack #1001, which `viewport.ts` already warns against.
+
+- b3170ee: Stop reading a row's rect when its height is already known.
+
+  `observeItem` measured every mounting row synchronously. The comment defending that is right
+  about why the read exists — ResizeObserver's first callback lands after the next rendering
+  update, so a row with nothing in the cache would paint one frame at its estimate — but that is
+  an argument about a row with _no measurement_, not about every row that mounts.
+
+  `resizer.measure` is a `getBoundingClientRect` called from a ref callback, immediately after
+  the offset write on the line above. So it is a forced synchronous layout in the middle of
+  React's commit, and one **per row** rather than one per commit, because each row's `style.top`
+  dirties layout again before the next row reads. It was paid for every row scrolled back over
+  and for every row of a list restored from a `sizeSnapshot`, where the answer was already in the
+  cache. Where the rect then disagreed with the snapshot by a pixel it cost the whole of
+  `publish` as well — three more layout reads and a re-render — again per row. The resting buffer
+  has been 2500px since #65, so that is tens of rows per range change rather than a handful.
+
+  Measured with `perf/headroom.spec.ts`, medians of four runs, one session on an M1, against
+  `main`. The wheel scenario at increasing emulated CPU slowdown is the axis that separates
+  headroom from "already at the display ceiling":
+
+  | slowdown | demo  | fps         | drop%       | handler p50 | handler p95   |
+  | -------- | ----- | ----------- | ----------- | ----------- | ------------- |
+  | 1×       | live  | 60.0 → 60.0 | 0 → 0       | 0.50 → 0.40 | 2.50 → 1.80   |
+  | 6×       | live  | 60.0 → 60.0 | 0 → 0       | 0.60 → 0.50 | 3.60 → 2.70   |
+  | 10×      | live  | 60.0 → 60.0 | 0 → 0       | 1.10 → 0.90 | 6.70 → 4.50   |
+  | 20×      | live  | 39.4 → 43.9 | 34.4 → 26.8 | 7.60 → 4.40 | 19.70 → 10.60 |
+  | 20×      | quiet | 47.3 → 47.3 | 21.1 → 21.1 | 4.30 → 2.80 | 13.50 → 8.50  |
+
+  Below 10× the display is the ceiling and nothing visible changes; the p95 handler still falls,
+  which is the headroom the 20× row spends. `scroll-fps` is unchanged at 60fps across every
+  dataset, and `scrollToKey` still reports `settled=true deviation=0.000px` — so none of this
+  moved a landing.
+
+  Skipping the read is safe because of something `resizer` already did and had not written down:
+  detaching deletes the element's `lastSizes` entry, so the synthetic first entry the observer
+  delivers for the row's replacement element is reported rather than dropped as a duplicate. A
+  height that changed while the row was unmounted is still corrected, one frame later — the
+  latency every other virtual list accepts for every row, taken here only where the cache has
+  nothing better. That line now carries a comment saying so.
+
+  The hot path is untouched: a row scrolling into view for the first time still measures
+  synchronously, which during a fling through variable-height text is very nearly all of them.
+
 ## 0.7.0
 
 ### Minor Changes
