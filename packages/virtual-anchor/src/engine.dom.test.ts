@@ -291,13 +291,21 @@ const mountSlot = (
   }
 }
 
-/** Mount an element for a key, as the React adapter's ref callback would. */
-const mountItem = (h: Harness, key: ItemKey, height: number): HTMLElement => {
+/**
+ * Mount an element for a key, as the React adapter's ref callback would.
+ *
+ * Hands back the rect spy and the detach as well as the element, the shape `mountSlot`
+ * already has. Both are needed to say anything about *whether* a row's rect was read and
+ * about what happens when the same key mounts a second time — and a caller wanting only the
+ * element still destructures one field rather than reaching for a second helper.
+ */
+const mountItem = (h: Harness, key: ItemKey, height: number) => {
   const element = document.createElement('div')
-  vi.spyOn(element, 'getBoundingClientRect').mockReturnValue(new DOMRect(0, 0, 600, height))
+  const rect = vi
+    .spyOn(element, 'getBoundingClientRect')
+    .mockReturnValue(new DOMRect(0, 0, 600, height))
   document.body.appendChild(element)
-  h.engine.observeItem(element, key)
-  return element
+  return { element, rect, detach: h.engine.observeItem(element, key) }
 }
 
 beforeEach(() => {
@@ -583,7 +591,7 @@ describe('engine anchoring', () => {
     const h = setup({ count: 50 })
     h.scroll(1000)
 
-    const element = mountItem(h, 'c2', 400)
+    const { element } = mountItem(h, 'c2', 400)
     FakeResizeObserver.deliverTo(element, 400)
 
     // c2 grew by 300px, all of it above the viewport, so the offset follows it.
@@ -595,7 +603,7 @@ describe('engine anchoring', () => {
     const h = setup({ count: 50 })
     h.scroll(1000)
 
-    const element = mountItem(h, 'c40', 900)
+    const { element } = mountItem(h, 'c40', 900)
     FakeResizeObserver.deliverTo(element, 900)
     expect(h.offset()).toBe(1000)
   })
@@ -707,7 +715,7 @@ describe('engine measurement invalidation', () => {
     // wasteful and — with a restored snapshot — destructive. This is the case the width
     // fix above must not swallow into itself.
     const h = setup({ count: 50 })
-    const element = mountItem(h, 'c0', 250)
+    const { element } = mountItem(h, 'c0', 250)
     FakeResizeObserver.deliverTo(element, 250)
     expect(h.engine.cache.measuredCount).toBe(1)
 
@@ -754,6 +762,43 @@ describe('engine measurement invalidation', () => {
       },
     })
     expect(h.engine.cache.measuredCount).toBe(0)
+  })
+})
+
+describe('engine mount measurement', () => {
+  // Why the read is conditional at all is argued where the condition is, in `observeItem`.
+  // These three pin the two halves of it and the property it rests on.
+
+  it('measures a row it has no size for', () => {
+    // The positive control, so the skip below cannot pass by the read having been deleted.
+    const h = setup({ count: 20 })
+    const first = mountItem(h, 'c0', 250)
+
+    expect(first.rect).toHaveBeenCalled()
+    expect(h.engine.cache.sizeOf(0)).toBe(250)
+  })
+
+  it('does not read a row’s rect when its height is already known', () => {
+    const h = setup({ count: 20 })
+    mountItem(h, 'c0', 250).detach()
+
+    const remount = mountItem(h, 'c0', 250)
+    expect(remount.rect).not.toHaveBeenCalled()
+    expect(h.engine.cache.sizeOf(0)).toBe(250)
+  })
+
+  it('still corrects a row whose height changed while it was unmounted', () => {
+    // The property the skip rests on, and it belongs to `resizer` rather than to the engine:
+    // detaching forgets the remembered size, so the observer's synthetic first entry for the
+    // replacement element is reported rather than dropped as a duplicate.
+    const h = setup({ count: 20 })
+    mountItem(h, 'c0', 250).detach()
+
+    const remount = mountItem(h, 'c0', 300)
+    expect(h.engine.cache.sizeOf(0)).toBe(250)
+
+    FakeResizeObserver.deliverTo(remount.element, 300)
+    expect(h.engine.cache.sizeOf(0)).toBe(300)
   })
 })
 

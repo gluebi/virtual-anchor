@@ -230,6 +230,12 @@ export function createResizer(options: ResizerOptions): Resizer {
 
       return () => {
         keys.delete(element)
+        // Not merely tidying up after `unobserve`: this line is what lets the engine skip the
+        // synchronous rect read for a row it has already measured. Without it, the synthetic
+        // first entry the observer delivers for the row's *next* element would match the
+        // remembered value and be dropped as a duplicate — so a height that changed while the
+        // row was unmounted would never be reported, and the cache would keep the stale one
+        // for good. See `observeItem` in `engine.ts`.
         lastSizes.delete(key)
         observer?.unobserve(element)
       }
