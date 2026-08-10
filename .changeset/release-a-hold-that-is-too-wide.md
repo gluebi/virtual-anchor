@@ -38,5 +38,6 @@ two-row list to 1,502 and asserts the mounted range is the band around a reader 
 of the cache rather than written as a row count. Against the old code it reports "mounted 1502 of
 1502 rows".
 
-Two size limits move by 0.1kB to fit it. The core entry is left alone at 10.08kB against its 10.1kB
-limit — it still passes, but that is all the headroom there is.
+All three affected size limits move by 0.1kB to fit it. The core entry needed it too: 10.11kB
+against a 10.1kB limit, where the same source measures 10.08kB locally — 0.02kB of headroom on that
+budget is noise between toolchains, not margin.
