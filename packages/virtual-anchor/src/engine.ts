@@ -253,6 +253,29 @@ const MAX_DEFAULT_BUFFER_ROWS = 24
 const RANGE_SLACK_RATIO = 0.5
 
 /**
+ * How far past the buffered band a *live* hold's edge may sit, in slacks, before `computeRanges`
+ * stops believing it was computed for this list.
+ *
+ * Two, and the arithmetic is tight rather than chosen: a recompute grants one slack beyond the band
+ * at the edge that ran out, and the reader travels one more before the coverage test fires at the
+ * other edge. So an edge two slacks clear of the band is a hold at the last moment of its
+ * legitimate life, and anything past that is a hold from a list this no longer is.
+ *
+ * It exists because the coverage test is one-sided — it asks whether the hold is too *narrow* — so
+ * without this nothing ever revisited one that was far too wide. A list momentarily shorter than
+ * its own band produces exactly that: the band spans everything, so the hold is the whole list, and
+ * the two keys it pins are the list's first and last. Where those keys stay first and last, as an
+ * opener and a footer row do, the hold covers the whole list for as long as it exists.
+ *
+ * **This bounds displacement, not extent, and does not loosen the cap
+ * {@link MAX_DEFAULT_BUFFER_ROWS} argues for.** A held range's *span* stays what it was granted —
+ * `buffer + slack` a side — and only drifts relative to the moving band; a release takes the slack
+ * on both edges, for that same per-side figure. So "at most 36 rows resident" survives unchanged,
+ * and the two numbers are not comparable even though both are counted in slacks.
+ */
+const MAX_HOLD_DRIFT_SLACKS = 2
+
+/**
  * How close to the end still counts as being at it.
  *
  * Small, because this is slack for rounding rather than a "near the bottom"
@@ -855,9 +878,26 @@ export function createEngine(initial: EngineOptions): Engine {
     //
     // `needFrom`/`needTo` are the rows the buffer demands right now: the coverage guarantee,
     // unchanged from when this was the mounted range itself.
+    const slack = buffer * RANGE_SLACK_RATIO
     let held = heldRange()
     const needFrom = held === null ? 0 : cache.indexAt(buffered.start)
     const needTo = held === null ? 0 : cache.indexAt(buffered.end)
+
+    // A hold that covers the band but reaches {@link MAX_HOLD_DRIFT_SLACKS} slacks past it was
+    // computed against a list this is no longer — the shape a list momentarily shorter than its own
+    // band produces. Released the way an unresolvable key already is: as nothing held, which
+    // recomputes below and grants the slack on both edges, both of which a fresh hold wants.
+    //
+    // Guarded on coverage rather than folded into the test below, for two reasons: an edge that has
+    // already run out is going to recompute anyway and would take slack on one side only, and this
+    // is what keeps the extra work off the frames the hold exists to make cheap.
+    if (held !== null && held[0] <= needFrom && held[1] >= needTo) {
+      const drift = g.bufferedBand(contentAt, buffer + MAX_HOLD_DRIFT_SLACKS * slack)
+      if (held[0] < cache.indexAt(drift.start) || held[1] > cache.indexAt(drift.end)) {
+        held = null
+      }
+    }
+
     if (held === null || held[0] > needFrom || held[1] < needTo) {
       // **The slack goes on the edge that ran out, not on both.** Which edge that is says which
       // way the reader is going without the engine tracking a direction: coverage fails ahead of
@@ -868,7 +908,6 @@ export function createEngine(initial: EngineOptions): Engine {
       //
       // `bufferedBand` has taken `before` and `after` separately since #65 and had no caller that
       // used them; this is the caller it was shaped for.
-      const slack = buffer * RANGE_SLACK_RATIO
       const mounted = g.bufferedBand(
         contentAt,
         buffer + (held === null || held[0] > needFrom ? slack : 0),

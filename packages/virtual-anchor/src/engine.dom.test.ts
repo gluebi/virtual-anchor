@@ -928,6 +928,31 @@ describe('engine range hysteresis', () => {
     expect(rendered(h)).not.toEqual(before)
     expect(rendered(h)[0]).toBe(0)
   })
+
+  it('drops a hold computed while the list was shorter than its own band', () => {
+    // The hold's release was one-sided: only a hold too *narrow* to cover the buffer was revisited,
+    // so one that was far too wide was kept for as long as its keys resolved. A list shorter than
+    // its own band computes exactly that — the band spans everything, so the hold is the whole
+    // list, and the two keys it pins are the list's first and last. Where those stay first and
+    // last, as an opener and a footer row do, it never comes back.
+    const buffer = 1000
+    const h = setup({ buffer, keys: ['opener', 'footer'] })
+    // Two rows against an 800px scrollport and a 1000px buffer: the whole list, correctly.
+    expect(rendered(h)).toEqual([0, 1])
+
+    const offset = 75_000
+    h.engine.setOptions({ keys: ['opener', ...h.keys(1500), 'footer'] })
+    h.scroll(offset)
+
+    // Asked of the cache rather than written as a row count, as `never lets the mounted range fall
+    // inside the buffer` above does: the band the reader needs, plus one slack of drift a side.
+    const slack = buffer * 0.5
+    const [from, to] = rendered(h)
+    expect(from, `mounted ${String(to - from + 1)} of ${String(h.engine.cache.length)} rows`)
+      .toBeGreaterThanOrEqual(h.engine.cache.indexAt(offset - buffer - slack))
+    expect(to, `mounted ${String(to - from + 1)} of ${String(h.engine.cache.length)} rows`)
+      .toBeLessThanOrEqual(h.engine.cache.indexAt(offset + h.viewportSize + buffer + slack))
+  })
 })
 
 describe('engine paint-offset write ordering', () => {
