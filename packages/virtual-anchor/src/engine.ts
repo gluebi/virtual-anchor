@@ -766,6 +766,7 @@ export function createEngine(initial: EngineOptions): Engine {
     surface.setPaintOffset(next)
   }
 
+  /** Record the carry and draw it — for the scroller, which runs outside a publish. */
   const applyCarry = (next: number): void => {
     carry = next
     writePaintOffset()
@@ -1123,7 +1124,17 @@ export function createEngine(initial: EngineOptions): Engine {
 
     // Cleared *after* the write, so the two never both describe the same correction.
     pendingShift = 0
-    applyCarry(carryFor(offset, viewport.getScrollOffset()))
+    // Recorded, not drawn, and that is the whole of this line. Drawing the carry writes
+    // `container.style.top`, and this sits between the scroll write above and `publish`'s last
+    // two reads of `scrollTop` — so a flush here turns both into a forced synchronous layout.
+    // On WebKit it is *every* commit, because it truncates a written offset to an integer and
+    // the carry therefore always moves: once per measured row through a fling.
+    //
+    // Both callers draw it at a better moment. `writeScroll` runs inside `publish`, which
+    // flushes once, last, after every read — the banked branch above already honoured that and
+    // says so; this branch did not. `reconcileGestureShift` flushes on its very next line,
+    // because it needs both halves in one task.
+    carry = carryFor(offset, viewport.getScrollOffset())
   }
 
   /** Bound the queue at its one declared maximum, wherever an intent is recorded. */
@@ -1293,7 +1304,10 @@ export function createEngine(initial: EngineOptions): Engine {
       // following stops — the option flipping off, the reader scrolling back — the
       // next publish restores that stale position and the view jumps backwards.
       if (writeScroll(maxOffset, restore, maxOffset)) {
-        applyCarry(0)
+        // Recorded rather than drawn, like every carry move inside this pass; `publish`
+        // flushes last. It also keeps the `contentOffset()` two lines below off the far side
+        // of a style write.
+        carry = 0
         // Synchronously, rather than waiting for the scroll event: a publish later in
         // the same tick would otherwise resolve the old anchor and fight this write.
         // The event still arrives and derives the same value again.
