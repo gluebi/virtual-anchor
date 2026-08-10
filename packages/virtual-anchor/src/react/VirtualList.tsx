@@ -114,6 +114,14 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
    * A composer, a "N new comments" pill. Rendered after `footer`, so the footer
    * scrolls above it. Counts against the height available to items, so an item
    * aligned to the end comes to rest above it rather than behind it.
+   *
+   * The bottom edge, not the last comment — on a thread too short to fill the
+   * scrollport the sizer is padded out to it, and the slack opens between the
+   * last comment and this. `position: sticky` alone cannot do that: it lifts a
+   * box to an edge and never pushes one down to one, which is why an empty
+   * state or a filtered-to-nothing list leaves every other library's composer
+   * floating halfway up the box. The padding stops at the scrollport, so a
+   * short thread gains no scroll range from it.
    */
   stickyFooter?: ReactNode
 

@@ -594,6 +594,49 @@ export function createEngine(initial: EngineOptions): Engine {
   }
 
   /**
+   * The height to write for the sizer, which is not always the items' own total.
+   *
+   * `position: sticky; bottom: 0` lifts a box to the bottom edge from below it and
+   * can never push one down to it. The slot is the last flow child of the scrollport,
+   * so its static position is the end of the sizer — and on a list shorter than its
+   * scrollport that is wherever the last comment happened to end, halfway up the box
+   * with the app's background beneath it. The documented pin is then a pin to nothing.
+   *
+   * Filling the sizer to whatever the chrome leaves puts that static position on the
+   * bottom edge, and the slack falls **between the last item and the footer**. That is
+   * what separates this from {@link syncLeadingSpace}, whose job is the mirror image:
+   * that one moves short content *down* under `alignToBottom`, this one leaves it at
+   * the top and opens the gap below it.
+   *
+   * Against the composed insets rather than a sum of slot heights, because those are
+   * already exactly the two quantities wanted — everything scrollable above the sizer
+   * and everything scrollable below it — and they include a consumer's own
+   * `scrollMargin`, which is page content above a window-scrolled list that no sum of
+   * *our* slots can see. So the fill makes `margin + content + spaceAfter` equal the
+   * scrollport, exactly.
+   *
+   * Subtracting `spaceAfter` here is the reading its own doc permits and the scroller's
+   * maximum does not: nothing in content space counts a sticky footer twice.
+   *
+   * Only ever grows, and only where there is no scroll range. Once the content reaches
+   * the scrollport this is `totalSize` exactly, so no anchor, offset, band or alignment
+   * can observe it. Padding *to* the scrollport rather than past it keeps the browser's
+   * maximum at 0, which is why a short list still has no scrollbar.
+   *
+   * `viewportSize` is passed rather than read, for the reason given at {@link syncGeometry}.
+   * Must run *after* {@link syncLeadingSpace}, whose spacer `geometry()` folds in.
+   */
+  const contentSizeFor = (totalSize: number, viewportSize: number): number => {
+    // A plain `footer` is in-flow content belonging under the last item. Pushing *it*
+    // down an unfilled scrollport would be a different library.
+    if (slotSizes.stickyFooter === 0) return totalSize
+
+    const insets = geometry()
+    const chrome = (insets.scrollMargin ?? 0) + (insets.spaceAfter ?? 0)
+    return Math.max(totalSize, viewportSize - chrome)
+  }
+
+  /**
    * A slot changed height, so the composed insets moved — and with a `header`, a
    * `stickyHeader`, or the `leadingSpace` a footer moves under `alignToBottom`, the
    * list's origin along with them.
@@ -1279,7 +1322,10 @@ export function createEngine(initial: EngineOptions): Engine {
     // After the spacer, whose height `geometry()` folds in, and before anything reads a band.
     syncGeometry(viewportSize)
     surface.setLeadingSpace(leadingSpace)
-    surface.setContentSize(totalSize)
+    // Not `totalSize`: a sticky footer under short content needs the sizer filled out to
+    // the scrollport. Everything below still reads `totalSize`, the items' own — see
+    // {@link contentSizeFor} for why nothing can tell the two apart.
+    surface.setContentSize(contentSizeFor(totalSize, viewportSize))
 
     // Read once, after the content size is written and before anything reads an
     // offset. `scrollHeight - clientHeight` is a layout read, and both the follow

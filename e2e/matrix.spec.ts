@@ -270,4 +270,25 @@ test.describe('measured slots', () => {
     // And it is genuinely short of the bottom, by the footer plus the composer.
     expect(await distanceFromBottom(page)).toBeGreaterThan(100)
   })
+
+  test('a composer on a short thread still sits on the bottom edge', async ({ page }) => {
+    // The one claim jsdom cannot answer: `position: sticky` is exactly what it does not
+    // implement, so every unit assertion is about a number the engine wrote rather than
+    // where the composer ended up. `bottom: 0` lifts a box to the edge and never pushes
+    // one down to it, so on a three-comment thread the composer used to rest under the
+    // last comment with the app's background below it.
+    await open(page, 'loaded=3&paddingStart=0&stickyFooter=80')
+
+    const gap = await page.evaluate(() => {
+      const scroller = document.querySelector('.scroller')
+      const composer = document.querySelector('[data-testid="sticky-composer"]')
+      if (!scroller || !composer) throw new Error('no scroller or no composer')
+      return scroller.getBoundingClientRect().bottom - composer.getBoundingClientRect().bottom
+    })
+
+    expect(Math.abs(gap)).toBeLessThanOrEqual(TOLERANCE)
+    // And the fill stopped *at* the scrollport rather than past it: a thread that did
+    // not scroll before still does not, so nothing derived from an offset can see it.
+    expect(await distanceFromBottom(page)).toBeLessThanOrEqual(1)
+  })
 })
