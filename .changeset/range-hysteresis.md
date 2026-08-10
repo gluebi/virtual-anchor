@@ -17,34 +17,25 @@ of travel instead of once per row, and publishes are capped at one per frame —
 ~162px comments that is 60 store-driven renders a second down to 32 during a 40,000px/s fling,
 and 12 down to 1.6 at an ordinary reading speed of 2,000px/s.
 
-What that is worth was measured with `perf/headroom.spec.ts`, medians of four runs, against the
-change below it in the stack:
+What that is worth was measured with `perf/headroom.spec.ts`, medians of three to four runs,
+one session on an M1, against `main` — so this table is the whole stack, not this change alone:
 
 | slowdown | demo | fps | drop% | handler p50 | handler p95 |
 | --- | --- | --- | --- | --- | --- |
-| 1× | live | 60.0 → 60.0 | 0 → 0 | 0.40 → 0.30 | 1.60 → 0.60 |
-| 6× | live | 60.0 → 60.0 | 0 → 0 | 0.50 → 0.10 | 2.40 → 1.40 |
-| 10× | live | 60.0 → 60.0 | 0 → 0 | 0.90 → 0.10 | 4.00 → 2.90 |
-| 20× | live | 46.3 → 56.6 | 22.8 → 5.6 | 4.00 → 0.10 | 9.80 → 5.40 |
-| 20× | quiet | 49.8 → 57.1 | 17.1 → 4.8 | 1.90 → 0.00 | 7.80 → 3.30 |
+| 1× | live | 60.0 → 60.0 | 0 → 0 | 0.30 → 0.20 | 1.70 → 0.70 |
+| 4× | live | 60.0 → 60.0 | 0 → 0 | 0.70 → 0.40 | 3.00 → 1.00 |
+| 6× | live | 60.0 → 60.0 | 0 → 0 | 1.30 → 0.50 | 4.60 → 1.50 |
+| 10× | live | 59.0 → 58.5 | 1.6 → 2.4 | 2.10 → 1.10 | 7.60 → 2.80 |
+| 20× | live | 37.7 → 52.7 | 37.1 → 12.2 | 7.80 → 1.20 | 18.80 → 4.90 |
+| 20× | quiet | 39.3 → 57.6 | 34.4 → 4.1 | 6.90 → 0.10 | 15.10 → 4.00 |
 
-The largest of the three steps in the stack, and it lands where it was aimed: at 20× CPU the
-dropped-frame share falls from 22.8% to 5.6%. Cumulatively against `main` — the three changes
-together — that row reads 39.4fps and 34.4% dropped becoming 56.6fps and 5.6%.
-
-And the risk it was carrying did not materialise. `perf/blanking.spec.ts` counts composited
-blank frames during a compositor-driven fling, which is what the extra mounted rows were bought
-to protect: identical at 1× and 6× (1 blank capture of 79, at 3% into the gesture, on both
-sides), and at 20× the branch has none where `main` has one — the emptiest frame goes 0.27 to
-0.47, meaning it never went fully blank. That spec does not repeat and take a median, so read
-the 20× improvement as one sample; what it does establish is the absence of a regression.
-
-**The coverage guarantee is unchanged, deliberately.** The tempting version holds until the
-*visible* band nears the edge, which needs no extra rows and quietly halves the distance the
-buffer promises — and `blanking.spec.ts` chose `DEFAULT_BUFFER` against that distance directly.
-So the trigger stays exactly where it was, at the buffered band, and the *recompute* mounts
-wider. A test walks a scroll through eight hold-and-recompute cycles asserting the mounted range
-never falls inside the buffer at any point.
+**`blanking.spec.ts` is within its own noise, and is reported rather than claimed.** Back to
+back on the same machine at 40,000px/s it gave 0 blank captures of 79 against `main`'s 1 at 6×
+CPU, and 2 of 78 against `main`'s 0 at 20×; three runs of this branch at 20× gave 0, 9 and 2.
+That spec does not repeat and take a median — its own header says so — and single counts of
+small integers cannot separate those. What can be said structurally is that the coverage
+guarantee is byte-identical to `main` and the mounted band is strictly larger, so there is no
+mechanism by which the compositor has *fewer* rows ahead of it than before.
 
 The held ends are remembered **by key**, for the same reason the anchor is a key: two integers
 would name two different rows the moment anything is inserted above. Keeping keys means a
