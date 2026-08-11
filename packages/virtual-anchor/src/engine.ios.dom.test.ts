@@ -161,7 +161,14 @@ const setup = (
   const scroller = document.createElement('div')
   document.body.appendChild(scroller)
 
-  const state = { offset: 0, viewportSize: 800, contentWidth: 600, contentSize: 0, leadingSpace: 0 }
+  const state = {
+    offset: 0,
+    viewportSize: 800,
+    contentWidth: 600,
+    contentSize: 0,
+    leadingSpace: 0,
+    trailingSpace: 0,
+  }
   let offsetReads = 0
   const writes: string[] = []
   const elements = new Map<ItemKey, HTMLElement>()
@@ -182,6 +189,10 @@ const setup = (
     setLeadingSpace: (px) => {
       state.leadingSpace = px
       writes.push(`lead:${String(px)}`)
+    },
+    setTrailingSpace: (px) => {
+      state.trailingSpace = px
+      writes.push(`trail:${String(px)}`)
     },
     setPaintOffset: (px) => writes.push(`paint:${String(px)}`),
     setItemOffset: (key, offset) => writes.push(`item:${String(key)}@${String(offset)}`),
@@ -204,12 +215,15 @@ const setup = (
     getViewportSize: () => state.viewportSize,
     getMaxScrollOffset: () =>
       trackContent
-        ? Math.max(0, state.contentSize + state.leadingSpace - state.viewportSize)
+        ? Math.max(
+            0,
+            state.contentSize + state.leadingSpace + state.trailingSpace - state.viewportSize,
+          )
         : 1_000_000,
     setScrollOffset: (next) => {
       const accepted = truncateWrites ? Math.trunc(next) : next
       state.offset = trackContent
-        ? Math.min(Math.max(accepted, 0), Math.max(0, state.contentSize + state.leadingSpace - state.viewportSize))
+        ? Math.min(Math.max(accepted, 0), viewport.getMaxScrollOffset())
         : accepted
       writes.push(`scroll:${String(next)}`)
     },
