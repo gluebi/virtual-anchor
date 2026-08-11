@@ -272,7 +272,10 @@ everywhere else. Nor is it left to a stylesheet, which could otherwise do it wit
 flexbox: under `windowScroller` there is no scrollport the library styles, that element's
 box is already written here on every publish, and a rule living in the React adapter
 would have to be written again by every other one. The space stops *at* the scrollport,
-so a short list still has no scroll range and no scrollbar.
+so a short list still has no scroll range and no scrollbar. With `alignToBottom` — the
+other half of what a chat app sets — the space goes above the items instead, and the
+composer still reaches the edge: it is in flow after them, so holding the block down
+carries it there.
 
 **All four are measured, and this is the part no other virtual list does.** Everywhere
 else the height of content above the list is a number you supply — virtua's
