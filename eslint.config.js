@@ -104,6 +104,12 @@ export default defineConfig(
       '**/*.test.ts',
       '**/*.test.tsx',
       '**/*.dom.test.ts',
+      // The shared halves of the above. They are test doubles by definition — the whole
+      // reason they exist is that two suites were building the same one — so the
+      // relaxations that apply to a suite apply to them. `*.test.ts` does not match
+      // `*.test.helpers.ts`, which is the same near-miss that keeps them out of the
+      // vitest and coverage globs, deliberately, in both cases.
+      '**/*.test.helpers.ts',
       'e2e/**/*.ts',
       'spike/**/*.ts',
       '*.config.ts',

@@ -1,9 +1,16 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { pretendIPhone, touch, unpretendIPhone } from './iosPlatform.test.helpers.js'
 import { createEngine, layoutSignatureFor, type Engine } from './engine.js'
+import {
+  acceptedScrollOffset,
+  FakeResizeObserver,
+  harnessState,
+  installObservers,
+  maxOffsetFor,
+  recordingSurface,
+} from './engineHarness.test.helpers.js'
 import { collectTrace } from './trace.test.helpers.js'
 import { setTraceSink, type TraceEvent } from './trace.js'
-import type { Surface } from './surface.js'
 import type { ItemKey, SlotName } from './types.js'
 import type { Viewport } from './viewport.js'
 
@@ -41,55 +48,6 @@ afterEach(() => {
   collected.length = 0
 })
 
-/** A fake ResizeObserver whose deliveries the test drives. */
-class FakeResizeObserver implements ResizeObserver {
-  static instances: FakeResizeObserver[] = []
-  readonly observed = new Set<Element>()
-
-  constructor(readonly callback: ResizeObserverCallback) {
-    FakeResizeObserver.instances.push(this)
-  }
-
-  observe(target: Element): void {
-    this.observed.add(target)
-  }
-  unobserve(target: Element): void {
-    this.observed.delete(target)
-  }
-  disconnect(): void {
-    this.observed.clear()
-  }
-
-  static deliverTo(target: Element, blockSize: number): void {
-    for (const instance of FakeResizeObserver.instances) {
-      if (!instance.observed.has(target)) continue
-      instance.callback(
-        [
-          {
-            target,
-            borderBoxSize: [{ blockSize, inlineSize: 0 }],
-            contentRect: new DOMRect(0, 0, 0, blockSize),
-          },
-        ] as unknown as ResizeObserverEntry[],
-        instance,
-      )
-    }
-  }
-}
-
-class FakeIntersectionObserver implements IntersectionObserver {
-  readonly scrollMargin = '0px'
-  readonly root = null
-  readonly rootMargin = '0px'
-  readonly thresholds = [0]
-  constructor(readonly callback: IntersectionObserverCallback) {}
-  observe(): void {}
-  unobserve(): void {}
-  disconnect(): void {}
-  takeRecords(): IntersectionObserverEntry[] {
-    return []
-  }
-}
 
 interface Harness {
   engine: Engine
@@ -161,14 +119,7 @@ const setup = (
   const scroller = document.createElement('div')
   document.body.appendChild(scroller)
 
-  const state = {
-    offset: 0,
-    viewportSize: 800,
-    contentWidth: 600,
-    contentSize: 0,
-    leadingSpace: 0,
-    trailingSpace: 0,
-  }
+  const state = harnessState()
   let offsetReads = 0
   const writes: string[] = []
   const elements = new Map<ItemKey, HTMLElement>()
@@ -181,31 +132,7 @@ const setup = (
     get: () => state.contentWidth,
   })
 
-  const surface: Surface = {
-    setContentSize: (size) => {
-      state.contentSize = size
-      writes.push(`content:${String(size)}`)
-    },
-    setLeadingSpace: (px) => {
-      state.leadingSpace = px
-      writes.push(`lead:${String(px)}`)
-    },
-    setTrailingSpace: (px) => {
-      state.trailingSpace = px
-      writes.push(`trail:${String(px)}`)
-    },
-    setPaintOffset: (px) => writes.push(`paint:${String(px)}`),
-    setItemOffset: (key, offset) => writes.push(`item:${String(key)}@${String(offset)}`),
-    attachItem: (key, element) => {
-      elements.set(key, element)
-      return () => elements.delete(key)
-    },
-    hasItem: (key) => elements.has(key),
-    focusItem: (key) => elements.has(key),
-    dispose: () => {
-      elements.clear()
-    },
-  }
+  const surface = recordingSurface(state, writes, elements)
 
   const viewport: Viewport = {
     getScrollOffset: () => {
@@ -213,18 +140,9 @@ const setup = (
       return state.offset
     },
     getViewportSize: () => state.viewportSize,
-    getMaxScrollOffset: () =>
-      trackContent
-        ? Math.max(
-            0,
-            state.contentSize + state.leadingSpace + state.trailingSpace - state.viewportSize,
-          )
-        : 1_000_000,
+    getMaxScrollOffset: () => (trackContent ? maxOffsetFor(state) : 1_000_000),
     setScrollOffset: (next) => {
-      const accepted = truncateWrites ? Math.trunc(next) : next
-      state.offset = trackContent
-        ? Math.min(Math.max(accepted, 0), viewport.getMaxScrollOffset())
-        : accepted
+      state.offset = acceptedScrollOffset(state, next, { trackContent, truncateWrites })
       writes.push(`scroll:${String(next)}`)
     },
     addEventListener: (type, listener) => {
@@ -326,18 +244,8 @@ const fling = (h: Harness, to = 5000): void => {
 
 beforeEach(() => {
   vi.useFakeTimers()
-  FakeResizeObserver.instances = []
+  installObservers()
   document.body.replaceChildren()
-  Object.defineProperty(window, 'ResizeObserver', {
-    configurable: true,
-    writable: true,
-    value: FakeResizeObserver,
-  })
-  Object.defineProperty(window, 'IntersectionObserver', {
-    configurable: true,
-    writable: true,
-    value: FakeIntersectionObserver,
-  })
   pretendIPhone()
 })
 
