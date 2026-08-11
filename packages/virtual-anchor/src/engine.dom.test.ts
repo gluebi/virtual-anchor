@@ -1408,6 +1408,131 @@ describe('engine measured slots', () => {
   })
 })
 
+describe('engine sticky footer fill', () => {
+  /**
+   * The heights the sizer was written at, in order, with consecutive repeats dropped.
+   *
+   * The real surface dedupes against the last size it wrote (`createDomSurface`), so a
+   * repeat is a write the DOM never takes — and how many publishes mounting a slot
+   * happens to cost is not what any of these cases is about. What each one is about is
+   * the sequence of *distinct* heights the sizer went through.
+   */
+  const sizes = (h: Harness): number[] => {
+    const written = h.writes
+      .filter((w) => w.startsWith('content:'))
+      .map((w) => Number(w.slice('content:'.length)))
+    return written.filter((size, i) => size !== written[i - 1])
+  }
+
+  it('fills the sizer so a sticky footer reaches the bottom edge', () => {
+    // 300px of items and a 300px composer in an 800px box. `bottom: 0` lifts the
+    // composer to the bottom edge from below it and cannot push it down to one, so
+    // without the fill it rests at its static position — the end of the sizer, 200px
+    // short. The sequence rather than the final value, because the fill stopping *at*
+    // the scrollport is as much the claim as the fill happening: 500, never 800.
+    const h = setup({ count: 3, trackContent: true })
+    mountSlot(h, 'stickyFooter', 300)
+
+    expect(sizes(h)).toEqual([300, 500])
+    // Which is the property the whole change rests on: padding *to* the scrollport
+    // leaves the browser's maximum at 0, so no anchor, offset, band or alignment can
+    // observe the taller sizer — and a short list still gets no scrollbar.
+    expect(h.maxOffset()).toBe(0)
+  })
+
+  it('publishes the items’ own total, not the filled size', () => {
+    // The fill is a fact about the DOM. `totalSize` is the model, every consumer reads
+    // it, and a snapshot claiming 500px of comments would be a lie with 200px in it.
+    const h = setup({ count: 3, trackContent: true })
+    mountSlot(h, 'stickyFooter', 300)
+
+    expect(h.engine.store.getState().totalSize).toBe(300)
+    expect(sizes(h)).toContain(500)
+  })
+
+  it('releases the fill when the viewport shrinks under the content', () => {
+    const h = setup({ count: 3, trackContent: true })
+    mountSlot(h, 'stickyFooter', 300)
+    h.resize(400)
+
+    // 400px of scrollport less a 300px composer leaves 100, which the items already
+    // exceed — so there is nothing to fill and the sizer is the items again.
+    expect(sizes(h)).toEqual([300, 500, 300])
+  })
+
+  it('adds nothing once the items fill the scrollport', () => {
+    const h = setup({ count: 50, trackContent: true })
+    mountSlot(h, 'stickyFooter', 300)
+
+    expect(sizes(h)).toEqual([5000])
+  })
+
+  it('leaves the sizer alone for a footer that merely scrolls away', () => {
+    // The gate, and the line between the two kinds of trailing slot. A plain `footer`
+    // is in-flow content belonging under the last comment; a list that pushed it to the
+    // bottom of an unfilled scrollport would be doing something nobody asked for.
+    const h = setup({ count: 3, trackContent: true })
+    mountSlot(h, 'footer', 300)
+
+    expect(sizes(h)).toEqual([300])
+  })
+
+  it('counts the other slots against the fill', () => {
+    // Everything else in the scrollport is space the sizer does not have to cover.
+    // 800 less a 100px footer and a 300px composer is 400 — and the footer is counted
+    // once, not once for itself and once for sharing `spaceAfter` with the composer.
+    const h = setup({ count: 3, trackContent: true })
+    mountSlot(h, 'footer', 100)
+    mountSlot(h, 'stickyFooter', 300)
+
+    expect(sizes(h)).toContain(400)
+    expect(sizes(h)).not.toContain(500)
+  })
+
+  it('counts the consumer’s own `scrollMargin` against the fill', () => {
+    // Page content above a window-scrolled list is scrollable space too, and it is
+    // space no sum of *our* slots can see. Filling past it would push the page into
+    // having a scroll range it did not have — which is the one thing this must not do.
+    const h = setup({ count: 3, trackContent: true, geometry: { scrollMargin: 100 } })
+    mountSlot(h, 'stickyFooter', 300)
+
+    expect(sizes(h)).toContain(400)
+    expect(sizes(h)).not.toContain(500)
+  })
+
+  it('spends the slack once under `alignToBottom`', () => {
+    // The two mechanisms want the same 200px and only one of them may have it.
+    // `syncLeadingSpace` takes it from above, so it is already in the composed
+    // `scrollMargin` and the fill finds nothing left — short content held against the
+    // bottom *and* padded away from it would be the bug this must not introduce.
+    const h = setup({ count: 3, trackContent: true, alignToBottom: true })
+    mountSlot(h, 'stickyFooter', 300)
+
+    expect(h.writes).toContain('lead:200')
+    expect(sizes(h)).toEqual([300])
+  })
+
+  it('gives the fill back when the composer unmounts', () => {
+    // react-virtuoso #1203 is a slot's height outliving the slot. The same argument
+    // applies to space held on its behalf.
+    const h = setup({ count: 3, trackContent: true })
+    const composer = mountSlot(h, 'stickyFooter', 300)
+
+    composer.detach()
+
+    expect(sizes(h)).toEqual([300, 500, 300])
+  })
+
+  it('fills the whole scrollport for an empty list with a composer', () => {
+    // The case with no items to hide it: an empty state, a filter that matched
+    // nothing, or the first render before a single row has measured.
+    const h = setup({ count: 0, trackContent: true })
+    mountSlot(h, 'stickyFooter', 300)
+
+    expect(sizes(h)).toEqual([0, 500])
+  })
+})
+
 describe('engine follow-output', () => {
   /** A follower: content-derived maximum, 50 items of 100px in an 800px port. */
   const following = (extra: Partial<Parameters<typeof setup>[0]> = {}) =>

@@ -23,15 +23,16 @@ export interface ListInsets {
   /**
    * In-flow content occupying scrollable space *after* the last item.
    *
-   * **Read as a predicate, not as a quantity: do not subtract it.** The one
-   * production caller asks only whether it is zero. A sticky footer is in-flow
-   * content *and* overlapping chrome, so it is counted here *and* in
-   * {@link scrollPaddingEnd}, and subtracting this from the browser's maximum
-   * therefore takes it twice — which parks the last item one composer-height
-   * too low, behind the composer. Measured at 80.25px out in all three engines
-   * before the scroller stopped doing it.
+   * **A sticky footer is counted here *and* in {@link scrollPaddingEnd}, so never
+   * combine both against the same quantity.** It is in-flow content and overlapping
+   * chrome at once, and a reader that takes it from each channel takes it twice —
+   * which, off the browser's maximum scroll offset, parks the last item one
+   * composer-height too low, behind the composer. Measured at 80.25px out in all
+   * three engines before the scroller stopped doing it. In content space nothing
+   * consults {@link scrollPaddingEnd}, so there the subtraction is sound; the rule
+   * is about the pair, not about the field.
    *
-   * What it decides: the scroller's `align: 'end'` shortcut for the last item
+   * What it decides for the scroller: the `align: 'end'` shortcut for the last item
    * asks the browser for its maximum scroll offset rather than trusting our own
    * arithmetic at the very end of the list. That is right when the trailing
    * space is unmeasurable — a border, padding on the scroller — and wrong when
