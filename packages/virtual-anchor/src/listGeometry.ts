@@ -106,6 +106,12 @@ export interface InsetContributions {
  *
  * Returns `base` untouched when there is nothing to fold in, so a list with no
  * chrome allocates nothing and behaves exactly as it did before slots existed.
+ *
+ * **A second reader of the same mapping lives in the engine.** `syncSlack` sums the
+ * scrollport the content does not fill, which is this composition minus `leadingSpace`
+ * — the one contribution it produces rather than consumes, so it cannot read the
+ * composed object without circularity. It writes the sum out by hand instead. A fifth
+ * slot, or a new base inset that occupies scrollport, has to be added in both places.
  */
 export function composeInsets(base: ListInsets, chrome: InsetContributions): ListInsets {
   const header = chrome.header ?? 0

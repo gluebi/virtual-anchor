@@ -570,75 +570,63 @@ export function createEngine(initial: EngineOptions): Engine {
   }
 
   /**
-   * Recompute the space that pushes short content to the bottom.
+   * How much scrollport the content fails to fill, and which end gets it.
    *
-   * Against the raw scrollport height rather than {@link ListGeometry.visibleSize}:
-   * the padding describes chrome *overlapping* the scrollport, which occupies no
-   * content, so the content still has the whole box to fill. The sticky slots are
-   * the exception and they are already in the sum, because they are in flow.
+   * There is one such quantity and two things that want it. `alignToBottom` wants it
+   * above the items, to hold short content against the bottom of the scroller. A
+   * `stickyFooter` wants it below them, because `position: sticky; bottom: 0` lifts a
+   * box to an edge and can never push one down to one — so on a list too short to fill
+   * the scrollport the slot rests at the end of the items, halfway up the box, and the
+   * documented pin is a pin to nothing.
    *
-   * `viewportSize` is passed rather than read, for the reason given at {@link syncGeometry}.
+   * Computed once and routed, so spending it twice is not expressible.
+   *
+   * Against the raw scrollport height rather than {@link ListGeometry.visibleSize}: the
+   * padding describes chrome *overlapping* the scrollport, which occupies no content, so
+   * the content still has the whole box to fill. The sticky slots are the exception and
+   * they are already in the sum, because they are in flow.
+   *
+   * The consumer's own insets are in the sum and `leadingSpace` is not — this is what
+   * *produces* `leadingSpace`, so reading the composed insets here would be circular.
+   * Their `scrollMargin` is page content above a window-scrolled list, and it occupies
+   * scrollport exactly as our own chrome does.
+   *
+   * Returns the trailing space rather than storing it, because only the leading one is a
+   * contribution to the composed insets — see {@link geometry}. `viewportSize` is passed
+   * rather than read, for the reason given at {@link syncGeometry}.
    */
-  const syncLeadingSpace = (totalSize: number, viewportSize: number): void => {
+  const syncSlack = (totalSize: number, viewportSize: number): number => {
+    const base = options.geometry ?? NO_INSETS
     const occupied =
+      (base.scrollMargin ?? 0) +
       slotSizes.header +
       slotSizes.stickyHeader +
       totalSize +
       slotSizes.footer +
-      slotSizes.stickyFooter
-    const next = options.alignToBottom === true ? Math.max(0, viewportSize - occupied) : 0
+      slotSizes.stickyFooter +
+      (base.spaceAfter ?? 0)
+    const slack = Math.max(0, viewportSize - occupied)
 
-    if (next === leadingSpace) return
-    leadingSpace = next
-    insetsVersion++
-  }
-
-  /**
-   * The empty space that carries a sticky footer down to the bottom edge.
-   *
-   * `position: sticky; bottom: 0` lifts a box to the bottom edge from below it and
-   * can never push one down to it. The slot is the last flow child of the scrollport,
-   * so its static position is the end of the items — and on a list shorter than its
-   * scrollport that is wherever the last comment happened to end, halfway up the box
-   * with the app's background beneath it. The documented pin is then a pin to nothing.
-   *
-   * Holding the remaining scrollport below the items puts that static position on the
-   * bottom edge, and the slack falls **between the last item and the footer**. That is
-   * what separates this from {@link syncLeadingSpace}, whose job is the mirror image:
-   * that one moves short content *down* under `alignToBottom`, this one leaves it at
-   * the top and opens the gap below it.
-   *
-   * Against the composed insets rather than a sum of slot heights, because those are
-   * already exactly the two quantities wanted — everything scrollable above the items
-   * and everything scrollable below them — and they include a consumer's own
-   * `scrollMargin`, which is page content above a window-scrolled list that no sum of
-   * *our* slots can see. So `margin + content + trailing + spaceAfter` comes to the
-   * scrollport, exactly.
-   *
-   * Subtracting `spaceAfter` here is the reading its own doc permits and the scroller's
-   * maximum does not: nothing in content space counts a sticky footer twice.
-   *
-   * Returned rather than kept, unlike {@link leadingSpace}, and the difference is not
-   * style. That one is a contribution to the composed insets, so it has to be state the
-   * composition can read; this is computed *from* the composition, so contributing to
-   * it would be self-referential. Nothing else reads it — it is only ever positive
-   * where the scroll range is 0, so no anchor, offset, band or alignment could observe
-   * it if it wanted to.
-   *
-   * `viewportSize` is passed rather than read, for the reason given at {@link syncGeometry}.
-   * Must run *after* {@link syncLeadingSpace}, whose spacer `geometry()` folds in.
-   */
-  const trailingSpaceFor = (totalSize: number, viewportSize: number): number => {
-    // The gate reads the raw slot rather than the insets three lines below, because the
-    // insets cannot answer it: `composeInsets` merges `footer` and `stickyFooter` into
-    // `spaceAfter` on purpose. And the distinction matters — a plain `footer` is in-flow
+    const alignToBottom = options.alignToBottom === true
+    const nextLeading = alignToBottom ? slack : 0
+    // Reading the option rather than `nextLeading === 0` so the exclusivity is syntactic
+    // rather than something a reader has to prove — and `alignToBottom` taking it is not
+    // a compromise the footer loses. The sticky slot is in flow and in `occupied`, so
+    // pushing the whole block down lands it on the bottom edge anyway; it needs nothing
+    // of its own.
+    //
+    // The gate reads the raw slot rather than `spaceAfter`, because the insets cannot
+    // answer it: `composeInsets` merges `footer` and `stickyFooter` into `spaceAfter` on
+    // purpose. And the distinction is the whole of it — a plain `footer` is in-flow
     // content belonging under the last item, and pushing *it* down an unfilled
     // scrollport would be a different library.
-    if (slotSizes.stickyFooter === 0) return 0
+    const trailing = !alignToBottom && slotSizes.stickyFooter > 0 ? slack : 0
 
-    const insets = geometry()
-    const chrome = (insets.scrollMargin ?? 0) + (insets.spaceAfter ?? 0)
-    return Math.max(0, viewportSize - chrome - totalSize)
+    if (nextLeading !== leadingSpace) {
+      leadingSpace = nextLeading
+      insetsVersion++
+    }
+    return trailing
   }
 
   /**
@@ -657,7 +645,7 @@ export function createEngine(initial: EngineOptions): Engine {
    * gesture, and `'measure'` already handles that correctly (see {@link Restore}).
    * The one case left over — a `footer` moving `leadingSpace` under `alignToBottom`
    * — arises only when the content is shorter than the viewport, which is where
-   * `syncLeadingSpace` produces anything at all, and there the scroll range is
+   * `syncSlack` produces anything at all, and there the scroll range is
    * empty: `room` is the distance to the *nearer* end, so it is 0 whenever the
    * offset is 0, and the write is taken whatever the label says.
    */
@@ -690,7 +678,7 @@ export function createEngine(initial: EngineOptions): Engine {
    * without changing that box at all. A cache keyed on the observer would go quietly stale by
    * the scrollbar's width; a parameter cannot.
    *
-   * Must run *after* {@link syncLeadingSpace}, whose spacer `geometry()` folds in.
+   * Must run *after* {@link syncSlack}, whose leading spacer `geometry()` folds in.
    */
   const syncGeometry = (viewportSize: number): void => {
     listGeometry.update(geometry(), viewportSize)
@@ -1313,23 +1301,21 @@ export function createEngine(initial: EngineOptions): Engine {
     // size about to be written, so nothing requires this to come after — and coming *before*
     // means it reads layout the browser already flushed for the last paint rather than forcing
     // a fresh one. Why the whole pass shares one read is at {@link syncGeometry}; the other
-    // consumers are `syncLeadingSpace` below and the published snapshot.
+    // consumers are `syncSlack` below and the published snapshot.
     const viewportSize = viewport.getViewportSize()
 
     // Grow (or shrink) the content *first*. A restored offset after a prepend is
     // larger than the old maximum, and the browser silently clamps a write that
     // exceeds it.
     const totalSize = cache.totalSize()
-    // Before the content size and before any offset is derived: the spacer moves
+    // Before the content size and before any offset is derived: the leading spacer moves
     // the list's origin, so an anchor resolved against a stale one is wrong by
     // exactly the amount the spacer just changed by.
-    syncLeadingSpace(totalSize, viewportSize)
+    const trailingSpace = syncSlack(totalSize, viewportSize)
     // After the spacer, whose height `geometry()` folds in, and before anything reads a band.
     syncGeometry(viewportSize)
     surface.setLeadingSpace(leadingSpace)
-    // Also after the spacer, and for the same reason: this reads the composed insets
-    // rather than contributing to them.
-    surface.setTrailingSpace(trailingSpaceFor(totalSize, viewportSize))
+    surface.setTrailingSpace(trailingSpace)
     surface.setContentSize(totalSize)
 
     // Read once, after the content size is written and before anything reads an
@@ -2188,8 +2174,9 @@ export function createEngine(initial: EngineOptions): Engine {
 
       // The spacer before the anchor, not after. `alignToBottom` moves the list's
       // origin, and an anchor derived against an origin of zero and then resolved
-      // against the real one is wrong by the whole spacer.
-      syncLeadingSpace(cache.totalSize(), viewport.getViewportSize())
+      // against the real one is wrong by the whole spacer. The trailing space it also
+      // computes is dropped; nothing has been drawn yet.
+      syncSlack(cache.totalSize(), viewport.getViewportSize())
       anchor = deriveAnchor(contentOffset(), cache, geometry())
       publish('none')
 

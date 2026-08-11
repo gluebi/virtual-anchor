@@ -1031,9 +1031,9 @@ describe('engine scrollport reads', () => {
   })
 
   it('still reads it once per publish with a leading spacer to size', () => {
-    // `alignToBottom` is a third reason to want the height, and the only one that runs before
-    // the content-size write rather than after — so a version that hoisted just the two above
-    // would still leave this one, and still leave it first.
+    // `syncSlack` is a third reason to want the height — it serves both ends of the box — and
+    // the only one that runs before the content-size write rather than after, so a version that
+    // hoisted just the two above would still leave this one, and still leave it first.
     const h = setup({ count: 50, alignToBottom: true, trackContent: true })
 
     h.writes.length = 0
@@ -1513,10 +1513,10 @@ describe('engine trailing space', () => {
   })
 
   it('spends the slack once under `alignToBottom`', () => {
-    // The two mechanisms want the same 200px and only one of them may have it.
-    // `syncLeadingSpace` takes it from above, so it is already in the composed
-    // `scrollMargin` and nothing is left below — short content held against the bottom
-    // *and* pushed away from it would be the bug this must not introduce.
+    // The two placements want the same 200px and only one of them may have it. They are
+    // exclusive branches of one decision, so this is not really in doubt any more — but
+    // short content held against the bottom *and* pushed away from it is the bug the
+    // arrangement exists to rule out, and a case saying so costs nothing.
     const h = setup({ count: 3, trackContent: true, alignToBottom: true })
     mountSlot(h, 'stickyFooter', 300)
 
@@ -1882,5 +1882,34 @@ describe('engine alignToBottom', () => {
   it('is off by default', () => {
     const h = setup({ count: 3, trackContent: true })
     expect(written(h, 'lead:')).toEqual([0])
+  })
+
+  it('holds short content against the bottom of the scroller, not of the list', () => {
+    // The defect the shared computation surfaced. `scrollMargin` is page content above
+    // a window-scrolled list — the only mode where a consumer sets it — and it occupies
+    // scrollport exactly as our own chrome does. Padding by the whole 500px on top of
+    // it pushed the content 200px past the window's bottom, which is a scroll range on
+    // a list that fits: the one thing holding content against the bottom must not do.
+    const h = setup({
+      count: 3,
+      trackContent: true,
+      alignToBottom: true,
+      geometry: { scrollMargin: 200 },
+    })
+
+    expect(written(h, 'lead:')).toEqual([300])
+  })
+
+  it('counts the consumer’s own trailing space too', () => {
+    // The same argument below the list, and the same omission: `spaceAfter` is in-flow
+    // content after the last item, so it is scrollport the items do not have.
+    const h = setup({
+      count: 3,
+      trackContent: true,
+      alignToBottom: true,
+      geometry: { spaceAfter: 100 },
+    })
+
+    expect(written(h, 'lead:')).toEqual([400])
   })
 })
