@@ -92,12 +92,76 @@ describe('createDomSurface leading space', () => {
   })
 })
 
-describe('createNullSurface', () => {
-  it('accepts every write and draws nothing', () => {
-    const surface = createNullSurface()
+describe('createDomSurface trailing space', () => {
+  it('holds space below the items as container padding', () => {
+    // Padding rather than a margin, unlike its counterpart above: the sticky footer
+    // slot is the container's next sibling, and adjacent siblings' margins collapse —
+    // so a consumer's own margin on that wrapper would take the max rather than the
+    // sum and leave the composer short of the edge by their margin.
+    const { container, surface } = setup()
+    surface.setTrailingSpace(200)
+    expect(container.style.paddingBottom).toBe('200px')
+  })
+
+  it('adds to the written height rather than coming out of it', () => {
+    // The whole mechanism, and the one line of it that is easy to lose. Almost every
+    // app carries `* { box-sizing: border-box }` — the demo included — under which the
+    // padding would be absorbed into the height and the footer would not move a pixel.
+    const { container, surface } = setup()
+    container.style.boxSizing = 'border-box'
+
+    surface.setContentSize(300)
+    surface.setTrailingSpace(200)
+
+    expect(container.style.boxSizing).toBe('content-box')
+  })
+
+  it('settles the box model before the height, not when a composer arrives', () => {
+    // A box model that flipped the moment a sticky footer mounted would reinterpret the
+    // height already written — and `width: 100%` with it — at that instant, for every
+    // list that has one. So it is an invariant of the container, written on first sight.
+    const { container, surface } = setup()
+    container.style.boxSizing = 'border-box'
+
+    surface.setContentSize(300)
+
+    expect(container.style.boxSizing).toBe('content-box')
+  })
+
+  it('clears the padding at zero rather than writing 0px', () => {
+    const { container, surface } = setup()
+    surface.setTrailingSpace(200)
+    surface.setTrailingSpace(0)
+    expect(container.style.paddingBottom).toBe('')
+  })
+
+  it('does not re-write an unchanged value', () => {
+    const { container, surface } = setup()
+    surface.setTrailingSpace(120)
+    const spy = vi.spyOn(container.style, 'paddingBottom', 'set')
+
+    surface.setTrailingSpace(120)
+    expect(spy).not.toHaveBeenCalled()
+
+    surface.setTrailingSpace(121)
+    expect(spy).toHaveBeenCalledOnce()
+  })
+
+  it('tolerates a container that has not attached yet', () => {
+    const surface = createDomSurface({ container: { current: null } })
     expect(() => {
-      surface.setLeadingSpace(100)
+      surface.setTrailingSpace(300)
     }).not.toThrow()
+  })
+
+  it('is forgotten on dispose, so a reused surface writes it again', () => {
+    const { container, surface } = setup()
+    surface.setTrailingSpace(400)
+    surface.dispose()
+    container.style.paddingBottom = ''
+
+    surface.setTrailingSpace(400)
+    expect(container.style.paddingBottom).toBe('400px')
   })
 })
 
@@ -253,6 +317,8 @@ describe('createNullSurface', () => {
     const surface = createNullSurface()
     expect(() => {
       surface.setContentSize(100)
+      surface.setLeadingSpace(100)
+      surface.setTrailingSpace(50)
       surface.setPaintOffset(0.5)
       surface.setItemOffset('a', 10)
       surface.attachItem('a', document.createElement('div'))()

@@ -18,7 +18,7 @@ import { VirtualList } from 'virtual-anchor/react'     // React 19 adapter
 The React entry needs React 19; the core entry needs nothing. React is an *optional* peer
 dependency, so using the core alone pulls in no framework and warns about none.
 
-Minified and brotlied, including its one dependency: **10.03 kB** for the core entry, **12.35 kB**
+Minified and brotlied, including its one dependency: **10.19 kB** for the core entry, **12.48 kB**
 if you import the React adapter (which contains the core — they share a chunk rather than
 duplicating it). Both are enforced as budgets in CI, so this figure cannot drift from the
 truth.
@@ -263,16 +263,16 @@ filter bar pins once the description has scrolled out from under it, and an "end
 thread" note scrolls above a pinned composer.
 
 `stickyFooter` reaches the bottom edge on a list too short to fill the scrollport, too:
-the sizer is padded out to whatever the other chrome leaves, and the slack opens between
-the last comment and the composer rather than below it. `position: sticky` cannot do
-this on its own — `bottom: 0` lifts a box to an edge and never pushes one down to one —
-so an empty state, a filter that matched nothing, or the first render before any row has
-measured leaves a composer floating halfway up the box everywhere else. Nor is it left
-to a stylesheet, which could otherwise fill the sizer with flexbox: under
-`windowScroller` there is no scrollport the library styles, the height of that element
-is already written here on every publish, and a rule living in the React adapter would
-have to be written again by every other one. The padding stops *at* the scrollport, so a
-short list still has no scroll range and no scrollbar.
+whatever scrollport the other chrome leaves is held as empty space below the items, so
+the slack opens between the last comment and the composer rather than below it.
+`position: sticky` cannot do this on its own — `bottom: 0` lifts a box to an edge and
+never pushes one down to one — so an empty state, a filter that matched nothing, or the
+first render before any row has measured leaves a composer floating halfway up the box
+everywhere else. Nor is it left to a stylesheet, which could otherwise do it with
+flexbox: under `windowScroller` there is no scrollport the library styles, that element's
+box is already written here on every publish, and a rule living in the React adapter
+would have to be written again by every other one. The space stops *at* the scrollport,
+so a short list still has no scroll range and no scrollbar.
 
 **All four are measured, and this is the part no other virtual list does.** Everywhere
 else the height of content above the list is a number you supply — virtua's

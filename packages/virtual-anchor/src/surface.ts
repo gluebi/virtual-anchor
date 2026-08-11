@@ -44,6 +44,29 @@ export interface Surface {
    */
   setLeadingSpace(px: number): void
   /**
+   * Empty space held *below* the items, so a sticky footer reaches the bottom edge.
+   *
+   * `position: sticky; bottom: 0` lifts a box to an edge and can never push one down
+   * to one, so on a list too short to fill the scrollport the slot rests at its static
+   * position — the end of the items — and the documented pin is a pin to nothing. This
+   * is the space that moves that static position onto the edge.
+   *
+   * The mirror of {@link setLeadingSpace} in intent, but **padding rather than a
+   * margin**, and not for symmetry's sake either way. Whatever follows the container —
+   * the `footer` wrapper, or the sticky one when there is no footer — is an adjacent
+   * sibling, and adjacent siblings' margins collapse: a consumer's own margin on that
+   * wrapper would take the max of the two rather than the sum, leaving the composer
+   * short of the edge by their margin. Padding cannot collapse with anything.
+   *
+   * The reason {@link setLeadingSpace} cannot have the same treatment, despite the same
+   * exposure: items are absolutely positioned against the container's *padding* box, and
+   * `padding-top` does not move that box's top edge. It would grow the container without
+   * moving a single item, which is the whole of what leading space is for. The same fact
+   * is what makes `padding-bottom` right here — space below the items that leaves them
+   * exactly where they are.
+   */
+  setTrailingSpace(px: number): void
+  /**
    * Paint offset for the whole item container, in px. Positive moves content up.
    *
    * Two things arrive here, summed by the engine because both are its arithmetic: the
@@ -94,6 +117,26 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
   let lastContentSize: number | null = null
   let lastPaintOffset = 0
   let lastLeadingSpace = 0
+  let lastTrailingSpace = 0
+
+  /**
+   * The container's invariant styles, written once on first sight of it.
+   *
+   * Only `box-sizing`, and it has to be stated rather than inherited: `setTrailingSpace`
+   * holds its space as padding, and under the `* { box-sizing: border-box }` reset almost
+   * every app carries — the demo included — that padding would come *out of* the height
+   * written here instead of adding to it, and a sticky footer would not move a pixel.
+   *
+   * Unconditional rather than written alongside the padding, because a box model that
+   * flipped the moment a composer mounted would reinterpret the `height` this already
+   * writes, at that instant, for every list that has one. Through the same `styled` set
+   * the items use, so a container swapped through the ref box is styled again.
+   */
+  const styleContainer = (container: HTMLElement): void => {
+    if (styled.has(container)) return
+    styled.add(container)
+    container.style.boxSizing = 'content-box'
+  }
 
   const position = (element: HTMLElement, offset: number): void => {
     if (!styled.has(element)) {
@@ -123,7 +166,10 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
       if (size === lastContentSize) return
       lastContentSize = size
       const container = options.container.current
-      if (container) container.style.height = `${String(size)}px`
+      if (!container) return
+      // Before the height, which is the style the box model reinterprets.
+      styleContainer(container)
+      container.style.height = `${String(size)}px`
     },
 
     setLeadingSpace(px) {
@@ -131,6 +177,15 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
       lastLeadingSpace = px
       const container = options.container.current
       if (container) container.style.marginTop = px === 0 ? '' : `${String(px)}px`
+    },
+
+    setTrailingSpace(px) {
+      if (px === lastTrailingSpace) return
+      lastTrailingSpace = px
+      const container = options.container.current
+      if (!container) return
+      styleContainer(container)
+      container.style.paddingBottom = px === 0 ? '' : `${String(px)}px`
     },
 
     setPaintOffset(px) {
@@ -170,6 +225,7 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
       lastContentSize = null
       lastPaintOffset = 0
       lastLeadingSpace = 0
+      lastTrailingSpace = 0
     },
   }
 }
@@ -179,6 +235,7 @@ export function createNullSurface(): Surface {
   return {
     setContentSize: () => {},
     setLeadingSpace: () => {},
+    setTrailingSpace: () => {},
     setPaintOffset: () => {},
     setItemOffset: () => {},
     attachItem: () => () => {},
