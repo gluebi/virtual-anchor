@@ -1,5 +1,235 @@
 # virtual-anchor
 
+## 0.8.0
+
+### Minor Changes
+
+- 06a466b: `Surface` gains `setTrailingSpace`, and `setContentSize` goes back to meaning what it says.
+
+  #82's sticky-footer fix needed empty space below the items — space that carries a `stickyFooter`
+  down to the bottom edge on a list too short to fill the scrollport, because `position: sticky;
+bottom: 0` lifts a box to an edge and can never push one down to one. It took that space out of
+  the only write that could already produce it, `setContentSize`, by padding the sizer:
+
+  ```ts
+  surface.setContentSize(contentSizeFor(totalSize, viewportSize));
+  ```
+
+  Which made the interface's own documentation false. `setContentSize` is _"Total scrollable content
+  size"_, and it is the write every scroll write is ordered against. After that change it meant the
+  items' total most of the time, and the items padded out to the scrollport when a sticky footer sat
+  under short content — with nothing at the call boundary saying which. Meanwhile `store.totalSize`
+  kept publishing the honest number, so the model and the DOM disagreed by up to a scrollport in
+  exactly one configuration. Harmless, because the padding stops _at_ the scrollport and the
+  browser's maximum stays 0, but `totalSize` is public API — it comes out of `useVirtualList` — and
+  anything comparing it against DOM extent had a several-hundred-pixel discrepancy and no signal
+  that it was expected.
+
+  The space is now its own write:
+
+  ```ts
+  surface.setLeadingSpace(leadingSpace);
+  surface.setTrailingSpace(trailingSpaceFor(totalSize, viewportSize));
+  surface.setContentSize(totalSize); // literally true again
+  ```
+
+  Computed and handed straight to the surface, where its counterpart `leadingSpace` is engine state.
+  The asymmetry is not an oversight: `leadingSpace` is a contribution to the composed insets, so it
+  has to be state the composition can read, while this is computed _from_ the composition and
+  contributing to it would be self-referential. Nothing else reads it, and nothing could — it is
+  only ever positive where the scroll range is 0.
+
+  ### Padding, not a margin
+
+  `setLeadingSpace` writes `marginTop`, so the symmetric write would be `marginBottom`. It is
+  `paddingBottom` instead, and the reason is a real defect the margin would have carried: the sticky
+  footer slot is the container's immediately following sibling, and adjacent siblings' margins
+  collapse. A consumer styling `[data-virtual-slot="stickyFooter"]` with a `margin-top` would get
+  the max of the two rather than the sum, leaving the composer short of the edge by their margin.
+  Padding cannot collapse with anything. It is safe for the items because they are absolutely
+  positioned against the container's _padding_ box, whose top edge `padding-bottom` does not move.
+
+  Which is also the answer to the obvious follow-up — why `setLeadingSpace` does not get the same
+  treatment, since it has the identical exposure to a preceding slot's margin. That same fact runs
+  the other way at the top: `padding-top` does not move the padding box's top edge either, so it
+  would grow the container without moving a single item, which is the whole of what leading space is
+  for. One edge wants the items to move and the other wants them not to; that is what picks the
+  property, not symmetry.
+
+  `padding-bottom` in turn requires `box-sizing: content-box`, or the `* { box-sizing: border-box }`
+  reset almost every app carries — the demo included — absorbs it into the height and the footer
+  does not move a pixel. `a composer on a short thread still sits on the bottom edge` fails in
+  Chromium without it, which is how that was confirmed rather than assumed; jsdom cannot answer it,
+  since laying out `position: sticky` is exactly what jsdom does not do. It is written once on first
+  sight of the container, beside the height, rather than when a composer arrives: a box model that
+  flipped mid-life would reinterpret the `height` already written — and `width: 100%` with it — at
+  that instant, for every list that has one.
+
+  ### What pins it
+
+  Seven cases in `createDomSurface trailing space` mirror the five `setLeadingSpace` cases and add
+  two the box model needs — `adds to the written height rather than coming out of it` and `settles
+the box model before the height, not when a composer arrives`. The ten cases in `engine trailing
+space` moved off the sizer and onto the new write, and got stronger doing it: where they used to
+  assert the sizer grew to 500 and shrank back, they now assert the space goes `[0, 200, 0]` **and**
+  that the sizer never leaves `[300]` — `leaves the sizer at the items’ own total` is the case that
+  would have caught the seam in the first place.
+
+  The browser case is unchanged and untouched, which is the point: the composer is still on the
+  bottom edge and the short thread still has no scroll range, by a different mechanism.
+
+  ### Breaking
+
+  `Surface` gains a required method:
+
+  ```ts
+  setTrailingSpace(px: number): void
+  ```
+
+  Only an implementor of the interface is affected — the same scope as #29's `Surface.setCarry` to
+  `setPaintOffset` rename and #37's `Viewport.observeSize` change. Consumers of `VirtualList`,
+  `useVirtualList` or `createEngine` are not, and neither is anyone using `createDomSurface` or
+  `createNullSurface`, which are the two implementations this repo ships. If you hand-rolled a
+  `Surface`, add a method that holds `px` of empty space below the item container — a
+  `padding-bottom` on the same node whose height your `setContentSize` writes, with
+  `box-sizing: content-box` on that node so it adds rather than absorbs.
+
+  Three size limits move by 0.1kB: the core entry 10.14 → 10.19kB, the React entry 12.45 → 12.48,
+  the instrumented core 11.05 → 11.12. All three still fit their old budgets locally, but CI
+  measures ~0.03kB higher, and this repo has twice now found sub-0.1kB headroom to be noise between
+  toolchains rather than margin. The README's advertised figures were two bumps stale and are now
+  the measured ones.
+
+### Patch Changes
+
+- 6a6be13: fix: reach the bottom edge with a sticky footer, not the end of the last item
+
+  `stickyFooter` is documented as "content inside the scroller, below the list, pinned to the bottom
+  edge", and the README repeats it — "`stickyHeader` and `stickyFooter` pin to an edge". That held
+  only while the content overflowed. On a list shorter than its scrollport the slot rested wherever
+  the last item ended, halfway up the box with the app's background beneath it.
+
+  `position: sticky; bottom: 0` can lift a box but never push one down. The slot is the last flow
+  child of the scrollport, so its static position is the end of the sizer — and the sizer's height
+  was `cache.totalSize()`, the items and nothing else. `spaceAfter`, which `composeInsets` already
+  grows by the measured sticky footer, feeds the scroller's arithmetic and was never written to the
+  DOM. The gap was exactly `viewportSize − totalSize − stickyFooter`, less any other chrome.
+
+  | content vs scrollport                    | where the slot rested                                          |
+  | ---------------------------------------- | -------------------------------------------------------------- |
+  | items + slot taller than the scrollport  | at the bottom edge — sticky lifts it there from anywhere below |
+  | items + slot shorter than the scrollport | at its static position, i.e. under the last item               |
+
+  Reported from a thread view whose comment composer sat directly under the last comment on a short
+  thread (restrealitaet/rr-forum-frontend#487), and reachable there without a contrived list: the
+  comment list always ends in a ~240px clearance row, the opener is a few hundred more, and a desktop
+  scrollport with the composer open lands close to the boundary already — so a one-to-three-comment
+  thread on a tall window is enough. The shape generalises past that consumer to any list with a
+  composer, an action bar or a "N new comments" pill: an empty state, a filter that matched nothing,
+  or the first render before a single row has measured.
+
+  The sizer is now filled to whatever the chrome leaves, so the slot's static position lands on the
+  bottom edge and the slack falls **between the last item and the footer** — the items stay at the
+  top, which is what separates this from `syncLeadingSpace`, whose job is the mirror image of moving
+  short content _down_ under `alignToBottom`. Measured in a real browser on a three-comment thread
+  with an 80px composer: **259.5px above the bottom edge before, on it after**.
+
+  Four properties keep it narrow, and each has a case:
+
+  - **It only ever grows, and only where there is no scroll range.** Once the content reaches the
+    scrollport the expression is `totalSize` exactly, so no anchor, offset, band or alignment can
+    observe it. Padding _to_ the scrollport rather than past it keeps the browser's maximum at 0 —
+    a short list gains no scrollbar. The published `totalSize` is still the items' own, so nothing
+    reading the snapshot sees the fill either.
+  - **The fill is released** when the viewport shrinks under the content, when the composer
+    unmounts, and when the items grow past the scrollport.
+  - **It is gated on a _sticky_ footer.** A plain `footer` is in-flow content belonging under the
+    last item; pushing it down an unfilled scrollport would be a different library.
+  - **`alignToBottom` cannot spend the same slack twice.** `syncLeadingSpace` has already taken it
+    from above, so the composed `scrollMargin` carries it and the expression collapses to
+    `totalSize`. Short content held against the bottom _and_ padded away from it would be the bug
+    this must not introduce.
+
+  `contentSizeFor` subtracts the _composed insets_ — `scrollMargin` and `spaceAfter` — rather than a
+  sum of the four slot heights. Those are already the two quantities wanted, everything scrollable
+  above the sizer and everything below it, so the fill makes `margin + content + spaceAfter` equal
+  the scrollport exactly. It also picks up a consumer's own `scrollMargin`, which is page content
+  above a window-scrolled list that no sum of _our_ slots can see; filling past it would have given
+  the page a scroll range it did not have.
+
+  That makes a second reader of `spaceAfter`, whose doc said not to subtract it at all. The warning
+  was really about one space: a sticky footer counts in `spaceAfter` _and_ in `scrollPaddingEnd`, so
+  taking it off the browser's maximum takes it twice and parks the last item one composer-height too
+  low — 80.25px out in all three engines before the scroller stopped doing it. In content space
+  nothing consults `scrollPaddingEnd` and the double count cannot arise, so the doc now says which
+  space each reader is in rather than forbidding the subtraction outright.
+
+  Ten cases pin it, in `engine sticky footer fill`. Seven fail against the old code; the three that
+  pass are the negative controls — `adds nothing once the items fill the scrollport`, `leaves the
+sizer alone for a footer that merely scrolls away` and `spends the slack once under alignToBottom`
+  — which is what a gate's tests should do. One more runs in
+  chromium, webkit and firefox, because `position: sticky` is precisely what jsdom does not
+  implement: `a composer on a short thread still sits on the bottom edge` asks the browser where the
+  composer's box actually is, and asserts the scroller still has no range to scroll.
+
+  Three size limits move by 0.1kB to fit it. The change itself is 0.03kB on each of the three
+  affected budgets — 10.11 → 10.14kB on the core entry, 12.42 → 12.45 on the React one, 11.02 →
+  11.05 on the instrumented core — which fits every current limit locally. The bump is for the gap
+  between toolchains rather than for the code: #79 measured the same source at 10.11kB in CI against
+  10.08 locally, so 0.06kB of local headroom is not margin, it is one CI run away from red.
+
+- 47b7cc0: fix: hold short content against the bottom of the _scroller_, not of the list
+
+  `alignToBottom` pads above the items so a thread too short to fill the scrollport sits at the
+  bottom of it. The padding was computed against everything the library measures for itself — the
+  four slots and the items — and against nothing the consumer declares. So `geometry.scrollMargin`,
+  which is page content above the list and the one inset that is routinely non-zero under
+  `windowScroller`, was not subtracted, and the spacer came out that much too tall. The same
+  omission applied to `geometry.spaceAfter` below the list.
+
+  The result is the opposite of what the option is for: on a document-scrolled page with 200px above
+  a three-comment thread in an 800px window, the spacer was 500px where 300px is the room, so the
+  content was pushed 200px past the bottom of the window and the page gained a scrollbar. A list
+  that fits, made to scroll, by the option whose whole job is to place a list that fits.
+
+  Both terms are now in the sum. `holds short content against the bottom of the scroller, not of the
+list` and `counts the consumer’s own trailing space too` pin the two halves; both fail against the
+  previous build.
+
+  ### One slack, computed once
+
+  The fix fell out of merging two functions that had been computing the same quantity.
+
+  There is exactly one such quantity — how much of the scrollport the content fails to fill — and
+  two things that want it. `alignToBottom` wants it above the items. A `stickyFooter` wants it below
+  them, because `position: sticky; bottom: 0` lifts a box to an edge and can never push one down to
+  one. They were separate functions deriving it separately, and they avoided spending the same
+  pixels twice only by accident of composition: `syncLeadingSpace` wrote `leadingSpace`,
+  `composeInsets` folded it into `scrollMargin`, and `trailingSpaceFor` subtracted `scrollMargin`.
+  Three hops, an ordering constraint spelled out in prose at three separate sites, and a test whose
+  entire job was to prove the collision did not happen.
+
+  `syncSlack` subtracts once and routes the answer to one end or the other as exclusive branches of
+  a single decision, so spending it twice is not expressible. The ordering constraint _between the
+  two halves_ is gone with it — the one between the leading spacer and `syncGeometry` remains,
+  because `composeInsets` still folds it in. The trailing half also stops going through `geometry()`
+  and reads the consumer's insets directly, which is a coupling removed rather than a cost: that
+  call was always a memo hit, and it is what hid the two missing terms.
+
+  A test proving two mechanisms do not collide is a reasonable sign they want to be one; `spends the
+slack once under alignToBottom` stays anyway, because the bug it describes is worth naming even
+  once it is unreachable. Worth saying plainly, since the arrangement reads like arbitration: under
+  `alignToBottom` the footer loses nothing. It is in flow and in the sum, so pushing the whole block
+  down lands it on the bottom edge regardless — leading placement satisfies both promises at once.
+
+  The gate still reads `slotSizes.stickyFooter` rather than `spaceAfter`, and now does so from the
+  one place where that is the natural thing to read. The insets cannot answer it — `composeInsets`
+  merges `footer` and `stickyFooter` into `spaceAfter` on purpose — and the distinction is the whole
+  of the trailing branch: a plain `footer` is in-flow content belonging under the last item, and
+  pushing _it_ down an unfilled scrollport would be a different library.
+
+  No size limit moves.
+
 ## 0.7.2
 
 ### Patch Changes
