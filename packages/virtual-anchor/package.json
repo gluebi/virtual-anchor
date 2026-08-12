@@ -101,6 +101,6 @@
   "//publishConfig": "ESM only. No `require` condition, so there is no dual-package hazard: one module instance, which matters because the trace sink is module state. A CJS consumer needs dynamic `import()`.",
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",
-    "publint": "^0.3.22"
+    "publint": "^0.3.23"
   }
 }
