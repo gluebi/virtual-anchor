@@ -337,13 +337,13 @@ describe('scroller on iOS WebKit', () => {
     expect(h.writes).toEqual([])
   })
 
-  it('does not spend the scroll deadline while the gate is shut', () => {
+  it('does not spend the scroll deadline while the gate is shut', async () => {
     // A `scrollToIndex` issued during a fling is refused for as long as the fling
     // lasts. If its deadline clock ran through that, it would resolve `deadline`
     // with a large deviation for a scroll never given a chance to write.
     const h = harness()
     touch(h.element, 'touchstart')
-    void h.scroller.scrollToIndex(500)
+    const promise = h.scroller.scrollToIndex(500)
 
     // Well past SOFT_DEADLINE_MS of 2000, all of it blocked. `isScrolling` rather
     // than the promise: resolution is a microtask, so awaiting it would pass whether
@@ -358,6 +358,57 @@ describe('scroller on iOS WebKit', () => {
     h.advance(200)
     h.frames(3)
     expect(h.offset()).toBe(50_000)
+
+    // And says so. The landing was the whole of what this asserted, which is a weaker claim
+    // than the one being made: the point of suspending the clock is that the *report* comes
+    // out of a loop that had its chance, so the promise is where that shows.
+    const result = await promise
+    expect(result).toMatchObject({ settled: true, reason: 'converged', deviation: 0 })
+  })
+
+  it('keeps the whole convergence budget for after the fling, not what is left of one', async () => {
+    // The other half of #92, on the path that inspired its fix. The loop *parks* while the
+    // gate is shut, so only the frame that noticed ever ran — and the parked span, park to
+    // `gate.onOpen`, used to be charged in full to the first waking frame. A three-second
+    // fling therefore handed the convergence loop a scroll with its soft budget already
+    // spent, and the first frame after the gesture was also its last.
+    //
+    // Invisible whenever the banked correction happens to land exactly, which is why the case
+    // above passes either way. It costs a landing precisely when the landing needs correcting:
+    // a windowed list whose measurements arrive after the gesture, which is the ordinary case
+    // on the platform this whole file is about.
+    const h = harness()
+    touch(h.element, 'touchstart')
+    const promise = h.scroller.scrollToIndex(500)
+
+    // Three and a bit seconds of fling, every frame of it refused.
+    h.frames(200)
+    touch(h.element, 'touchend')
+    h.advance(200)
+
+    // The gesture is over and the list has not finished settling: the row above the
+    // destination grows every frame, so the target keeps moving and the loop keeps re-aiming
+    // until a deadline stops it. How many frames that takes is the budget, measured.
+    const state = { done: false }
+    const tracked = promise.then((result) => {
+      state.done = true
+      return result
+    })
+    let size = 100
+    let given = 0
+    for (let i = 0; i < 600 && !state.done; i++) {
+      size += 40
+      h.cache.setSize(3, size)
+      h.frames(1)
+      given++
+      await Promise.resolve()
+    }
+
+    const result = await tracked
+    expect(result.reason).toBe('deadline')
+    // ~125 frames of 16ms, which is `SOFT_DEADLINE_MS` in full. Charged for the fling it
+    // parked through, the loop got exactly one.
+    expect(given).toBeGreaterThan(100)
   })
 
   it('parks the convergence loop while the gate is shut rather than spinning', () => {

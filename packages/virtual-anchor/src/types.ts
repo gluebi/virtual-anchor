@@ -50,8 +50,9 @@ export interface ScrollToOptions {
 /**
  * The outcome of a scroll request, resolved once motion has genuinely stopped.
  *
- * `settled: false` is a real, expected outcome — it means convergence hit its
- * deadline, typically because something in the list is resizing continuously.
+ * `settled: false` is a real, expected outcome — it means convergence ran out of
+ * the frames its deadline allows, typically because something in the list is
+ * resizing continuously.
  * Reporting that honestly (with the leftover `deviation`) is deliberate: the
  * alternative, which every existing library picks, is to claim success and let
  * the caller discover the discrepancy visually.
@@ -69,7 +70,15 @@ export interface ScrollResult {
 export type ScrollEndReason =
   /** Arrived, and the target held still. */
   | 'converged'
-  /** Ran out of time — something in the list would not stop moving. */
+  /**
+   * Ran out of budget — something in the list would not stop moving.
+   *
+   * Counted in frames the convergence loop was given, not in wall clock: a main
+   * thread blocked across the deadline defers the result rather than failing it,
+   * because a loop that has had no frames has not yet had its chance. So this
+   * says the list kept moving while it was being watched, and on a slow device
+   * it can arrive later than the deadline in milliseconds would suggest.
+   */
   | 'deadline'
   /** A newer scroll request took over. */
   | 'replaced'
