@@ -788,27 +788,6 @@ export function createScroller(options: ScrollerOptions): Scroller {
     const tolerance = convergenceTolerance(viewport.getDevicePixelRatio())
     const targetMoved = Math.abs(target - current.lastTarget) > tolerance
 
-    /**
-     * Whether the model is still learning the heights the landing is computed from.
-     *
-     * Every offset a landing aims at is a sum of row heights, so declaring arrival while any row
-     * on screen is still an estimate is declaring it against a model that is about to change.
-     * The loop then agrees perfectly with a target that is simply wrong: it writes the offset the
-     * model asked for, reads back the offset it wrote, and reports `deviation: 0` because the
-     * model and the offset agree with each other while both disagree with the DOM.
-     *
-     * Measured on the demo: comment #137 estimates at 162px (`56 + 2 * 53`) and measures 141.
-     * Landing before that arrives is out by the 21px difference — none of it for `start`, half
-     * for `center`, all of it for `end` — which is exactly the -1.25 / -11.75 / -22.25 the
-     * accuracy matrix reported while every landing claimed to have converged. See #67.
-     *
-     * Asked of the engine rather than read from the cache, because an unmeasured row is either
-     * one whose delivery is a frame away or one the list will never mount, and only the surface
-     * can tell those apart. The fast path in `scrollToKey` already refuses to shortcut an
-     * unmeasured list on the same reasoning.
-     */
-
-
     // Arrival is judged on where the content *appears*, not on the raw scroll
     // offset. Both compensations move it there: the carry is what makes the visual
     // position exact on an engine that will not accept a fractional offset — on WebKit
@@ -1006,8 +985,20 @@ export function createScroller(options: ScrollerOptions): Scroller {
       // The cache keeps sizes by key across a window change, so once the loaded window moves it
       // can hold as many measurements as there are items while the items now on screen are
       // freshly mounted and still estimates — the state this shortcut then took for fully known,
-      // landing against an estimate and reporting `converged`. Asking the surface closes it, and
-      // is the same predicate the loop below converges on.
+      // landing against an estimate and reporting `converged`. Asking the surface closes it.
+      //
+      // What that costs when it is wrong, measured on the demo: comment #137 estimates at 162px
+      // (`56 + 2 * 53`) and measures 141, so a landing taken against the estimate is out by the
+      // 21px difference — none of it for `start`, half for `center`, all of it for `end`, which is
+      // exactly the -1.25 / -11.75 / -22.25 the accuracy matrix reported while every one of those
+      // landings claimed to have converged. See #67.
+      //
+      // This shortcut is the only reader, and deliberately: the convergence loop does not gate
+      // arrival on a pending measurement, because it does not need to. A delivery that lands moves
+      // the target, `targetMoved` catches it, and the loop re-aims — where this path has no second
+      // chance, since it resolves without ever running a frame. #65 removed the loop's copy of the
+      // predicate on exactly that reasoning, the trace having shown zero `scroll.step` events for
+      // the landing the gate was written for.
       const fullyMeasured =
         cache.measuredCount === cache.length && !(hasPendingMeasurement?.(index) ?? false)
       const at = getContentOffset()
