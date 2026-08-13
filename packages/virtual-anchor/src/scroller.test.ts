@@ -128,8 +128,19 @@ const harness = (
   }
 }
 
-/** Runs frames until the promise settles, or gives up. */
-const settle = async (h: Harness, promise: Promise<ScrollResult>): Promise<ScrollResult> => {
+/**
+ * Runs frames until the promise settles, or gives up.
+ *
+ * `onFrame` runs before each one, for the tests whose subject is a list that keeps moving —
+ * it is also how a caller counts the frames the loop was given, which is the measure the
+ * deadlines are denominated in.
+ */
+const settle = async (
+  h: Harness,
+  promise: Promise<ScrollResult>,
+  options: { msPerFrame?: number; limit?: number; onFrame?: () => void } = {},
+): Promise<ScrollResult> => {
+  const { msPerFrame = 16, limit = 400, onFrame } = options
   // A box rather than a `let`: TypeScript narrows a captured boolean to its literal
   // initialiser, so `!done` reads as always-true even though the promise flips it.
   const state = { done: false }
@@ -137,8 +148,9 @@ const settle = async (h: Harness, promise: Promise<ScrollResult>): Promise<Scrol
     state.done = true
     return result
   })
-  for (let i = 0; i < 400 && !state.done; i++) {
-    h.frames(1)
+  for (let i = 0; i < limit && !state.done; i++) {
+    onFrame?.()
+    h.frames(1, msPerFrame)
     await Promise.resolve()
   }
   return tracked
@@ -444,6 +456,95 @@ describe('scrollToIndex convergence', () => {
   })
 })
 
+describe('a main thread that stops delivering frames', () => {
+  /**
+   * How many frames a list that will never hold still is given before the loop gives up.
+   *
+   * The measure that matters for #92: the deadlines are budgets of the loop's own effort, so the
+   * number of frames it gets before reporting one must not fall away as the gaps between them
+   * grow. `msPerFrame` is the only variable.
+   *
+   * The row above the destination grows by 40px a frame — comfortably past any convergence
+   * tolerance, so "the target moved" is never a judgement call — and deliberately *without*
+   * `notifyModelChanged`. The loop re-resolves its target from the live cache every frame, so it
+   * sees the movement either way; what leaving the notification out does is hold the quiet window
+   * still, and that is a second clock with a second job. Notifying would put `MODEL_QUIET_MS`
+   * between the frame rates being compared and decide which deadline fires rather than how much
+   * of one the loop was given.
+   */
+  const framesUntilDeadline = async (
+    msPerFrame: number,
+  ): Promise<{ frames: number; result: ScrollResult }> => {
+    const h = harness()
+    let size = 100
+    let given = 0
+
+    const result = await settle(h, h.scroller.scrollToIndex(500), {
+      msPerFrame,
+      limit: 600,
+      onFrame: () => {
+        size += 40
+        h.cache.setSize(3, size)
+        given++
+      },
+    })
+    return { frames: given, result }
+  }
+
+  it('converges after a block that outlasts the hard deadline', async () => {
+    // The reproduction from #92: the clock runs past `HARD_DEADLINE_MS` with no frame delivered,
+    // which in a browser is one long task between the call and the first frame.
+    const h = harness({ count: 1000, itemSize: 100 })
+
+    const promise = h.scroller.scrollToIndex(500, { align: 'start' })
+    // The first aim, from estimates. A windowed list's offset is a sum of them, so this is
+    // wrong by the estimator's error and the convergence loop is what corrects it.
+    expect(h.viewport.offset).toBe(50_000)
+    for (let i = 0; i < 500; i++) h.cache.setSize(i, 300)
+    h.scroller.notifyModelChanged()
+
+    // 8 seconds, past `HARD_DEADLINE_MS`, before `step` runs once.
+    h.advance(8000)
+
+    const result = await settle(h, promise)
+    // On wall-clock deadlines this resolved `{ settled: false, reason: 'deadline',
+    // iterations: 0 }` — `iterations: 0` being the tell that the loop never ran — and left the
+    // view at the first aim. That is the consumer's 95px, uncorrected.
+    expect(result.settled).toBe(true)
+    expect(result.reason).toBe('converged')
+    expect(result.iterations).toBeGreaterThan(0)
+    expect(h.viewport.offset).toBe(150_000)
+  })
+
+  it('gives a device with long gaps as many chances as one at the cap', async () => {
+    // The claim the credit makes, as a comparison rather than a threshold: 100ms frames are
+    // charged in full, 250ms frames are charged 100ms each, so the slower run takes two and a
+    // half times the wall clock and gets the same number of frames to converge in. Uncredited it
+    // got two fifths of them — which is how four WebKit landings on a loaded CI runner ended
+    // 300–580px short, reporting `deadline` honestly for a scroll that ran out of frames.
+    const atCap = await framesUntilDeadline(100)
+    const beyondCap = await framesUntilDeadline(250)
+
+    expect(atCap.result.reason).toBe('deadline')
+    expect(beyondCap.result.reason).toBe('deadline')
+    // Which is also the statement that the budget is spent in frames and not in seconds: the same
+    // count at two and a half times the gap is two and a half times the wall clock.
+    expect(beyondCap.frames).toBeGreaterThan(atCap.frames * 0.9)
+  })
+
+  it('charges an ordinary frame rate in full', async () => {
+    // The other half, and the reason the credit is only ever the excess: a list that will not
+    // hold still while frames arrive perfectly normally is the case the deadlines exist for, and
+    // it still spends its budget over ~2 seconds of 16ms frames rather than being forgiven them.
+    // One that credited these would not bound anything.
+    const steady = await framesUntilDeadline(16)
+
+    expect(steady.result.reason).toBe('deadline')
+    // Over a hundred 16ms frames, which is `SOFT_DEADLINE_MS` of them and about 2s of wall clock.
+    expect(steady.frames).toBeGreaterThan(100)
+  })
+})
+
 describe('scrollToIndex sub-pixel landing', () => {
   it('carries the fraction an integer-only engine refuses', async () => {
     // WebKit truncates scrollTop. Without the carry the landing is up to a whole
@@ -728,6 +829,26 @@ describe('the convergence trace', () => {
     })
   })
 
+  it('reports a credited gap once, with both halves of it', async () => {
+    // `gap` and `credited` both, because the ratio is the diagnosis: this is a blocked main
+    // thread, where a device merely running at 8fps would report the same event every frame
+    // with a `gap` a little over the cap.
+    const suspends: TraceEvent[] = []
+    setTraceSink((event) => {
+      if (event.topic === 'scroll.suspend') suspends.push(event)
+    })
+
+    const h = harness({ count: 1000, itemSize: 100 })
+    const promise = h.scroller.scrollToIndex(500)
+    h.advance(8000)
+    await settle(h, promise)
+
+    expect(suspends).toHaveLength(1)
+    // The whole 8-second block bar the 100ms of it a frame could plausibly have taken — and
+    // `elapsed` is what the deadlines then see, which is that 100ms and not 8 seconds.
+    expect(suspends[0]?.data).toMatchObject({ gap: 8016, credited: 7916, elapsed: 100 })
+  })
+
   it('builds nothing when no sink is listening', async () => {
     // The call site asks `isTracing()` rather than `TRACING`, so a development build with
     // no sink attached does not assemble a record per frame.
@@ -763,27 +884,20 @@ describe('smooth scrolling at different frame rates', () => {
     expect(Math.abs(slow - fast) / fast).toBeLessThan(0.1)
   })
 
-  it('covers nearly all of the distance even at four frames a second', async () => {
-    // Not *all* of it: 5 seconds at 4fps is twenty frames, and the hard deadline is doing its
-    // job. The point is that those twenty frames now carry the animation essentially to its
-    // target — the old per-frame fraction covered a third of the distance in the same time —
-    // and that it resolves honestly rather than hanging.
+  it('covers all of the distance even at four frames a second', async () => {
+    // Twenty frames of easing carry the animation to its target, where the old per-frame
+    // fraction covered a third of the distance in the same time.
+    //
+    // It used to stop just short — 5 seconds at 4fps is twenty frames and the hard deadline
+    // took the rest — and it now arrives, because 250ms gaps are charged at
+    // `MAX_FRAME_GAP_MS` rather than in full: a device delivering four frames a second gets
+    // the same number of them to converge in as one delivering ten, over more wall clock. The
+    // deadline is still there and still bounds this; it is measured in the loop's own effort.
     const h = harness({ count: 1000, itemSize: 100 })
     const promise = h.scroller.scrollToIndex(500, { align: 'start', behavior: 'smooth' })
+    const result = await settle(h, promise, { msPerFrame: 250, limit: 40 })
 
-    const state = { done: false }
-    const tracked = promise.then((result) => {
-      state.done = true
-      return result
-    })
-    for (let i = 0; i < 40 && !state.done; i++) {
-      h.frames(1, 250)
-      await Promise.resolve()
-    }
-
-    const result = await tracked
-    expect(result.reason).toBeDefined()
-    // Within a tenth of a percent of a 50,000px scroll.
-    expect(h.viewport.getScrollOffset()).toBeGreaterThan(49_950)
+    expect(result.reason).toBe('converged')
+    expect(h.viewport.getScrollOffset()).toBe(50_000)
   })
 })

@@ -131,6 +131,23 @@ export interface ScrollFlushPayload extends Record<string, unknown> {
   skipped: boolean
 }
 
+/**
+ * `scroll.suspend` — a gap between frames too long to be a frame rate, credited back to the clock.
+ *
+ * Both halves are reported because the ratio is the diagnosis: a blocked main thread has a `gap` in
+ * the thousands and almost all of it `credited`, where a device merely running at 8fps reports a
+ * `gap` a little over the cap on every frame and is charged for nearly all of it.
+ *
+ * Starvation only. A frame the momentum gate blocked is `scroll.park`, whose `suspended` is the
+ * whole of its gap — so the two never describe the same span and a reader can add them up.
+ */
+export interface ScrollSuspendPayload extends Record<string, unknown> {
+  gap: number
+  credited: number
+  /** The budget already spent, *after* the credit — what the deadlines will be compared against. */
+  elapsed: number
+}
+
 /** `scroll.park` — the convergence loop giving up its frame request while the gate is shut. */
 export interface ScrollParkPayload extends Record<string, unknown> {
   elapsed: number
@@ -373,6 +390,7 @@ export interface TracePayloads {
   'scroll.sample': ScrollSamplePayload
   'scroll.start': ScrollStartPayload
   'scroll.step': StepPayload
+  'scroll.suspend': ScrollSuspendPayload
   'scroll.wake': ScrollWakePayload
   'scroll.write': ScrollWritePayload
   'slot.attach': SlotAttachPayload

@@ -1,6 +1,7 @@
 import { expect, test, type Page } from '@playwright/test'
 import {
   headerHeight,
+  measure,
   open,
   scrollTo,
   SNAPSHOT_KEY,
@@ -129,12 +130,16 @@ test.describe('a prepend during an in-flight smooth scroll', () => {
       TOLERANCE,
     )
 
-    // Whether it converged *within its time budget* is not, and asserting it
-    // unconditionally was asserting the speed of the machine. The convergence loop
-    // is bounded by wall clock on purpose — 2s soft, 5s hard — so it cannot hang;
-    // a box slow enough to spend that budget re-measuring two forced prepends will
-    // legitimately report `deadline`. Reproduced by oversubscribing Playwright's
-    // workers, which starves frames the same way a loaded CI runner does.
+    // Whether it converged *within its budget* is not, and asserting it unconditionally was
+    // asserting the speed of the machine. The convergence loop is bounded on purpose — 2s
+    // soft, 5s hard — so it cannot hang, and a box slow enough to spend that re-measuring
+    // two forced prepends will legitimately report `deadline`. Reproduced by oversubscribing
+    // Playwright's workers, which starves frames the same way a loaded CI runner does.
+    //
+    // Since #92 the budget is spent in frames the loop was *given*: a gap too long to be a
+    // frame rate is credited back rather than charged, so this allowance no longer covers a
+    // machine that simply stopped delivering frames — only one that kept delivering them to a
+    // list that would not hold still. Which is what these two forced prepends are.
     //
     // The same allowance, for the same reason, as the smooth case in
     // `matrix.spec.ts`. A `deadline` is only tolerable *because* the landing above
@@ -143,6 +148,50 @@ test.describe('a prepend during an in-flight smooth scroll', () => {
     if (!result.settled && result.reason !== 'deadline') {
       expect(result.settled, `reason=${result.reason}`).toBe(true)
     }
+  })
+})
+
+test.describe('a main thread blocked across the deadline', () => {
+  test('reports the landing it actually made', async ({ page }) => {
+    // #92, reproduced with no device emulation and no CPU throttling at all: the block below is
+    // synchronous and in the same task as the call, so the browser cannot deliver an animation
+    // frame while it runs, and the loop that has to satisfy a wall-clock deadline was driven by
+    // frames. See `MAX_FRAME_GAP_MS` in `scroller.ts` for the mechanism.
+    //
+    // This is the *first* scroll of the session deliberately, which is what makes it the
+    // consumer's case rather than only the issue's. Nothing between here and comment 8000 has
+    // been mounted yet, so the first aim is a sum of estimates and genuinely needs the
+    // correction — and without the loop getting a frame it never came: 145px out in all three
+    // engines, with the promise reporting a deviation of zero, because the model and the offset
+    // agreed with each other while both disagreed with the DOM. The issue's own reproduction
+    // pre-settles the window and so loses only the report; this loses the landing too.
+    await open(page, 'loadAll=1')
+
+    const result = await page.evaluate(async () => {
+      const promise = window.__list.scrollToKey('comment-8000', { align: 'start' })
+
+      // Past `HARD_DEADLINE_MS`, all of it before the loop's first frame.
+      const until = Date.now() + 5500
+      while (Date.now() < until) {
+        /* hold the main thread */
+      }
+
+      return promise
+    })
+
+    // The landing first and strictly, as everywhere else in this suite: an honest `deadline` for
+    // a scroll that genuinely did not arrive is a different bug report.
+    const landing = await measure(page, 8000, 'start', { paddingStart: await headerHeight(page) })
+    expect(landing.found).toBe(true)
+    expect(landing.clamped).toBe(false)
+    expect(Math.abs(landing.error), `off by ${landing.error.toFixed(3)}px`).toBeLessThan(TOLERANCE)
+
+    // And then the answer, which is the part that was wrong. No allowance for `deadline` here,
+    // unlike the two smooth cases that tolerate a slow machine: this is a local machine with
+    // nothing else to do, the whole thread-time went into the block above rather than into
+    // measuring, and once the frames come the loop converges in a handful of them.
+    expect(result.settled, `reason=${result.reason}`).toBe(true)
+    expect(result.reason).toBe('converged')
   })
 })
 

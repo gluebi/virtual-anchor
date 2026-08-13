@@ -46,6 +46,22 @@ const STABLE_FRAMES = 2
 const SOFT_DEADLINE_MS = 2000
 /** Hard safety valve, so a pathologically unstable list cannot hang a promise. */
 const HARD_DEADLINE_MS = 5000
+/**
+ * Longest gap between frames that still counts as a frame rate rather than a stall.
+ *
+ * Both deadlines above are budgets of *frames given*, and this is the line between the two
+ * readings of a long gap: below it the loop was merely running slowly and is charged in full,
+ * above it the loop was not running and the excess is credited back. `step` is where that
+ * happens, and where the defect it exists for is described.
+ *
+ * `MAX_STEP_MS` rather than a second literal, because the equality is load-bearing and a
+ * relation kept only in prose is a relation nothing keeps: each credit leaves exactly this much
+ * of the gap charged, so `tick - lastStepAt` never falls below the bound the integrator clamps
+ * to, and crediting `lastStepAt` therefore cannot change a single smooth step. It is also the
+ * one honest answer — "too long to be a frame" is one question, and that constant already
+ * answers it for the smooth approach. The debug analyzer's `FREEZE_MS` is 100ms as well.
+ */
+const MAX_FRAME_GAP_MS = MAX_STEP_MS
 /** Time constant for the self-driven smooth approach. */
 const SMOOTH_TAU_MS = 120
 /**
@@ -230,6 +246,28 @@ interface PendingScroll {
   lastTickAt: number
   iterations: number
   resolve: (result: ScrollResult) => void
+}
+
+/**
+ * Carry a pending scroll's clocks forward, so time the loop was not given is not charged to it.
+ *
+ * The two move together, which is what makes this one function rather than two lines at the call
+ * site: {@link PendingScroll.startedAt} is what both deadlines are measured from and
+ * {@link PendingScroll.lastStepAt} is what the smooth integrator advances by, and suspending one
+ * without the other buys the loop time and then eases through it.
+ *
+ * `lastModelChangeAt` is deliberately **not** carried, though the gate's earlier version of this
+ * did carry it. That stamp is *pushed* rather than sampled — `notifyModelChanged` arrives from a
+ * measurement or an insertion, and an insertion is consumer state that a tab without frames still
+ * processes — so "the model has not moved" is an observation the loop still holds after a stall,
+ * and carrying the stamp forward would discard it and make every stalled scroll wait out a fresh
+ * `MODEL_QUIET_MS` for nothing. What keeps that safe is not the clock: the resuming frame
+ * re-resolves its target from the live cache, so a model that *did* move is caught by
+ * `targetMoved` there.
+ */
+const suspend = (current: PendingScroll, ms: number): void => {
+  current.startedAt += ms
+  current.lastStepAt += ms
 }
 
 export function createScroller(options: ScrollerOptions): Scroller {
@@ -654,29 +692,70 @@ export function createScroller(options: ScrollerOptions): Scroller {
     const current = pending
     if (!current || disposed) return
 
-    // A scroll that is not allowed to move must not be allowed to time out either.
-    // The gate can now stay shut for the length of a fling — seconds, not the 150ms
-    // it used to be — and a loop whose clock kept running through that would burn
-    // `SOFT_DEADLINE_MS` and resolve `deadline` with a large deviation for a scroll
-    // that was never given a single chance to write. So the deadline clock is
-    // suspended: carry its origins forward by the time that just passed.
+    // A scroll that is not allowed to move must not be allowed to time out either — and neither
+    // must one that was never handed a frame to move in. Both are the same claim, and so both are
+    // the same credit: the deadlines below bound the loop's own effort, so time it could not use
+    // is carried forward rather than charged. The two causes are read in turn and settled once.
     //
-    // `lastTickAt` rather than `lastStepAt`, which belongs to the smooth integrator
-    // and is only touched on frames that actually advance. Measuring the suspension
-    // against that would bill the first blocked frame for every open frame before it.
-    //
-    // Gated on the *gesture*, not on `canWriteScroll()`, which also refuses during
-    // rubber-band overscroll. Two reasons: a bounce is ~300ms and well inside every
-    // deadline, so it needs no suspension; and the positional half of that predicate
-    // reads `scrollTop` and `scrollHeight`, which has no business running at the top of
-    // every frame of every ordinary scroll.
+    // `lastTickAt` rather than `lastStepAt`, which belongs to the smooth integrator and is
+    // only touched on frames that actually advance. Measuring a suspension against that
+    // would bill one blocked frame for every open frame before it.
     const tick = now()
     const sinceTick = Math.max(tick - current.lastTickAt, 0)
     current.lastTickAt = tick
-    if (!gate.canWrite()) {
-      current.startedAt += sinceTick
-      current.lastModelChangeAt += sinceTick
-      current.lastStepAt += sinceTick
+
+    // A refused write is one of the two, and the gate is what says so. It can stay shut for the
+    // length of a fling — seconds, not the 150ms it used to be — and a loop whose clock kept
+    // running through that would burn `SOFT_DEADLINE_MS` and resolve `deadline` with a large
+    // deviation for a scroll that was never given a single chance to write.
+    //
+    // Read from the *gesture*, not from `canWriteScroll()`, which also refuses during rubber-band
+    // overscroll. Two reasons: a bounce is ~300ms and well inside every deadline, so it needs no
+    // suspension; and the positional half of that predicate reads `scrollTop` and `scrollHeight`,
+    // which has no business running at the top of every frame of every ordinary scroll.
+    const blocked = !gate.canWrite()
+
+    // The other one: nobody delivered a frame. The deadlines used to be wall clock while the loop
+    // that has to satisfy them is animation frames, so a main thread blocked across one — a phone
+    // parsing a page of content, a backgrounded tab, one enormous long task — spent the whole
+    // budget without `step` running once, and the hard-deadline check below was then the first and
+    // only line of it to execute. That resolved `deadline` with `iterations: 0`, the zero being
+    // the tell: for a consumer whose first aim is a sum of estimates, the correction it names
+    // never happened and the view stayed 95px out. See #92.
+    //
+    // Only the excess, where a blocked frame is forgiven the whole gap. A gap inside
+    // `MAX_FRAME_GAP_MS` is a frame rate, however poor, and a budget that forgave those too would
+    // stop bounding the case the deadlines exist for — a list that will not hold still while
+    // frames arrive perfectly normally.
+    //
+    // One number for both, rather than a credit per cause: they partition the same gap, and two
+    // subtractions that have to add up to it are two chances to charge a frame twice and carry
+    // the origins past `tick`.
+    const stalled = Math.max(sinceTick - MAX_FRAME_GAP_MS, 0)
+    const credit = blocked ? sinceTick : stalled
+    if (credit > 0) suspend(current, credit)
+
+    // The starved case only, and only when something was credited: a blocked frame's whole gap is
+    // already `scroll.park`'s `suspended`, and two events reporting overlapping spans is a reader
+    // adding them together. So an ordinary frame pays one comparison for this, and every event
+    // that does escape is a gap no frame rate explains.
+    if (DEBUG && stalled > 0 && !blocked) {
+      trace('scroll.suspend', () => ({
+        gap: sinceTick,
+        credited: stalled,
+        elapsed: tick - current.startedAt,
+      }))
+    }
+
+    if (blocked) {
+      // Sharing one credit with the starved case is what *completes* this suspension rather
+      // than merely tidying it. Only the frame that notices the shut gate runs, so the parked
+      // span itself — park to `gate.onOpen`, a whole fling — used to be charged in full to the
+      // first waking frame, leaving the convergence loop a scroll whose soft budget was already
+      // spent. That span reaches the credit above as one enormous inter-frame gap, so the
+      // invariant this comment has always claimed now holds for the whole of the wait and not
+      // just its first 16ms.
+      //
       // Once per park, not once per frame — which is the same property the sleep below
       // exists for, and the reason this event is affordable at all. A reader seeing
       // `scroll.park` immediately followed by `scroll.wake` and a `scroll.commit` knows the

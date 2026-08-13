@@ -150,12 +150,16 @@ for (const scenario of SCENARIOS) {
           continue
         }
 
-        // Whether it converged *within its time budget* is not. The loop is bounded by
-        // wall clock on purpose — 2s soft, 5s hard — so that it cannot hang, which means
-        // a machine slow enough to spend the budget measuring will legitimately report
-        // `deadline`. Asserting `settled` unconditionally asserts the speed of the
-        // machine; this observed run failed once in roughly 400 with the landing still
-        // exact. A deadline is only accepted *because* the landing above was exact.
+        // Whether it converged *within its budget* is not. The loop is bounded on purpose
+        // — 2s soft, 5s hard — so that it cannot hang, which means a machine slow enough
+        // to spend the budget measuring will legitimately report `deadline`. Asserting
+        // `settled` unconditionally asserts the speed of the machine; this observed run
+        // failed once in roughly 400 with the landing still exact. A deadline is only
+        // accepted *because* the landing above was exact.
+        //
+        // The budget is counted in frames the loop was given rather than in wall clock
+        // since #92, so what is tolerated here is a busy machine that kept the frames
+        // coming, not one that stopped.
         if (!result.settled && result.reason !== 'deadline') {
           failures.push(`#${String(index)}: reason=${result.reason}`)
         }

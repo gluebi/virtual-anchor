@@ -18,7 +18,7 @@ import { VirtualList } from 'virtual-anchor/react'     // React 19 adapter
 The React entry needs React 19; the core entry needs nothing. React is an *optional* peer
 dependency, so using the core alone pulls in no framework and warns about none.
 
-Minified and brotlied, including its one dependency: **10.19 kB** for the core entry, **12.48 kB**
+Minified and brotlied, including its one dependency: **10.2 kB** for the core entry, **12.55 kB**
 if you import the React adapter (which contains the core — they share a chunk rather than
 duplicating it). Both are enforced as budgets in CI, so this figure cannot drift from the
 truth.
@@ -212,7 +212,10 @@ cannot express "comment 4211 of 12000" while sixty items are mounted.
 ## Older Safari
 
 Settle detection is driven by a `requestAnimationFrame` loop, which works
-everywhere and is bounded by its own deadline, so a promise cannot hang. Where
+everywhere and is bounded by its own deadline — counted in the frames it was
+given, not in wall clock, so a main thread blocked across the deadline defers the
+promise rather than failing it, and a tab without frames resolves when it has
+them again. Where
 `scrollend` exists it is used to corroborate that loop — once the platform says the
 scrolling is over and the target is already still, there is nothing left to wait for,
 so the promise resolves a little sooner. A measurement or a prepend arriving
@@ -486,6 +489,7 @@ that dropped the start of the gesture.
 | `scroll.gate` | the momentum gate changing state | `state`, `reason` | a few per gesture |
 | `gate.attach` | once, at mount, before the off-iOS return | `ios` | once ever |
 | `scroll.park` / `wake` / `flush` | the convergence loop sleeping and resuming | `banked`, `suspended` | once per gesture |
+| `scroll.suspend` | a frame gap too long to charge the deadline for | `gap`, `credited` | per stall |
 | `measure.batch` / `measure.done` | a ResizeObserver delivery, and what it cost | `count`, `invalidated`, `ms` | per batch |
 | `layout.signature` | the fingerprint that invalidates measurements | `signature`, `previous`, `cleared` | rare |
 | `frame.long` / `frame.summary` | from the toolkit's probe, not the core | `gap`, `longest` | outliers only |
