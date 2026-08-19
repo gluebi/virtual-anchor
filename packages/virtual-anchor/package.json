@@ -63,7 +63,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "zustand": "^5.0.14"
+    "zustand": "^5.0.15"
   },
   "//peerDependencies": "React is needed only for the `virtual-anchor/react` entry, and npm cannot express 'required for this subpath only' — so they are optional, and a consumer of the framework-agnostic entry gets no warnings about a framework it does not use.",
   "peerDependencies": {
