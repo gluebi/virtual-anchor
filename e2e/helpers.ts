@@ -217,6 +217,39 @@ export interface View {
   windowScroller?: boolean
 }
 
+/**
+ * Sample offsets inside the `paddingStart` band that the header does *not* cover.
+ *
+ * The assertion `measure` cannot make. It computes the expected landing as
+ * `view.top + paddingStart` and is therefore satisfied by any header height at all,
+ * including one covering nothing — which is exactly what the demo shipped: the header was a
+ * flex sibling above the scroller, so every `align: 'start'` target sat a header-height down
+ * the scrollport with the *previous* comment visible above it, and the whole matrix reported
+ * zero error. Reading the band closes that, because it is the one claim a fictional inset
+ * cannot satisfy. See #104.
+ */
+export function uncoveredTopBand(page: Page, view: View): Promise<number[]> {
+  return page.evaluate(
+    ({ paddingStart, windowScroller }) => {
+      const scroller = document.querySelector('.scroller')
+      if (!scroller) return []
+      const box = scroller.getBoundingClientRect()
+      const top = windowScroller ? 0 : box.top + scroller.clientTop
+      const x = box.left + box.width / 2
+
+      const uncovered: number[] = []
+      // Inset by a pixel at each end: the exact edges belong to whichever box rounds the
+      // other way, and that is not what this is asking about.
+      for (let dy = 1; dy < paddingStart - 1; dy += 8) {
+        const el = document.elementFromPoint(x, top + dy)
+        if (!el?.closest('.header')) uncovered.push(dy)
+      }
+      return uncovered
+    },
+    { paddingStart: view.paddingStart, windowScroller: view.windowScroller === true },
+  )
+}
+
 export interface Landing {
   found: boolean
   /** Signed px between where the item is and where the alignment asked for. */

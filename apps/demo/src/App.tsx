@@ -28,7 +28,7 @@ import {
   type Comment,
   type Window as ThreadWindow,
 } from './thread.js'
-import { CONFIG, FIXED_WINDOW, SNAPSHOT_KEY } from './config.js'
+import { appStyleFor, CONFIG, FIXED_WINDOW, SNAPSHOT_KEY } from './config.js'
 import './styles.css'
 
 /**
@@ -144,6 +144,9 @@ export function App(): ReactNode {
    * Starts at the configured value so the first paint aims correctly, before any observation.
    */
   const [headerHeight, setHeaderHeight] = useState(CONFIG.paddingStart)
+  // Not `paddingStart === 0 ? 0 : headerHeight`: with no header configured the element is
+  // never rendered, so the observer never fires and the state holds its initial 0 anyway.
+  const appStyle = appStyleFor(headerHeight)
   useLayoutEffect(() => {
     const header = headerRef.current
     if (!header) return
@@ -357,7 +360,6 @@ export function App(): ReactNode {
               : windowRef.current.to
             : found + (where === 'above' ? 0 : 1)
 
-
         return [...current.slice(0, at), ...posted, ...current.slice(at)]
       })
       // Both insertion points are inside the loaded slice, so it grows by exactly `count`.
@@ -515,7 +517,7 @@ export function App(): ReactNode {
   })()
 
   return (
-    <div className="app">
+    <div className={CONFIG.windowScroller ? 'app' : 'app app--inner'} style={appStyle}>
       {CONFIG.paddingStart === 0 ? null : (
       <header className="header" ref={headerRef} style={{ minHeight: CONFIG.paddingStart }}>
         <strong>virtual-anchor</strong>

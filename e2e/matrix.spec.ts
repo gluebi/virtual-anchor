@@ -9,6 +9,7 @@ import {
   setWindowAround,
   TOLERANCE,
   topOfKey,
+  uncoveredTopBand,
   visibleRowTops,
   worstMovement,
   type ScrollOptions,
@@ -49,18 +50,28 @@ interface Scenario {
    * which makes this the independent check that the two agree.
    */
   stickyFooter?: number
+  /**
+   * Whether the scenario renders the page's sticky header.
+   *
+   * Read before opening rather than measured after, so the two scenarios without one skip
+   * the band assertion instead of paying for a full 12,000-comment navigation to discover
+   * they have nothing to assert about.
+   */
+  stickyHeader?: boolean
 }
 
 const SCENARIOS: Scenario[] = [
   {
     name: 'inner scroller, a sticky header',
     query: 'paddingStart=64',
+    stickyHeader: true,
   },
   { name: 'inner scroller, no header', query: 'paddingStart=0' },
   {
     name: 'inner scroller, measured slots above and below the list',
     query: 'paddingStart=64&header=300&footer=200&stickyFooter=80',
     stickyFooter: 80,
+    stickyHeader: true,
   },
   {
     name: 'window scroller',
@@ -68,14 +79,26 @@ const SCENARIOS: Scenario[] = [
     windowScroller: true,
   },
   {
+    // The combination nothing covered until #104, and the one where both halves of that
+    // defect met: the page genuinely scrolls here, so a header that merely *exists* is not
+    // enough — it has to still be over the scrollport a viewport later.
+    name: 'window scroller, a sticky header',
+    query: 'paddingStart=64&windowScroller=1',
+    windowScroller: true,
+    stickyHeader: true,
+  },
+  {
     name: 'a 40-comment paged window',
     query: 'paddingStart=64',
     paged: true,
+    stickyHeader: true,
   },
 ]
 
 /** Targets deep enough that a large loaded window and long scroll distance are real. */
-const TARGETS = [137, 1013, 4211, 7777, 11_500]
+/** Far enough in that the page has genuinely scrolled, for the assertions that need it. */
+const DEEPEST_TARGET = 11_500
+const TARGETS = [137, 1013, 4211, 7777, DEEPEST_TARGET]
 const ALIGNMENTS = ['start', 'center', 'end'] as const
 
 /** Load the whole thread unless the scenario is specifically about paging. */
@@ -132,6 +155,21 @@ for (const scenario of SCENARIOS) {
         expect(failures, `align ${align}:\n${failures.join('\n')}`).toEqual([])
       })
     }
+
+    test('the header covers the band every landing is asked to clear', async ({ page }) => {
+      test.skip(scenario.stickyHeader !== true, 'this scenario renders no header')
+      await openScenario(page, scenario)
+
+      // *After* a landing, not at rest. At offset zero a header covers the band in every
+      // arrangement, working or not — the window-scroller half of #104 was a sticky header
+      // bounded by a one-viewport containing block, which looks perfect until the page has
+      // scrolled past it and then never comes back. Asserting on load would have passed.
+      await aim(page, scenario, DEEPEST_TARGET, { align: 'start' })
+
+      // Without this the accuracy assertions above are satisfied by an inset that describes
+      // nothing: they place the row `paddingStart` down and never ask what is up there.
+      expect(await uncoveredTopBand(page, await viewOf(page, scenario))).toEqual([])
+    })
 
     test('lands within half a pixel after a smooth scroll', async ({ page }) => {
       await openScenario(page, scenario)
