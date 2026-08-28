@@ -18,7 +18,7 @@ import { VirtualList } from 'virtual-anchor/react'     // React 19 adapter
 The React entry needs React 19; the core entry needs nothing. React is an *optional* peer
 dependency, so using the core alone pulls in no framework and warns about none.
 
-Minified and brotlied, including its one dependency: **10.2 kB** for the core entry, **12.55 kB**
+Minified and brotlied, including its one dependency: **10.25 kB** for the core entry, **12.57 kB**
 if you import the React adapter (which contains the core — they share a chunk rather than
 duplicating it). Both are enforced as budgets in CI, so this figure cannot drift from the
 truth.
@@ -69,8 +69,11 @@ And three things no other virtual list offers at all:
   trailing-edge rule, so "they read this" holds for a comment taller than the
   screen as well as a one-line one.
 - **An honest settle signal.** `scrollToKey` returns a promise resolving with
-  `{ settled, deviation, iterations, reason }`. When it could not get there, it
-  says so — and says why.
+  `{ settled, deviation, clamped, iterations, reason }`. When it could not get
+  there, it says so — and says why. Including the case where "there" was never
+  reachable: a row needs a scrollport's worth of content below it to be brought
+  to the top, and `clamped` says that outright rather than reporting a flush
+  landing for a row left halfway down the screen.
 
 ## Quick start
 
@@ -111,6 +114,9 @@ function Thread({ comments, totalCount, firstLoadedPosition }) {
 const result = await list.current.scrollToKey('comment-4211', { align: 'start' })
 if (result.settled) flash('comment-4211')
 else console.warn('could not land:', result.reason, result.deviation)
+// Independent of `settled`: a scroll that came to rest can still be short of what you
+// asked for, if the target was closer to the end than one scrollport of content.
+if (result.clamped) console.warn('landed', result.deviation, 'px short of the top')
 ```
 
 The headless `useVirtualList` gives the same engine with your own markup, including

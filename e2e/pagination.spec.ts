@@ -31,8 +31,19 @@ test.describe('page-at-a-time', () => {
     await press(page, 'Next ›')
     await expect(page.locator('[data-testid="status"]')).toContainText('landed at the top')
 
-    expect(await status(page)).toContain('deviation=0.000px')
+    // "The top" here is the scroll offset, and it is 0.
     expect(await page.locator('.scroller').evaluate((el) => el.scrollTop)).toBeLessThanOrEqual(0.5)
+
+    // The deviation is *not* 0, and this is the change #101 made. This demo declares a 64px
+    // `scrollPaddingStart`, so `align: 'start'` on index 0 asks for an offset of -64: the
+    // first comment cannot be placed below overlapping chrome when there is nothing above it
+    // to scroll away. The scroller stops at 0, which is all it can do, and now reports the
+    // shortfall instead of subtracting the clamp from itself and calling it a flush landing.
+    //
+    // Whether this demo *should* declare that padding is a separate question — its header is
+    // a flex sibling above the scroller rather than chrome over it, so nothing is actually
+    // covered. That is a demo defect this assertion is deliberately not hiding.
+    expect(await status(page)).toContain('deviation=-64.000px')
 
     // And it is genuinely the next page's comments, not the same ones re-labelled.
     const first = await page
