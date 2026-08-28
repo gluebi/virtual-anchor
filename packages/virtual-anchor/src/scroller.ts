@@ -494,15 +494,8 @@ export function createScroller(options: ScrollerOptions): Scroller {
    * the distance to where the target *was asked* to land, and measuring it against the
    * clamped value made it zero by construction for every target out of reach. See #101.
    *
-   * `maxOffset` is a parameter rather than a second read of `getMaxScrollOffset`: that is
-   * `scrollHeight - clientHeight`, and this runs on every frame of the convergence loop.
    */
-  const requestedTargetFor = (
-    index: number,
-    align: ScrollAlign,
-    extra: number,
-    maxOffset: number,
-  ): number => {
+  const requestedTargetFor = (index: number, align: ScrollAlign, extra: number): number => {
     const cache = getCache()
     const geometry = getGeometry()
 
@@ -523,10 +516,14 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // Falling through to the general case has neither problem, and expresses
     // the alignment once rather than twice.
     if (align === 'end' && index === cache.length - 1 && (geometry.spaceAfter ?? 0) === 0) {
+      // The one branch that needs the range to answer *where was it asked to be*, so the read
+      // lives here rather than in the signature: every other alignment builds its request from
+      // item geometry alone, and those are the ones that run on every frame of the loop.
+      //
       // `extra` applies here too. The shortcut used to drop it, so an `offset` passed with
       // this alignment on this item was ignored outright — and once the clamp stopped hiding
       // it, would have been reported as a landing nobody asked for.
-      return maxOffset + extra
+      return viewport.getMaxScrollOffset() + extra
     }
 
     // `start` is the offset that puts the item's top edge at the top of the
@@ -578,8 +575,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
    * run to its deadline against one it refuses.
    */
   const targetFor = (index: number, align: ScrollAlign, extra: number): number => {
-    const maxOffset = viewport.getMaxScrollOffset()
-    return clampToRange(requestedTargetFor(index, align, extra, maxOffset), maxOffset)
+    return clampToRange(requestedTargetFor(index, align, extra), viewport.getMaxScrollOffset())
   }
 
   /**
@@ -708,14 +704,8 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // a row several hundred pixels below where `align` asked for it reported a flush landing
     // (#101). `clamped` names that condition, because the number alone cannot be told apart
     // from a scroll that simply ran out of frames.
-    const maxOffset = viewport.getMaxScrollOffset()
-    const requested = requestedTargetFor(
-      indexFor(current),
-      current.align,
-      current.offset,
-      maxOffset,
-    )
-    const finalTarget = clampToRange(requested, maxOffset)
+    const requested = requestedTargetFor(indexFor(current), current.align, current.offset)
+    const finalTarget = clampToRange(requested, viewport.getMaxScrollOffset())
     const actual = getContentOffset()
     const deviation = requested - actual
     const clamped = requested !== finalTarget

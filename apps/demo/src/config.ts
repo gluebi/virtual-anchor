@@ -1,4 +1,23 @@
+import { type CSSProperties } from 'react'
 import { THREAD_SIZE } from './thread.js'
+
+/**
+ * The measured header height, on its way to CSS.
+ *
+ * Under `.app--inner` the header is out of flow so it can lie over the scrollport, which
+ * means its height is no longer something layout can work out for itself. Declared rather
+ * than cast: `CSSProperties` has no index signature for custom properties, and `as` here
+ * would let a typo through silently.
+ */
+export interface AppStyle extends CSSProperties {
+  '--header-h': string
+}
+
+/** The style object that publishes it, so both demos spell the property once. */
+export const appStyleFor = (headerHeight: number): AppStyle => ({
+  '--header-h': `${String(headerHeight)}px`,
+})
+
 
 /**
  * The demo's configuration, read once from the URL.

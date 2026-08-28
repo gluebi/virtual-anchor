@@ -15,14 +15,27 @@ body {
 .app {
   display: flex;
   flex-direction: column;
-  height: 100vh;
+  /* The page-scrolling arrangement is the base, because it is the one that needs nothing:
+     an in-flow sticky header reserves its own band and the browser does the arithmetic.
+     `.app--inner` below adds what an inner scrollport costs. */
+  min-height: 100vh;
 }
 
-/* Deliberately overlaps the top of the scroller, so scrollPaddingStart has
-   something real to clear. */
+/* Overlaps the top of the scrollport, which is what makes `scrollPaddingStart` a real
+   demonstration rather than a number the list clears for nothing — it used to cover nothing
+   at all, in either scroller kind. See #104.
+
+   Sticky is right here: under `windowScroller` the page is what scrolls, so the header pins
+   to the viewport and content passes beneath it on the way up. The only reason it did not
+   work was `.app` being exactly one viewport tall — sticky is bounded by its containing
+   block, so the header left the screen for good after the first 100vh.
+
+   `width: 100%` rather than `left/right: 0`, so the `fixed` variant below needs no reset:
+   the header is a full-width flex item of `.app` either way. */
 .header {
   position: sticky;
   top: 0;
+  width: 100%;
   z-index: 2;
   display: flex;
   align-items: center;
@@ -111,6 +124,33 @@ body {
   min-width: 0;
   padding: 0 16px;
   background: #f6f7f9;
+}
+
+/* An inner scrollport cannot use the arrangement above: there is no scroll in `.app` for
+   sticky to stick against, so the header has to leave the flow to lie over the list. Which
+   means its height stops being something layout can work out for itself — hence `--header-h`,
+   measured by the demo and published from the same state that feeds `scrollPaddingStart`, so
+   the band the header covers and the band the list clears cannot disagree when the controls
+   wrap onto a second row.
+
+   `.app` needs a definite height here, not a minimum, to bound `.body`'s `flex: 1; min-height: 0`.
+
+   Only `.panel` pays for the reserve. The scrollport deliberately keeps its own top edge at
+   the top of `.app` — that band beneath the header is exactly what `scrollPaddingStart` tells
+   the list to keep its targets out of. (Reserving on `.app` and backing `.scroller` out again
+   is the same layout by a longer route: the two cancel, and only the panel is left moved.) */
+.app--inner {
+  height: 100vh;
+}
+
+.app--inner .header {
+  position: fixed;
+}
+
+/* Margin, not padding: the panel is its own `overflow-y: auto` scrollport, so padding would
+   let its content scroll up under the header rather than stop at it. */
+.app--inner .panel {
+  margin-top: var(--header-h, 0px);
 }
 
 /* The slots are reachable by attribute, which is the whole styling API for them —
@@ -273,6 +313,12 @@ code.leave {
     border-top: 1px solid #e2e4e8;
     /* A third of the height at most, so the list keeps the screen. */
     max-height: 33vh;
+  }
+
+  /* Stacked below the scroller rather than beside it, so it is nowhere near the header and
+     the reserve above would only open a gap between the list and the panel. */
+  .app--inner .panel {
+    margin-top: 0;
   }
 }
 

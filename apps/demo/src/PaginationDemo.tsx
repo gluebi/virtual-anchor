@@ -6,6 +6,7 @@ import {
   useState,
 } from 'react'
 import { VirtualList, type VirtualListHandle } from 'virtual-anchor/react'
+import { appStyleFor } from './config.js'
 import { buildThread, estimateCommentSize, sleep, THREAD_SIZE, type Comment } from './thread.js'
 import './styles.css'
 
@@ -56,6 +57,7 @@ export function PaginationDemo(): ReactNode {
    * for 64px would land underneath the header.
    */
   const [headerHeight, setHeaderHeight] = useState(64)
+  const appStyle = appStyleFor(headerHeight)
   useLayoutEffect(() => {
     const header = headerRef.current
     if (!header) return
@@ -167,7 +169,7 @@ export function PaginationDemo(): ReactNode {
   }, [])
 
   return (
-    <div className="app">
+    <div className="app app--inner" style={appStyle}>
       <header className="header" ref={headerRef} style={{ minHeight: 64 }}>
         <strong>virtual-anchor</strong>
         <span className="muted">pagination · {THREAD_SIZE.toLocaleString()} comments</span>
