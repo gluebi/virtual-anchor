@@ -337,9 +337,128 @@ describe('scrollToIndex alignment', () => {
     await expect(scroller.scrollToIndex(0)).resolves.toEqual({
       settled: false,
       deviation: 0,
+      clamped: false,
       iterations: 0,
       reason: 'empty',
     })
+  })
+})
+
+describe('a target outside the scrollable range', () => {
+  /**
+   * Ten 100px items in a 600px viewport: 1000px of content, so the maximum offset is 400
+   * and item 8 (top 800) cannot be brought to the top. The scroller is right to stop at
+   * 400 — this is a reachability limit, not a convergence failure — but it used to
+   * describe that landing with `deviation: 0`, which is the same answer a flush landing
+   * gives. The clamp is kept; what changed is that the request survives long enough to be
+   * compared against. See #101.
+   */
+  it('reports the distance to the target it was asked for, not to the one it could reach', async () => {
+    const h = harness({ count: 10, itemSize: 100 })
+    expect(h.viewport.getMaxScrollOffset()).toBe(400)
+
+    const result = await settle(h, h.scroller.scrollToIndex(8, { align: 'start' }))
+
+    expect(h.viewport.offset).toBe(400)
+    // The row sits 400px below the top of the viewport, and now says so.
+    expect(800 - h.viewport.offset).toBe(400)
+    expect(result).toEqual({
+      settled: true,
+      deviation: 400,
+      clamped: true,
+      iterations: 0,
+      reason: 'converged',
+    })
+  })
+
+  it('keeps settled true, because motion did stop with the target holding still', async () => {
+    // `settled` answers "did it come to rest", `reason` answers "why did it stop", and
+    // neither of them changes meaning here. A consumer that wants to know whether the row
+    // is where it asked reads `deviation` and `clamped`.
+    const h = harness({ count: 10, itemSize: 100 })
+
+    const result = await settle(h, h.scroller.scrollToIndex(9, { align: 'start' }))
+
+    expect(result.settled).toBe(true)
+    expect(result.reason).toBe('converged')
+    expect(result.clamped).toBe(true)
+  })
+
+  it('reports a negative deviation for a target clamped against the top', async () => {
+    const h = harness({ count: 10, itemSize: 100 })
+
+    const result = await settle(h, h.scroller.scrollToIndex(0, { align: 'start', offset: -500 }))
+
+    expect(h.viewport.offset).toBe(0)
+    // Asked for -500, got 0: the content is 500px *below* where it was asked to be, and
+    // the sign says which way.
+    expect(result.deviation).toBe(-500)
+    expect(result.clamped).toBe(true)
+  })
+
+  it('reports a clamped landing for center near the end of the list', async () => {
+    // Item 9 spans [900, 1000); centred in a 600px viewport it would want 900 + 50 - 300
+    // = 650, which is 250 past the maximum.
+    const h = harness({ count: 10, itemSize: 100 })
+
+    const result = await settle(h, h.scroller.scrollToIndex(9, { align: 'center' }))
+
+    expect(h.viewport.offset).toBe(400)
+    expect(result.deviation).toBe(250)
+    expect(result.clamped).toBe(true)
+  })
+
+  it('does not call the last item aligned to the end a clamp', async () => {
+    // The one alignment where the maximum *is* the answer rather than a limit on it:
+    // `requestedTargetFor` returns it directly, so the two coincide legitimately and the
+    // deviation must stay exactly zero.
+    const viewport = fakeViewport({ max: 99_999.5 })
+    const h = harness({ viewport })
+
+    const result = await settle(h, h.scroller.scrollToIndex(999, { align: 'end' }))
+
+    expect(h.viewport.offset).toBe(99_999.5)
+    expect(result.deviation).toBe(0)
+    expect(result.clamped).toBe(false)
+  })
+
+  it('does not call an already-visible item under align auto a clamp', async () => {
+    // `auto` returns the current offset when the item is fully visible. That is not a
+    // clamp and must not start reporting as one.
+    const h = harness({ count: 10, itemSize: 100 })
+
+    const result = await settle(h, h.scroller.scrollToIndex(1, { align: 'auto' }))
+
+    expect(h.viewport.offset).toBe(0)
+    expect(result.deviation).toBe(0)
+    expect(result.clamped).toBe(false)
+  })
+
+  it('applies offset to the last item aligned to the end, rather than dropping it', async () => {
+    // The end shortcut returned the browser maximum and discarded `extra` entirely, so an
+    // `offset` passed with this alignment on this item did nothing at all — and reported
+    // deviation 0 while doing it. Lifting the last comment clear of a footer is the
+    // request that wants this.
+    const viewport = fakeViewport({ max: 99_999.5 })
+    const h = harness({ viewport })
+
+    const result = await settle(h, h.scroller.scrollToIndex(999, { align: 'end', offset: -50 }))
+
+    expect(h.viewport.offset).toBe(99_949.5)
+    // Reachable, so this is a landing like any other.
+    expect(result.deviation).toBe(0)
+    expect(result.clamped).toBe(false)
+  })
+
+  it('reports an offset that pushes the last item past the end as clamped', async () => {
+    const viewport = fakeViewport({ max: 99_999.5 })
+    const h = harness({ viewport })
+
+    const result = await settle(h, h.scroller.scrollToIndex(999, { align: 'end', offset: 50 }))
+
+    expect(h.viewport.offset).toBe(99_999.5)
+    expect(result.deviation).toBe(50)
+    expect(result.clamped).toBe(true)
   })
 })
 
@@ -452,6 +571,7 @@ describe('scrollToIndex convergence', () => {
     const result = await h.scroller.scrollToIndex(10, { align: 'start' })
     expect(result.settled).toBe(true)
     expect(result.deviation).toBe(0)
+    expect(result.clamped).toBe(false)
     expect(h.viewport.offset).toBe(1000)
   })
 })
@@ -583,6 +703,9 @@ describe('scrollToIndex sub-pixel landing', () => {
 
     expect(result.reason).toBe('converged')
     expect(result.deviation).toBe(0)
+    // A sub-pixel landing is not a clamp: the target was always reachable, the engine
+    // just would not take the fraction. Distinguishing the two is the point of the flag.
+    expect(result.clamped).toBe(false)
     // The platform took 100 and the carry moved the content the remaining 0.75.
     expect(h.viewport.offset).toBe(100)
     expect(h.carries.at(-1)).toBeCloseTo(0.75, 6)
