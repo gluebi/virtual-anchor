@@ -268,6 +268,7 @@ export interface ScrollFinishPayload extends Record<string, unknown> {
   settled: boolean
   reason: ScrollEndReason
   deviation: number
+  clamped: boolean
   finalTarget: number
   actual: number
   iterations: number

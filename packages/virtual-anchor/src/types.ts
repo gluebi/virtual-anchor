@@ -59,8 +59,27 @@ export interface ScrollToOptions {
  */
 export interface ScrollResult {
   settled: boolean
-  /** Signed px between where the target landed and where it was asked to land. */
+  /**
+   * Signed px between where the target landed and where it was asked to land.
+   *
+   * Measured against the *requested* offset, which is not always one the scroller can
+   * reach: see `clamped`. Positive means the content stopped short of the target.
+   */
   deviation: number
+  /**
+   * The requested offset was outside the scroller's range, so it landed as close as it could.
+   *
+   * A reachability limit rather than a failure — `settled` still answers "did motion stop
+   * with the target holding still", and `reason` still answers why it stopped, so a clamped
+   * landing normally reports `settled: true` and `converged`. The two are independent: a list
+   * that keeps resizing while its target is also out of reach reports `deadline` and
+   * `clamped: true` both.
+   *
+   * Asking for the top of an item with less than a scrollport of content below it is the
+   * common case, so the band scales with the viewport. `deviation` says how far short;
+   * this says the distance is the range's doing and not something more frames would fix.
+   */
+  clamped: boolean
   /** How many measure-and-re-aim rounds the convergence loop needed. */
   iterations: number
   /** Why the scroll stopped, so an unsettled result is actionable. */

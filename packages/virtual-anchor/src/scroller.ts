@@ -75,6 +75,19 @@ const SMOOTH_TAU_MS = 120
  */
 const SMOOTH_MIN_STEP = 1
 
+/**
+ * The range a scroll write has to land in.
+ *
+ * Two scroll-space numbers in an otherwise content-space calculation, both deliberate and
+ * both only correct because nothing is held when a target is written: `maxOffset` is the
+ * browser's own answer to "as far down as this goes", and this is the range the write has to
+ * land in. While a shift is outstanding the reachable content range is that window displaced
+ * by it — which is what bounds the shift in the first place, in the engine, so a target
+ * clamped here cannot be outside it once it is folded.
+ */
+const clampToRange = (target: number, maxOffset: number): number =>
+  Math.min(Math.max(target, 0), maxOffset)
+
 export interface ScrollerOptions {
   viewport: Viewport
   /** Read the live cache — it is replaced as the window grows. */
@@ -473,17 +486,25 @@ export function createScroller(options: ScrollerOptions): Scroller {
   }
 
   /**
-   * The offset that puts `index` where `align` asks for, clamped to reality.
+   * Where the caller asked the offset to be, before the scroller's own range is applied.
    *
-   * Clamped against the browser's own maximum, never against the cache's
-   * estimated total — clamping in the wrong space is the whole of TanStack
-   * #1001, where the error grew with the list's distance from the top of the
-   * page.
+   * Split out from `targetFor` so the alignment arithmetic is written once and a landing can
+   * still be described by both numbers: what was asked for, and what the range allowed.
+   * `finish` is the only caller that wants the unclamped one — `deviation` is documented as
+   * the distance to where the target *was asked* to land, and measuring it against the
+   * clamped value made it zero by construction for every target out of reach. See #101.
+   *
+   * `maxOffset` is a parameter rather than a second read of `getMaxScrollOffset`: that is
+   * `scrollHeight - clientHeight`, and this runs on every frame of the convergence loop.
    */
-  const targetFor = (index: number, align: ScrollAlign, extra: number): number => {
+  const requestedTargetFor = (
+    index: number,
+    align: ScrollAlign,
+    extra: number,
+    maxOffset: number,
+  ): number => {
     const cache = getCache()
     const geometry = getGeometry()
-    const maxOffset = viewport.getMaxScrollOffset()
 
     // The last item aligned to the end is the one case where our measurements
     // cannot be trusted: borders and padding outside the list still occupy
@@ -502,7 +523,10 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // Falling through to the general case has neither problem, and expresses
     // the alignment once rather than twice.
     if (align === 'end' && index === cache.length - 1 && (geometry.spaceAfter ?? 0) === 0) {
-      return maxOffset
+      // `extra` applies here too. The shortcut used to drop it, so an `offset` passed with
+      // this alignment on this item was ignored outright — and once the clamp stopped hiding
+      // it, would have been reported as a landing nobody asked for.
+      return maxOffset + extra
     }
 
     // `start` is the offset that puts the item's top edge at the top of the
@@ -538,13 +562,24 @@ export function createScroller(options: ScrollerOptions): Scroller {
       }
     }
 
-    // Two scroll-space numbers in an otherwise content-space function, both deliberate and
-    // both only correct because nothing is held when a target is written: `maxOffset` above
-    // is the browser's own answer to "as far down as this goes", and the clamp here is the
-    // range the write has to land in. While a shift is outstanding the reachable content
-    // range is that window displaced by it — which is what bounds the shift in the first
-    // place, in the engine, so a target clamped here cannot be outside it once it is folded.
-    return Math.min(Math.max(target + extra, 0), maxOffset)
+    return target + extra
+  }
+
+  /**
+   * The offset that puts `index` where `align` asks for, clamped to reality.
+   *
+   * Clamped against the browser's own maximum, never against the cache's
+   * estimated total — clamping in the wrong space is the whole of TanStack
+   * #1001, where the error grew with the list's distance from the top of the
+   * page.
+   *
+   * Every caller that *moves* the list reads this one, `finish` included for the arrival it
+   * reports: the convergence loop must chase an offset the platform will accept, or it would
+   * run to its deadline against one it refuses.
+   */
+  const targetFor = (index: number, align: ScrollAlign, extra: number): number => {
+    const maxOffset = viewport.getMaxScrollOffset()
+    return clampToRange(requestedTargetFor(index, align, extra, maxOffset), maxOffset)
   }
 
   /**
@@ -649,7 +684,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // indistinguishable from a flush that never happened.
     if (DEBUG) trace('scroll.flush', () => ({ banked, from: offset, next, max, skipped }))
     if (skipped) return
-    write(Math.min(Math.max(next, 0), max), offset)
+    write(clampToRange(next, max), offset)
   }
 
   const finish = (settled: boolean, reason: ScrollEndReason): void => {
@@ -667,9 +702,23 @@ export function createScroller(options: ScrollerOptions): Scroller {
     // this is normally exactly zero — the carry recovers the fraction the platform
     // refused, and it is part of where the content is — and for an unsettled one it is
     // the honest remaining gap.
-    const finalTarget = targetFor(indexFor(current), current.align, current.offset)
+    //
+    // Measured against the *requested* target rather than the clamped one. Subtracting the
+    // clamp from an offset already sitting at the clamp is zero by construction, which is how
+    // a row several hundred pixels below where `align` asked for it reported a flush landing
+    // (#101). `clamped` names that condition, because the number alone cannot be told apart
+    // from a scroll that simply ran out of frames.
+    const maxOffset = viewport.getMaxScrollOffset()
+    const requested = requestedTargetFor(
+      indexFor(current),
+      current.align,
+      current.offset,
+      maxOffset,
+    )
+    const finalTarget = clampToRange(requested, maxOffset)
     const actual = getContentOffset()
-    const deviation = finalTarget - actual
+    const deviation = requested - actual
+    const clamped = requested !== finalTarget
 
     if (DEBUG) {
       trace('scroll.finish', () => ({
@@ -678,13 +727,14 @@ export function createScroller(options: ScrollerOptions): Scroller {
         settled,
         reason,
         deviation,
+        clamped,
         finalTarget,
         actual,
         iterations: current.iterations,
       }))
     }
 
-    current.resolve({ settled, deviation, iterations: current.iterations, reason })
+    current.resolve({ settled, deviation, clamped, iterations: current.iterations, reason })
   }
 
   const step = (): void => {
@@ -891,7 +941,13 @@ export function createScroller(options: ScrollerOptions): Scroller {
     scrollToIndex(index, scrollOptions = {}) {
       const cache = getCache()
       if (disposed || cache.length === 0) {
-        return Promise.resolve({ settled: false, deviation: 0, iterations: 0, reason: 'empty' })
+        return Promise.resolve({
+          settled: false,
+          deviation: 0,
+          clamped: false,
+          iterations: 0,
+          reason: 'empty' as const,
+        })
       }
 
       // A new absolute command invalidates any banked correction.
