@@ -285,7 +285,13 @@ export interface UseVirtualListResult<T> {
 
 const noopRef = (): undefined => undefined
 
-const NO_RESULT: ScrollResult = { settled: false, deviation: 0, iterations: 0, reason: 'empty' as const }
+const NO_RESULT: ScrollResult = {
+  settled: false,
+  deviation: 0,
+  clamped: false,
+  iterations: 0,
+  reason: 'empty' as const,
+}
 
 /**
  * Headless virtual list.

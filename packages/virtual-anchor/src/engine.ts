@@ -2271,7 +2271,13 @@ export function createEngine(initial: EngineOptions): Engine {
 
     scrollToKey(key, scrollOptions) {
       if (cache.length === 0) {
-        return Promise.resolve({ settled: false, deviation: 0, iterations: 0, reason: 'empty' as const })
+        return Promise.resolve({
+          settled: false,
+          deviation: 0,
+          clamped: false,
+          iterations: 0,
+          reason: 'empty' as const,
+        })
       }
 
       const index = cache.indexOf(key)
@@ -2282,6 +2288,7 @@ export function createEngine(initial: EngineOptions): Engine {
         return Promise.resolve({
           settled: false,
           deviation: 0,
+          clamped: false,
           iterations: 0,
           reason: 'unknown-key' as const,
         })

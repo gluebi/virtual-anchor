@@ -8,6 +8,7 @@ import {
   settle,
   setWindowAround,
   TOLERANCE,
+  topOfKey,
   visibleRowTops,
   worstMovement,
   type ScrollOptions,
@@ -294,5 +295,38 @@ test.describe('measured slots', () => {
     // And the fill stopped *at* the scrollport rather than past it: a thread that did
     // not scroll before still does not, so nothing derived from an offset can see it.
     expect(await distanceFromBottom(page)).toBeLessThanOrEqual(1)
+  })
+
+  test('says so when the target cannot be brought to the top', async ({ page }) => {
+    // A short thread: the last comments have less than a scrollport of content below
+    // them, so `align: 'start'` scrolls as far as it can and leaves the row partway down
+    // the screen. Correct behaviour, and it used to be indistinguishable from a flush
+    // landing — `deviation: 0`, `settled: true`, `converged`, on a row a few hundred
+    // pixels from where it was asked to be. See #101.
+    //
+    // Here rather than in the unit suite alone because the issue's point is that this is
+    // arithmetic and not a platform: the numbers were byte-identical in all three engines.
+    await open(page, 'loaded=9&paddingStart=0')
+
+    const result = await scrollTo(page, 8, { align: 'start' })
+
+    expect(result.settled).toBe(true)
+    expect(result.reason).toBe('converged')
+    expect(result.clamped).toBe(true)
+    // As far as it goes, and the deviation is the gap you can measure on the page.
+    expect(await distanceFromBottom(page)).toBeLessThanOrEqual(TOLERANCE)
+    expect(result.deviation).toBeCloseTo(await topOfKey(page, 'comment-8'), 1)
+  })
+
+  test('reports a reachable target as unclamped', async ({ page }) => {
+    // The other half of the same claim: `clamped` must not fire for a landing that did
+    // reach the top, or a consumer branching on it would fall back on every scroll.
+    await open(page, 'loaded=9&paddingStart=0')
+
+    const result = await scrollTo(page, 2, { align: 'start' })
+
+    expect(result.clamped).toBe(false)
+    expect(Math.abs(result.deviation)).toBeLessThanOrEqual(TOLERANCE)
+    expect(Math.abs(await topOfKey(page, 'comment-2'))).toBeLessThanOrEqual(TOLERANCE)
   })
 })
