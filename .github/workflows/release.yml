@@ -37,7 +37,7 @@ jobs:
       - run: pnpm check:package
 
       - name: Version or publish
-        uses: changesets/action@v1
+        uses: changesets/action@v2
         with:
           # With changesets pending, this opens a "Version Packages" PR. Merging that PR runs
           # this workflow again with none pending, and then it publishes.
