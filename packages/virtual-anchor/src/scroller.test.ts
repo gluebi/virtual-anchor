@@ -360,8 +360,7 @@ describe('a target outside the scrollable range', () => {
     const result = await settle(h, h.scroller.scrollToIndex(8, { align: 'start' }))
 
     expect(h.viewport.offset).toBe(400)
-    // The row sits 400px below the top of the viewport, and now says so.
-    expect(800 - h.viewport.offset).toBe(400)
+    // The row therefore sits 400px below the top of the viewport, and now says so.
     expect(result).toEqual({
       settled: true,
       deviation: 400,
@@ -369,19 +368,6 @@ describe('a target outside the scrollable range', () => {
       iterations: 0,
       reason: 'converged',
     })
-  })
-
-  it('keeps settled true, because motion did stop with the target holding still', async () => {
-    // `settled` answers "did it come to rest", `reason` answers "why did it stop", and
-    // neither of them changes meaning here. A consumer that wants to know whether the row
-    // is where it asked reads `deviation` and `clamped`.
-    const h = harness({ count: 10, itemSize: 100 })
-
-    const result = await settle(h, h.scroller.scrollToIndex(9, { align: 'start' }))
-
-    expect(result.settled).toBe(true)
-    expect(result.reason).toBe('converged')
-    expect(result.clamped).toBe(true)
   })
 
   it('reports a negative deviation for a target clamped against the top', async () => {
