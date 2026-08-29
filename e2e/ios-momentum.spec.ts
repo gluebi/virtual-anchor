@@ -94,32 +94,6 @@ test.describe('the momentum write gate on an emulated iPhone', () => {
     expect(active).toBe(true)
   })
 
-  test('lets no scrollTop write escape while a gesture is in flight', async ({ page }) => {
-    await countScrollWrites(page)
-    await open(page, 'comment=4211')
-
-    await holdFinger(page)
-
-    const baseline = await writes(page)
-
-    // A style change that alters wrapping, so every mounted row re-measures at once —
-    // the same event the library sees when a webfont lands. Scrolling alone is not
-    // enough of a provocation: rows mounting *below* the anchor move nothing it
-    // resolves against, so there is no correction to suppress and the assertion would
-    // pass with the guard removed entirely.
-    await page.addStyleTag({
-      content: '.comment { letter-spacing: 0.45px; word-spacing: 1.5px; }',
-    })
-
-    // Long enough for the ResizeObserver deliveries and the measurement batch that
-    // follows them. Every one of those used to write `scrollTop`.
-    await page.waitForTimeout(600)
-
-    expect(await writes(page)).toBe(baseline)
-
-
-  })
-
   test('a prepend still writes, gesture or no gesture', async ({ page }) => {
     // The deliberate exception, and the reason the deferral is keyed on *cause*: a
     // model change deferred would move the reader by the whole inserted height.
@@ -266,6 +240,18 @@ test.describe('the momentum gate, as the library reports it', () => {
   })
 
   test('no write escapes while the gate is shut, and each one says why', async ({ page }) => {
+    // This replaced a counter-based twin — same provocation, same window — that asserted the
+    // `scrollTop` write count had not moved at all. That invariant was wrong, and flaky for the
+    // reason it was wrong: `writeScroll` defers on `restore !== 'model' && !canWrite`, so a model
+    // change writes through a shut gate *by design*, and the counter cannot tell that from a
+    // measurement escaping. Whenever a re-measure shifted the loaded window inside the 600ms
+    // window, a legitimate prepend tripped it — intermittently, because whether one lands there
+    // depends on delivery timing. It failed on CI against diffs that could not have caused it,
+    // and the counter's own reading is already cross-checked against the trace by the test above.
+    //
+    // Both write-through paths are covered here rather than only the exempted one: `model` is
+    // allowed, and a `no-room` write — a correction the scroll range forced, which cancels the
+    // fling on iOS — is not, so it lands in `escaped` and fails.
     await open(page, 'debug=1&overlay=0&comment=4211')
     await page.evaluate(() => {
       window.__traceClear()
