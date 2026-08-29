@@ -1217,6 +1217,40 @@ export function createEngine(initial: EngineOptions): Engine {
     carry = carryFor(offset, viewport.getScrollOffset())
   }
 
+  /**
+   * Measure every attached row the cache no longer knows the size of.
+   *
+   * Run after an invalidation discarded the cache, because nothing else will ask again. The two
+   * paths that measure cannot: `observeItem` reads a rect once per mount and only for a size the
+   * cache does not already know, and the `ResizeObserver` fires only when a box *changes*, with
+   * a value-level dedup on top. So a row whose height is the same under the new layout is never
+   * re-delivered and sits on its estimate for as long as it stays mounted, with every row below
+   * it positioned from that estimate. A device-pixel-ratio change is the pure case and the one
+   * with no self-healing at all: CSS-px layout is unchanged, so no box moves and no delivery
+   * follows the clear for any row. See #111.
+   *
+   * `isMeasured` rather than measuring the lot: on the batch path the delivery that provoked the
+   * invalidation was itself taken under the new layout and is already applied, so those rows are
+   * known and re-reading them would be a rect read and a Fenwick update thrown away. After a
+   * clear with no batch — the viewport path — nothing is known and every attached row is read.
+   *
+   * Reads only, no writes, and nothing before it writes styles, so this is one forced reflow for
+   * the whole loop at worst rather than one per row. Two of the three entry points are
+   * ResizeObserver callbacks, where layout is already clean and even that one is free; the third
+   * is `observeResolution`'s `matchMedia` handler — the device-pixel-ratio case, which is the one
+   * with no self-healing and therefore the one this exists for.
+   * Its rate is the caller's business. The batch path is behind `SIGNATURE_RECHECK_MS`; the
+   * viewport path is not, so a horizontal window drag runs this for every delivered frame it
+   * changes the width on — bounded by the drag, and the alternative is a list that stays wrong
+   * for the length of it.
+   */
+  const refillMountedSizes = (): void => {
+    for (const [key, element] of surface.attachedItems()) {
+      const index = cache.indexOf(key)
+      if (index >= 0 && !cache.isMeasured(index)) cache.setSize(index, resizer.measure(element))
+    }
+  }
+
   /** Bound the queue at its one declared maximum, wherever an intent is recorded. */
   const pushRestoreIntent = (offset: number): void => {
     restoreIntents.push(offset)
@@ -1687,6 +1721,9 @@ export function createEngine(initial: EngineOptions): Engine {
     }
     if (invalidated) {
       cache.clearAll()
+      // The refill is the caller's, not this function's — see `refillMountedSizes`, which has
+      // to run after whatever measurements the caller already holds.
+      //
       // And drop the hold. Every row is back on its estimate, so every offset the held range
       // was judged against has moved — and unlike a prepend, the keys still resolve, so nothing
       // else here would notice. The containment test would usually catch it on the next pass;
@@ -1755,6 +1792,9 @@ export function createEngine(initial: EngineOptions): Engine {
         if (index < 0) continue
         if (cache.setSize(index, size)) changed = true
       }
+      // After the batch, so the rows it just measured under the new layout are not read again,
+      // and before the publish below, so nothing is drawn from the estimates the clear left.
+      if (invalidated) refillMountedSizes()
       // Two independent reasons to go on: a size in the batch moved, or the cache was
       // discarded a moment ago — in which case every offset below the first item moved and
       // there is a restore to do whether or not this batch's own sizes are news.
@@ -1822,6 +1862,9 @@ export function createEngine(initial: EngineOptions): Engine {
     // same question a measurement asks, and `recheckLayoutSignature` is the one place that
     // answers it. A resize is simply the trigger that catches the *width* term.
     const invalidated = recheckLayoutSignature()
+    // Nothing was delivered here — a scrollport resize is not a row measurement — so every
+    // attached row is unknown and every one of them is read.
+    if (invalidated) refillMountedSizes()
 
     // A reflow that discarded every measurement moved every offset in the list, so
     // the restore is not postponable. A height-only resize is — and on iOS that case

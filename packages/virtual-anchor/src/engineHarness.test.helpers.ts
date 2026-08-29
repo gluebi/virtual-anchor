@@ -165,6 +165,7 @@ export function recordingSurface(
       return () => elements.delete(key)
     },
     hasItem: (key) => elements.has(key),
+    attachedItems: () => elements.entries(),
     focusItem: (key) => elements.has(key),
     dispose: () => {
       elements.clear()

@@ -520,7 +520,19 @@ test.describe('a scrollport that changes width without changing height', () => {
       .poll(() => page.evaluate(() => window.__list.takeSizeSnapshot()?.layoutSignature))
       .not.toBe(before?.layoutSignature)
 
+    // What the cache holds for that row, not how many rows it holds. The count used to be the
+    // assertion — fewer measured sizes than before — and it was a proxy for "the cache was
+    // discarded" that stopped discriminating once the discard began refilling the rows that are
+    // still on screen (#111): here every measured row was mounted, so the count is 40 either
+    // side. The height is the claim #34 was always about, and it is strictly stronger, because
+    // it fails both for a cache that kept the old width's number *and* for one that restored
+    // what it had just cleared instead of reading the row again.
+    const heightAfter = await rowHeight(page, rowKey)
+    expect(heightAfter).not.toBe(heightBefore)
+
     const after = await page.evaluate(() => window.__list.takeSizeSnapshot())
-    expect(after?.sizes.length ?? 0).toBeLessThan(measuredBefore)
+    const cached = after?.sizes.find(([key]) => key === rowKey)?.[1]
+    expect(cached, 'the reflowed row is not in the cache at all').toBeDefined()
+    expect(cached).toBeCloseTo(heightAfter, 1)
   })
 })

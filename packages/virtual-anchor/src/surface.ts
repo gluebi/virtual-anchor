@@ -84,6 +84,15 @@ export interface Surface {
   attachItem(key: ItemKey, element: HTMLElement): () => void
   /** Whether an element is currently attached for this key. */
   hasItem(key: ItemKey): boolean
+  /**
+   * Every key currently attached, with its element.
+   *
+   * For the one caller that has to act on the rows that are *on screen* rather than on a key it
+   * already holds: discarding the size cache makes every mounted row's size unknown, and nothing
+   * else will ask again, so the engine refills from here. See {@link Surface.hasItem} for the
+   * single-key question.
+   */
+  attachedItems(): Iterable<readonly [ItemKey, HTMLElement]>
   /** Move focus to an item, if it is attached. */
   focusItem(key: ItemKey): boolean
   dispose(): void
@@ -213,6 +222,8 @@ export function createDomSurface(options: DomSurfaceOptions): Surface {
 
     hasItem: (key) => elements.has(key),
 
+    attachedItems: () => elements.entries(),
+
     focusItem(key) {
       const element = elements.get(key)
       if (!element) return false
@@ -240,6 +251,7 @@ export function createNullSurface(): Surface {
     setItemOffset: () => {},
     attachItem: () => () => {},
     hasItem: () => false,
+    attachedItems: () => [],
     focusItem: () => false,
     dispose: () => {},
   }
