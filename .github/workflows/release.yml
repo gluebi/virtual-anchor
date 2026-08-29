@@ -26,7 +26,17 @@ jobs:
       # Trusted publishing needs npm 11.5.1+. changesets publishes through pnpm here, but
       # pnpm's publish path still leans on the npm CLI underneath — the auth error from the
       # tokenless run was in npm's voice — so this makes the requirement hold either way.
-      - run: npm install -g npm@latest
+      #
+      # Pinned to 11 rather than `latest`, which is npm 12 as of 2026-08-29, and npm 12 breaks
+      # `changeset publish` outright. `pnpm info` is not a pnpm command at all on pnpm 10 — it is
+      # passed through to whatever `npm` is on PATH — and npm 12 wraps `npm view --json` in an
+      # array. Changesets unwraps that in its npm code path and not in its pnpm one, so
+      # `response.info.versions` is undefined and `getUnpublishedPackages` dies on
+      # `Cannot read properties of undefined (reading 'includes')`. That is
+      # changesets/changesets#2274, open and unreleased; the pin comes off when it ships.
+      #
+      # This is why the failure never reproduced locally: npm 11.6.2 here returns a bare object.
+      - run: npm install -g npm@11
       - run: pnpm install --frozen-lockfile
 
       # Never publish something the suite has not passed. The release job repeats the gate
