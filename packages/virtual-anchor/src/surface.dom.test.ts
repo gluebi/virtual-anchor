@@ -347,5 +347,8 @@ describe('createNullSurface', () => {
 
     expect(surface.hasItem('a')).toBe(false)
     expect(surface.focusItem('a')).toBe(false)
+    // Empty rather than absent: the engine iterates this after discarding the size cache, and
+    // a surface that draws nothing has nothing mounted to re-measure.
+    expect([...surface.attachedItems()]).toEqual([])
   })
 })
