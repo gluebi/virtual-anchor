@@ -47,6 +47,7 @@ jobs:
       - run: pnpm check:package
 
       - name: Version or publish
+        id: publish
         uses: changesets/action@v2
         with:
           # With changesets pending, this opens a "Version Packages" PR. Merging that PR runs
@@ -71,3 +72,46 @@ jobs:
           # OIDC token minted by `id-token: write` above. Nothing long-lived exists to leak,
           # and provenance comes with it.
           NPM_CONFIG_PROVENANCE: 'true'
+
+      # The release reports success from the publisher's own account of itself, and that is not
+      # the same as the package being fetchable. So ask the registry.
+      #
+      # Cache-busted, and this is the whole difficulty: npm's CDN served a stale 404 for a
+      # version whose own `time` entry says it was live two minutes after the publish, and went
+      # on doing so for a quarter of an hour. A verification without the query param fails on
+      # that rather than on anything real — which is worse than no verification, because the
+      # release it fails has already happened and cannot be retried.
+      #
+      # Only when something was actually published: with changesets pending this workflow opens
+      # a Version PR instead, and there is nothing to look for.
+      - name: Verify the publish reached the registry
+        if: steps.publish.outputs.published == 'true'
+        env:
+          PUBLISHED: ${{ steps.publish.outputs.published-packages }}
+        run: |
+          set -euo pipefail
+          jq -r '.[] | [.name, .version] | @tsv' <<< "$PUBLISHED" > /tmp/published.tsv
+          test -s /tmp/published.tsv || {
+            echo "::error::published=true but published-packages named nothing"
+            exit 1
+          }
+          failed=0
+          # `while … done < file` runs in this shell, so `failed` survives the loop. Through a
+          # pipe it would not, and the step would pass while reporting that it had not.
+          while IFS=$'\t' read -r name version; do
+            path="${name//\//%2f}/${version}"
+            for attempt in $(seq 1 30); do
+              code=$(curl -sS -o /dev/null -w '%{http_code}' \
+                "https://registry.npmjs.org/${path}?cachebust=${GITHUB_RUN_ID}-${attempt}" || echo 000)
+              if [ "$code" = "200" ]; then
+                echo "$name@$version is on the registry"
+                break
+              fi
+              if [ "$attempt" = "30" ]; then
+                echo "::error::$name@$version was reported published, but the registry answers $code"
+                failed=1
+              fi
+              sleep 10
+            done
+          done < /tmp/published.tsv
+          exit "$failed"
