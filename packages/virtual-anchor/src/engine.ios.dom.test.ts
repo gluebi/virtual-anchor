@@ -38,6 +38,22 @@ const KEYS = (count: number, prefix = 'c'): ItemKey[] =>
  * a byte-identical `afterEach`. The shared helper is in `trace.test.helpers.ts`.
  */
 const collected: (() => void)[] = []
+/**
+ * How far the content moved across the fold, per the `gesture.fold` payload.
+ *
+ * The fold's own arithmetic is the only witness to this. Asserting the content position
+ * afterwards does not work: a later anchor restore corrects it, so the end state is right
+ * either way and the discontinuity lives entirely in the frame between them — which is the
+ * frame the reader sees. `reconcileGestureShift` says as much where it emits this.
+ */
+const foldDelta = (events: TraceEvent[]): number => {
+  const fold = events.find((event) => event.topic === 'gesture.fold')
+  if (!fold) return Number.NaN
+  const data = fold.data as Record<string, number | undefined>
+  const before = Number(data.from) + Number(data.shift) + Number(data.carryBefore)
+  return Math.abs(before - (Number(data.applied) + Number(data.carryAfter)))
+}
+
 const traced = (): TraceEvent[] => {
   const { events, stop } = collectTrace()
   collected.push(stop)
@@ -1164,11 +1180,39 @@ describe('what the engine reports about the fold and the paint offset', () => {
     const fold = events.find((event) => event.topic === 'gesture.fold')
     expect(fold?.data).toMatchObject({ clamped: false })
     expect(Number(fold?.data.shift)).not.toBe(0)
-    // The one-number test for "was the fold invisible".
-    const data = fold?.data as Record<string, number | undefined>
-    const before = Number(data.from) + Number(data.shift) + Number(data.carryBefore)
-    const after = Number(data.applied) + Number(data.carryAfter)
-    expect(Math.abs(before - after)).toBeLessThan(1.5)
+    // The one-number test for "was the fold invisible". Exactly, not within a pixel and a half:
+    // this harness accepts fractional writes, so every term is exact and a tolerance a dropped
+    // carry fits inside is no tripwire at all.
+    expect(foldDelta(events)).toBeLessThan(1e-9)
+  })
+
+  it('keeps an outstanding carry across the fold rather than dropping it', () => {
+    // The fold aimed at `scrollTop + shift` while the content sat a `carryBefore` further on,
+    // and `commitScroll` replaces the carry rather than accumulating it — so the difference was
+    // held by nothing. See `reconcileGestureShift`.
+    //
+    // `truncateWrites` is the whole condition: where fractional offsets are accepted the carry
+    // is zero and the bug cannot express itself, which is why an emulated iPhone is the only
+    // place it ever showed. It reached CI as a fold delta of exactly 0.75.
+    const h = setup({ estimateSize: () => 100, truncateWrites: true })
+    h.mountItem('c5', 100)
+    h.mountItem('c10', 100)
+
+    // A row *above* the anchor growing by a fraction is what puts a fraction in the restore:
+    // everything below it moves by 0.75, so the corrected offset is fractional, the platform
+    // truncates it, and what it refuses becomes the carry the fold then has to preserve.
+    // Measuring the anchor itself would not do — it does not move itself.
+    h.scroll(1000)
+    h.measure('c5', 100.75)
+    expect(h.paintOffset()).not.toBe(0)
+
+    const events = traced()
+    fling(h, 5000)
+    h.measure('c10', 700.75)
+
+    h.scrollSettled()
+
+    expect(foldDelta(events)).toBeLessThan(1e-9)
   })
 
   it('reports which of the two addends moved the paint offset', () => {
