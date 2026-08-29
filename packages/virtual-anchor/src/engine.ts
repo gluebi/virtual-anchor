@@ -1021,7 +1021,8 @@ export function createEngine(initial: EngineOptions): Engine {
    * offsets are taken. Deliberately not repeated here: two copies of that list is how the
    * visibility band came to be *described* as reading content space while it did not.
    */
-  const contentOffset = (): number => viewport.getScrollOffset() + carry + pendingShift
+  const contentOffset = (from = viewport.getScrollOffset()): number =>
+    from + carry + pendingShift
 
   /**
    * Whether a publish skipped a scroll write because the gate was shut.
@@ -1190,6 +1191,10 @@ export function createEngine(initial: EngineOptions): Engine {
    * the scrollable range and there is no larger residue to strand.
    */
   const commitScroll = (offset: number): void => {
+    // `offset` is **content space**, as {@link contentOffset} returns it. The carry below is
+    // replaced rather than accumulated, so a caller handing over a raw `scrollTop` silently
+    // drops whatever the carry was holding — which the fold did, and which is the reason this
+    // paragraph exists rather than being left to be inferred from the two call sites.
     // Declare it first: the scroll event this produces must not be mistaken for the
     // user grabbing the scrollbar, which would cancel any in-flight programmatic
     // scroll and flip the tracked scroll direction.
@@ -1232,7 +1237,18 @@ export function createEngine(initial: EngineOptions): Engine {
     const shift = pendingShift
     const carryBefore = carry
     const from = viewport.getScrollOffset()
-    const target = from + shift
+    // Where the content already appears, which is `from + shift + carryBefore` — the content is
+    // not at `scrollTop` while either compensation is outstanding. Built from the raw offset
+    // this aimed a `carryBefore` short: the write landed the content where `scrollTop` said it
+    // was rather than where it looked, and `commitScroll` *replaces* the carry with its own
+    // residual rather than accumulating it, so nothing held the difference. On a platform that
+    // truncates every write — the only one this path runs on — that is a jump of up to a pixel
+    // at the end of a fling. Judging on the scroll offset where the content position was meant
+    // is the shape of #33.
+    //
+    // `from` is passed rather than re-read: `contentOffset` would take a second `scrollTop`,
+    // which is a forced layout, and the two are the same value inside one task anyway.
+    const target = contentOffset(from)
     pushRestoreIntent(target)
     commitScroll(target)
     writePaintOffset()
@@ -2102,7 +2118,7 @@ export function createEngine(initial: EngineOptions): Engine {
             // shifting half a pixel on the first prepend after a landing. Invisible while
             // every inset was a whole number; a sticky header that wraps to 85.5px makes it
             // routine.
-            anchor = deriveAnchor(offset + carry + pendingShift, cache, geometry())
+            anchor = deriveAnchor(contentOffset(offset), cache, geometry())
           } else {
             restoreIntents.splice(0, restoreIndex + 1)
           }
