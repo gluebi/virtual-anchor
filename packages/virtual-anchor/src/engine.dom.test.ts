@@ -599,14 +599,21 @@ describe('engine measurement invalidation', () => {
     // The #34 repro. The signature hashes the scrollport's width, and its only runtime
     // re-read used to be reached through a callback gated on the *block* size — so a
     // scrollport that reflowed without changing height kept every height measured at the
-    // old width. The rows still mounted are re-measured by the item observer and heal;
-    // the rest keep a stale size, so the prefix sum mixes the two and places rows at
-    // offsets that do not match their heights. Downstream that reads as rows drawn
-    // overlapping or with gaps, fixing themselves when scrolled out and back in.
+    // old width, and the prefix sum placed rows at offsets that did not match their heights.
+    // Downstream that read as rows drawn overlapping or with gaps.
+    // Twelve of the twenty mounted, so both halves of the invalidation are observable at
+    // once: what a row on screen does, and what a row off it does.
     const h = setup({ count: 20 })
     // Measured on attach, as the engine measures every item it is handed.
-    for (const key of h.keys(20)) mountItem(h, key, 250)
-    expect(h.engine.cache.totalSize()).toBe(20 * 250)
+    const reflowed = mountItem(h, 'c0', 250)
+    for (const key of h.keys(12).slice(1)) mountItem(h, key, 250)
+    expect(h.engine.cache.totalSize()).toBe(12 * 250 + 8 * 100)
+
+    // The reflow itself: at the new width this row's text wraps to one line more. Without it
+    // nothing here could tell a re-measurement from a cache that snapshotted its own contents
+    // and wrote them back — every height would be identical either side of the clear, and the
+    // restoring implementation would pass every assertion below.
+    reflowed.rect.mockReturnValue(new DOMRect(0, 0, 400, 320))
 
     // Load-bearing: this is the delivery that sets what the next one is compared against.
     // Without it the width change below is a first delivery, which reports either way, and
@@ -614,9 +621,17 @@ describe('engine measurement invalidation', () => {
     h.observeScrollport()
     h.resizeWidth(400)
 
-    // Nothing measured survives, so the list is back on its estimates.
-    expect(h.engine.cache.measuredCount).toBe(0)
-    expect(h.engine.cache.totalSize()).toBe(20 * 100)
+    // Read again, not restored: the row carries the height it has at the new width.
+    expect(h.engine.cache.sizeOf(0)).toBe(320)
+
+    // Every measurement taken at the old width is discarded — and the rows still on screen are
+    // measured again immediately, under the new one. They do *not* wait for the item observer:
+    // it reads a rect once per mount and only for a size the cache does not know, so a row whose
+    // height is unchanged would never be asked again and would sit on its estimate for as long
+    // as it stayed mounted. See #111.
+    expect(h.engine.cache.measuredCount).toBe(12)
+    // The eight nobody is looking at are back on their estimates, which is the discard.
+    expect(h.engine.cache.totalSize()).toBe(320 + 11 * 250 + 8 * 100)
   })
 
   it('discards measurements when the root font size changes and the scrollport does not', () => {
@@ -628,8 +643,8 @@ describe('engine measurement invalidation', () => {
     // Note what this test does not call: `resizeWidth`, or `observeScrollport`. There is no
     // scrollport resize here at all, which is the entire point.
     const h = setup({ count: 20 })
-    for (const key of h.keys(20)) mountItem(h, key, 250)
-    expect(h.engine.cache.totalSize()).toBe(20 * 250)
+    for (const key of h.keys(12)) mountItem(h, key, 250)
+    expect(h.engine.cache.totalSize()).toBe(12 * 250 + 8 * 100)
 
     // A user raising their browser's default size, or an app's accessibility text toggle.
     document.documentElement.style.fontSize = '20px'
@@ -639,10 +654,42 @@ describe('engine measurement invalidation', () => {
     // before it applies the batch.
     h.measure('c0', 300)
 
-    // Only the row in the batch survives, because it is the only one measured under the new
-    // layout. Everything else is back on its estimate rather than confidently wrong.
-    expect(h.engine.cache.measuredCount).toBe(1)
-    expect(h.engine.cache.totalSize()).toBe(19 * 100 + 300)
+    // Every mounted row is measured again under the new layout, and the refill runs *after* the
+    // batch and skips what it already delivered — so `c0` keeps the 300 it reported rather than
+    // being re-read back to its mocked 250, and its neighbours get the height their boxes have.
+    expect(h.engine.cache.measuredCount).toBe(12)
+    // The rows nobody has mounted are back on their estimates rather than confidently wrong.
+    expect(h.engine.cache.isMeasured(19)).toBe(false)
+    // 250 for the eight, not 100: `refreshEstimate` learned a median from the batch, and
+    // `clearAll` keeps the estimate it learned. Which is why `measuredCount` above is the
+    // reading that discriminates here and the total is not.
+    expect(h.engine.cache.totalSize()).toBe(11 * 250 + 300 + 8 * 250)
+  })
+
+  it('never leaves a mounted row on an estimate after discarding the cache', () => {
+    // #111. `clearAll` makes every mounted row's size unknown and nothing else asks again:
+    // `observeItem` reads a rect once per mount, and the ResizeObserver fires only when a box
+    // *changes* — deduplicated by value on top of that. So a row whose height is the same under
+    // the new layout was never re-delivered and stayed on its estimate while still on screen,
+    // with every row below it positioned from that estimate.
+    //
+    // Mounted at exactly the 100px estimate, which is what makes this test say something the
+    // one above does not: every total is identical whether the rows are measured or discarded,
+    // so `measured` is the only reading that can tell. That is not a contrivance — it is the
+    // reported shape of the bug. The rows whose estimate happens to match their height look
+    // perfect, so the failure presents as one row with a gap under it rather than as list-wide
+    // drift, and `VirtualItem.measured` is the only signal a consumer has.
+    const h = setup({ count: 20 })
+    for (const key of h.keys(6)) mountItem(h, key, 100)
+    expect(h.engine.cache.measuredCount).toBe(6)
+
+    h.observeScrollport()
+    h.resizeWidth(400)
+
+    // Same elements, same heights, nothing delivered — and still measured. No `totalSize` here
+    // on purpose: it reads 20 × 100 before the clear, after a correct refill, and after the
+    // broken one. `measured` is the only thing that separates them.
+    for (let index = 0; index < 6; index++) expect(h.engine.cache.isMeasured(index)).toBe(true)
   })
 
   it('re-reads the signature at most once per rate-limit window', () => {
@@ -651,7 +698,13 @@ describe('engine measurement invalidation', () => {
     // content, only how often the question is asked. Below, both sides of the guard.
     let clock = 100
     const h = setup({ count: 20, now: () => clock })
-    for (const key of h.keys(20)) mountItem(h, key, 250)
+    const rows = h.keys(20).map((key) => mountItem(h, key, 250))
+    // Eight scrolled back out of view: their sizes stay in the cache, keyed, with no element
+    // attached. That is what keeps `measuredCount` discriminating now that a clear refills the
+    // rows that *are* attached — with all twenty mounted, the count would read the same on both
+    // sides of the clear and the test would pass without the signature ever being re-read.
+    for (const row of rows.slice(12)) row.detach()
+    expect(h.engine.cache.measuredCount).toBe(20)
 
     document.documentElement.style.fontSize = '20px'
 
@@ -660,17 +713,17 @@ describe('engine measurement invalidation', () => {
     h.measure('c0', 300)
     expect(h.engine.cache.measuredCount).toBe(20)
 
-    // Past it, so the same change is now seen.
+    // Past it, so the same change is now seen: the eight with no element lose their sizes,
+    // the twelve still on screen are measured again under the new layout.
     clock = 400
     h.measure('c1', 300)
-    expect(h.engine.cache.measuredCount).toBe(1)
+    expect(h.engine.cache.measuredCount).toBe(12)
 
-    // Deliberately no `totalSize` assertion on either side, unlike the case above.
-    // `refreshEstimate` ran on the first batch — twenty samples, median 250 — and
-    // `clearAll` keeps the estimate it learned, which is the whole point of learning one.
-    // So the total after the clear is 19 × 250 + 300, which is exactly what it was before
-    // the clear. It would pass whether the cache was discarded or not, and `measuredCount`
-    // is the only reading here that discriminates.
+    // Deliberately no `totalSize` assertion on either side. `refreshEstimate` ran on the first
+    // batch — twenty samples, median 250 — and `clearAll` keeps the estimate it learned, which
+    // is the whole point of learning one. So the discarded rows fall back to 250, the same
+    // number they held, and the total is identical either way. `measuredCount` is the only
+    // reading here that discriminates.
   })
 
   it('keeps measurements when only the height changes', () => {

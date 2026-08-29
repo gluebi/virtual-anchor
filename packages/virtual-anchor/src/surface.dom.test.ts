@@ -293,6 +293,26 @@ describe('createDomSurface element registry', () => {
     expect(first.style.top).toBe('')
   })
 
+  it('enumerates the attached items, and stops as they detach', () => {
+    // What the engine iterates to re-measure the rows still on screen after it discards the
+    // size cache — the plural of `hasItem`, and the only enumerable key-to-element map there
+    // is. A row that has detached must not appear: it has no box to read, and it is back on
+    // its estimate honestly.
+    const { surface } = setup()
+    const first = item()
+    const second = item()
+
+    surface.attachItem('a', first)
+    const detachSecond = surface.attachItem('b', second)
+    expect([...surface.attachedItems()]).toEqual([
+      ['a', first],
+      ['b', second],
+    ])
+
+    detachSecond()
+    expect([...surface.attachedItems()]).toEqual([['a', first]])
+  })
+
   it('focuses an attached item and reports whether it could', () => {
     const { surface } = setup()
     const element = item()
