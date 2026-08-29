@@ -41,13 +41,23 @@ jobs:
         with:
           # With changesets pending, this opens a "Version Packages" PR. Merging that PR runs
           # this workflow again with none pending, and then it publishes.
-          version: pnpm changeset version
-          publish: pnpm release
-          commit: 'chore: version packages'
-          title: 'chore: version packages'
+          #
+          # Every one of these was renamed in v2 — `version`, `publish`, `commit` and `title`
+          # became `version-script`, `publish-script`, `commit-message` and `pr-title`. The old
+          # spellings are not ignored, they fail the step outright, so the bump from v1 stopped
+          # 0.9.0 between its version commit and its publish: `main` carried the new version and
+          # changelog while npm still served 0.8.1.
+          version-script: pnpm changeset version
+          publish-script: pnpm release
+          commit-message: 'chore: version packages'
+          pr-title: 'chore: version packages'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No npm token: the package has a trusted publisher, so authentication is the OIDC
-          # token minted by `id-token: write` above. Nothing long-lived exists to leak, and
-          # provenance comes with it.
+          # No `GITHUB_TOKEN` here any more. v2 stopped reading it from the environment — a
+          # custom token has to go through the `github-token` input — and that input already
+          # defaults to this workflow's own token, which is the one this repo wants. Left in
+          # place it would only suggest it was doing something.
+          #
+          # No npm token either: the package has a trusted publisher, so authentication is the
+          # OIDC token minted by `id-token: write` above. Nothing long-lived exists to leak,
+          # and provenance comes with it.
           NPM_CONFIG_PROVENANCE: 'true'
