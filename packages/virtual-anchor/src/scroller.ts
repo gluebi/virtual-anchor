@@ -132,6 +132,33 @@ export interface ScrollerOptions {
   /** Notified when a programmatic scroll starts and stops. */
   onScrollingChange?: (scrolling: boolean) => void
   /**
+   * A programmatic scroll landed somewhere real, and the caller's record of where the view is
+   * has to follow it *now* rather than when the browser gets round to saying so.
+   *
+   * The engine derives its anchor in the scroll handler, which is right for every move the
+   * reader makes and one frame late for every move this module makes. A `scrollTop` write is
+   * synchronous and its `scroll` event is not, so between the landing and that event the
+   * anchor still describes the pre-scroll position — and by then `isScrolling()` is false, so
+   * nothing suppresses a restore from it any more. Any publish in that window teleports the view
+   * back and undoes a landing this module has already reported as `converged` (#115).
+   *
+   * The convergence loop was safe from that by accident: it holds `pending` across frames, so
+   * the guard covered it, and its own scroll events had long since arrived. Only the fast path's
+   * synchronous resolution was exposed — which is the path a fully measured list takes, so a
+   * short list, or any list scrolled a second time.
+   *
+   * Fired for a *settled* landing only, which is the line the caller needs and one this module
+   * already draws: `'cancelled'` and `'replaced'` leave the view wherever it happens to be, and
+   * an anchor for that position is the scroll handler's business as it always was. A clamped
+   * landing is included — the view stopped somewhere real, and that somewhere needs an anchor as
+   * much as a flush landing does.
+   *
+   * Carries no offset. {@link ScrollerOptions.getContentOffset} is the caller's own reader, so
+   * the number this could hand over is the number the caller is about to compute anyway, and
+   * passing it would add a coordinate space to agree about for no information.
+   */
+  onLanded?: () => void
+  /**
    * The user reached for the scroller: a wheel, a touch, a pointer or a key.
    *
    * The same signal that cancels an in-flight programmatic scroll, surfaced
@@ -292,6 +319,7 @@ export function createScroller(options: ScrollerOptions): Scroller {
     requestRange,
     hasPendingMeasurement,
     onScrollingChange,
+    onLanded,
     now = () => performance.now(),
   } = options
 
@@ -692,6 +720,11 @@ export function createScroller(options: ScrollerOptions): Scroller {
       cancelFrame(frame)
       frame = null
     }
+    // Before `onScrollingChange`, which publishes: the point of the callback is that the
+    // caller's anchor describes this landing rather than the position before it, and a publish
+    // that ran in between would resolve the stale one — which is the defect itself, a tick
+    // earlier. See `onLanded` for why only a settled landing gets one.
+    if (settled) onLanded?.()
     onScrollingChange?.(false)
 
     // How far the content is from where the caller asked it to be. For a settled scroll

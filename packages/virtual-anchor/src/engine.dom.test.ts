@@ -572,6 +572,74 @@ describe('engine anchoring', () => {
     expect(h.offset()).toBe(1000)
   })
 
+  /**
+   * The same pair as the two cases above, for a position the *scroller* chose rather than the
+   * reader — and the anchor has to follow that move as faithfully.
+   *
+   * A fully measured list resolves `scrollToKey` on the fast path, synchronously, inside the
+   * promise executor. The `scrollTop` write is synchronous too but its `scroll` event is not, so
+   * there is a window in which the landing has been reported and the browser has not yet told
+   * anyone about it. `isScrolling()` is already false by then, so nothing suppresses a restore —
+   * and a restore from the pre-scroll anchor puts the view back where it started, undoing a
+   * landing the promise called `converged` (#115).
+   *
+   * The harness stages the window for free: its viewport does not fire a scroll event when the
+   * offset is written, so not calling `h.scroll()` *is* the race. Awaiting the promise at all is
+   * what proves the fast path was taken — the convergence loop needs animation frames, which
+   * nothing here runs — and `iterations: 0` says so a second time.
+   */
+  it('holds a fast-path landing when a row above it is re-measured', async () => {
+    const h = setup({ count: 20, trackContent: true })
+    for (const key of h.keys(20)) mountItem(h, key, 100)
+
+    const result = await h.engine.scrollToKey('c5', { align: 'start' })
+    expect(result).toEqual({
+      settled: true,
+      deviation: 0,
+      clamped: false,
+      iterations: 0,
+      reason: 'converged',
+    })
+    expect(h.offset()).toBe(500)
+
+    // What a late layout change does: a row *above* the target corrected after the aim was
+    // taken against the old cache.
+    h.measure('c0', 150)
+
+    // c0 grew by 50, so keeping c5 under the viewport top means the offset becomes 550.
+    expect(h.offset()).toBe(550)
+    expect(h.engine.getAnchor()?.key).toBe('c5')
+  })
+
+  it('leaves a fast-path landing alone when a row below it is re-measured', () => {
+    const h = setup({ count: 20, trackContent: true })
+    for (const key of h.keys(20)) mountItem(h, key, 100)
+
+    void h.engine.scrollToKey('c5', { align: 'start' })
+    expect(h.offset()).toBe(500)
+
+    h.measure('c15', 150)
+    expect(h.offset()).toBe(500)
+  })
+
+  it('keeps holding a fast-path landing once its scroll event arrives', async () => {
+    const h = setup({ count: 20, trackContent: true })
+    for (const key of h.keys(20)) mountItem(h, key, 100)
+    await h.engine.scrollToKey('c5', { align: 'start' })
+    h.measure('c0', 150)
+
+    // The event for the landing write, delivered late and now describing an offset the restore
+    // above has already moved. Deriving from it must reach the same row rather than banking
+    // whatever the stale anchor left behind — which is what made the original loss permanent
+    // instead of transient.
+    // Whatever offset is actually there, which is what the browser would report.
+    h.scroll(h.offset())
+    expect(h.engine.getAnchor()?.key).toBe('c5')
+
+    h.measure('c1', 150)
+    expect(h.offset()).toBe(600)
+  })
+
   it('restores a supplied anchor', () => {
     const h = setup({ count: 50 })
     h.engine.setAnchor({ key: 'c20', offsetWithinItem: 25 })

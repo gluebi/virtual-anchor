@@ -70,6 +70,14 @@ interface Harness {
   advance: (ms: number) => void
   carries: number[]
   scrollingChanges: boolean[]
+  /**
+   * Every scroller callback in the order it fired, with the committed offset for a landing.
+   *
+   * The order is half of what `onLanded` promises — it has to run before the caller is told the
+   * scrolling stopped, because that is what the caller publishes on — and a pair of separate
+   * counters could not say which came first.
+   */
+  events: string[]
 }
 
 const harness = (
@@ -88,6 +96,7 @@ const harness = (
     fakeViewport({ getMax: () => Math.max(0, cache.totalSize() - 600) })
   const carries: number[] = []
   const scrollingChanges: boolean[] = []
+  const events: string[] = []
 
   let clock = 0
   let queue: (() => void)[] = []
@@ -97,7 +106,11 @@ const harness = (
     getCache: () => cache,
     getGeometry: () => options.geometry ?? {},
     applyCarry: (carry) => carries.push(carry),
-    onScrollingChange: (scrolling) => scrollingChanges.push(scrolling),
+    onScrollingChange: (scrolling) => {
+      scrollingChanges.push(scrolling)
+      events.push(scrolling ? 'start' : 'stop')
+    },
+    onLanded: () => events.push(`landed:${String(viewport.offset)}`),
     now: () => clock,
     requestFrame: (callback) => {
       queue.push(callback)
@@ -114,6 +127,7 @@ const harness = (
     cache,
     carries,
     scrollingChanges,
+    events,
     advance: (ms) => {
       clock += ms
     },
@@ -368,6 +382,9 @@ describe('a target outside the scrollable range', () => {
       iterations: 0,
       reason: 'converged',
     })
+    // And it still counts as a landing: the view stopped somewhere real, and that somewhere
+    // needs an anchor as much as a flush landing does.
+    expect(h.events).toContain('landed:400')
   })
 
   it('reports a negative deviation for a target clamped against the top', async () => {
@@ -788,6 +805,48 @@ describe('scrollToIndex interruption', () => {
 
     expect(h.scrollingChanges[0]).toBe(true)
     expect(h.scrollingChanges.at(-1)).toBe(false)
+  })
+
+  /**
+   * The caller derives its anchor from where the view is, and until this existed it could only
+   * learn about a programmatic move from the `scroll` event — which arrives after the landing has
+   * already been reported, leaving a window in which a publish restores the pre-scroll position
+   * (#115).
+   *
+   * The order is the other half of the contract: `onScrollingChange(false)` is what the engine
+   * publishes on, so a landing announced after it would be announced one publish too late.
+   */
+  it('reports a landing, with the offset committed, before the scrolling stops', async () => {
+    const h = harness()
+    await settle(h, h.scroller.scrollToIndex(500))
+
+    expect(h.viewport.offset).toBe(50_000)
+    expect(h.events.filter((event) => event.startsWith('landed'))).toEqual(['landed:50000'])
+    expect(h.events.at(-2)).toBe('landed:50000')
+    expect(h.events.at(-1)).toBe('stop')
+  })
+
+  it('reports no landing for a scroll that was cancelled or replaced', async () => {
+    const h = harness()
+
+    void h.scroller.scrollToIndex(500)
+    h.frames(1)
+    h.scroller.cancel()
+
+    // Replaced rather than cancelled: a second command pre-empts the first, which resolves
+    // honestly but never arrived anywhere.
+    const promise = h.scroller.scrollToIndex(500)
+    h.frames(1)
+    const replaced = h.scroller.scrollToIndex(200)
+
+    expect(await promise).toMatchObject({ settled: false, reason: 'replaced' })
+    expect(h.events).not.toContain('landed:0')
+    expect(h.events.filter((event) => event.startsWith('landed'))).toEqual([])
+
+    // The scroll that does finish still reports one, so the absences above are the gate
+    // working rather than the callback being unwired.
+    await settle(h, replaced)
+    expect(h.events.filter((event) => event.startsWith('landed'))).toEqual(['landed:20000'])
   })
 })
 

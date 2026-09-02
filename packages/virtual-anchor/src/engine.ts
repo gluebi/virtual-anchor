@@ -1943,6 +1943,26 @@ export function createEngine(initial: EngineOptions): Engine {
       // would unpin the reader on the first scroll after enabling it.
       sawUserInput = options.followOutput === true
     },
+    /**
+     * The scroller landed, so the anchor follows the move it just made.
+     *
+     * Exactly what the `following` branch of `publish` does after its own write, for exactly
+     * the reason given there: the scroll event still arrives and derives the same anchor from
+     * the same offset, but a publish before it would resolve the position the view was at
+     * *before* this scroll and write it back — undoing a landing already reported as
+     * `converged` (#115).
+     *
+     * No `pushRestoreIntent`, deliberately, and the two queues at the top of this file say why:
+     * the engine's queue means "do not re-derive the anchor from this read-back", which is right
+     * for a correction whose landing may have been pixel-snapped and wrong for a move. This is a
+     * move. Suppressing the re-derivation would leave the anchor describing the pre-scroll
+     * position again, which is the bug rather than the fix.
+     *
+     * Nothing published here: `onScrollingChange(false)` follows immediately and publishes.
+     */
+    onLanded() {
+      anchor = deriveAnchor(contentOffset(), cache, geometry())
+    },
     onScrollingChange(scrolling) {
       // The pin exists for the duration of one programmatic scroll; holding it after
       // would keep an arbitrary slice of the list mounted forever.
