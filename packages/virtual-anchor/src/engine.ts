@@ -1692,7 +1692,35 @@ export function createEngine(initial: EngineOptions): Engine {
    * @returns whether the cache was discarded. Every caller has to act on it, because that
    * moved every offset in the list.
    */
+  /** Whether {@link warnAboutScrollbarGutter} has already had its say. Development only. */
+  let warnedAboutGutter = false
+  /**
+   * The scrollport's inner and outer width as of the last signature re-read. Development only.
+   *
+   * Two numbers rather than the signature's one, because the signature cannot tell a scrollbar
+   * appearing from the window being resized — and only the first of those is a broken promise.
+   */
+  let scrollportBox: { inner: number; outer: number } | null = null
+
   const recheckLayoutSignature = (): boolean => {
+    // Whether the promise `scrollbar-gutter: stable` makes was kept, checked on every re-read
+    // rather than only on an invalidating one — the *first* narrowing is the one worth reporting,
+    // and it needs a box recorded before it to be recognised as a narrowing at all. Two property
+    // reads and a comparison; `getComputedStyle` is only reached once those match.
+    //
+    // Once per engine: this reports a stylesheet, not an event, and the scrollport path
+    // deliberately has no rate limit — a horizontal window drag would otherwise warn on every
+    // frame it delivers.
+    if (process.env.NODE_ENV !== 'production') {
+      const scrollport = viewport.getScrollportElement()
+      if (scrollport) {
+        if (!warnedAboutGutter) {
+          warnedAboutGutter = warnAboutScrollbarGutter(scrollport, scrollportBox)
+        }
+        scrollportBox = { inner: scrollport.clientWidth, outer: scrollport.offsetWidth }
+      }
+    }
+
     // Read only by the trace below, so not read at all in a build without it. It cannot move
     // *into* the thunk, because `setLayoutSignature` overwrites it on the next line.
     const previous = DEBUG && signatureKnown ? cache.layoutSignature : null
@@ -1738,6 +1766,7 @@ export function createEngine(initial: EngineOptions): Engine {
 
   /** When the signature was last re-read off a measurement, for {@link SIGNATURE_RECHECK_MS}. */
   let signatureCheckedAt = 0
+
 
   const resizer: Resizer = createResizer({
     onItemResize(batch) {
@@ -2523,4 +2552,65 @@ export function layoutSignatureFor(element: HTMLElement | null): string {
     : ''
   const dpr = view?.devicePixelRatio ?? 1
   return `w=${String(width)}|f=${rootFontSize}|dpr=${String(dpr)}`
+}
+
+/**
+ * Warn, in development, when a scrollport changed width despite `scrollbar-gutter: stable`.
+ *
+ * The property is specified to reserve the scrollbar's space whether or not a scrollbar is
+ * currently there, which is the whole reason the React adapter sets it by default: a scrollbar
+ * appearing once the rows overflow would otherwise narrow the scrollport, and every height
+ * measured before that is then wrong by a re-wrap.
+ *
+ * **WebKit does not honour it for a scroller whose scrollbar has been given a width** — which is
+ * every consumer that styles `::-webkit-scrollbar`. There the scrollport still narrows on first
+ * overflow: 400px to 388px in the reduced case, measured against Chromium and Firefox holding at
+ * 400. Without a custom width WebKit uses overlay scrollbars, which take no space and so cannot
+ * expose the omission. `getComputedStyle` reads back `stable` either way, so nothing about this is
+ * discoverable from the property, and nothing in this package can fix it — the property is set
+ * correctly and ignored (#116).
+ *
+ * The list recovers: the width change invalidates the size cache and the rows still on screen are
+ * re-measured. But recovery means every mounted row re-measuring and every offset below it moving
+ * one frame after a landing, which is the re-entrant correction the width-keyed cache exists to
+ * avoid — and it is what triggers a stale-anchor restore (#115) for anyone still on 0.10.0.
+ *
+ * So this says the one thing the consumer cannot see for themselves, at the one moment it is
+ * knowable, and names the fix: reserve the width in the stylesheet that took it away.
+ *
+ * @returns whether it warned, so a caller latching this to once per engine spends the one
+ * warning on a scroller that had actually been promised a stable gutter.
+ *
+ * @param before the scrollport's inner and outer width at the previous invalidation, or `null`
+ * when there is no previous one to compare against — the first observation cannot be a change.
+ */
+function warnAboutScrollbarGutter(
+  element: HTMLElement,
+  before: { inner: number; outer: number } | null,
+): boolean {
+  if (!before) return false
+
+  // The signature of *this* bug, not of any width change. A scrollbar appearing takes its width
+  // out of the scrollport while leaving the element's own box exactly where it was; a window
+  // resize, a flex sibling growing, a media query — everything else that narrows a scrollport —
+  // moves the outer box too. The gutter promises nothing about those, so warning about them
+  // would mean a list in a resizable layout complaining on every drag, which is how a
+  // development warning gets tuned out.
+  if (element.offsetWidth !== before.outer || element.clientWidth >= before.inner) return false
+
+  const view = element.ownerDocument.defaultView
+  if (!view) return false
+
+  // `startsWith`, because `stable both-edges` is also stable — and a scroller that never asked
+  // for a gutter was never promised one, so it has nothing to be warned about.
+  if (!view.getComputedStyle(element).scrollbarGutter.startsWith('stable')) return false
+
+  console.warn(
+    '[virtual-anchor] the scrollport changed width while scrollbar-gutter: stable was in ' +
+      'force, so every height measured at the old width has been discarded. WebKit ignores ' +
+      'the property for a scroller with a styled ::-webkit-scrollbar, which is the usual ' +
+      'cause. Reserve the scrollbar width in your own stylesheet, or drop the ' +
+      '::-webkit-scrollbar width to get overlay scrollbars back.',
+  )
+  return true
 }

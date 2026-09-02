@@ -149,6 +149,15 @@ export interface VirtualListProps<T> extends UseVirtualListOptions<T> {
    * is. A setting every correct call site must pass, for a reason the caller cannot see, is the
    * component's default rather than the caller's responsibility.
    *
+   * **It does not hold on WebKit for a scroller with styled scrollbars.** A width on
+   * `::-webkit-scrollbar` opts the scroller out of overlay scrollbars, and WebKit then reserves
+   * nothing until the scrollbar actually exists — so the scrollport narrows on first overflow
+   * exactly as it would without the property, and everything above happens anyway. Chromium and
+   * Firefox both hold their width; `getComputedStyle` reads back `stable` on all three, so the
+   * property cannot be tested for. Nothing here can fix it — the property is set and ignored — so
+   * a consumer styling `::-webkit-scrollbar` has to reserve the width in that stylesheet, and a
+   * development build warns once if the scrollport moves anyway (#116).
+   *
    * **Ignored under `windowScroller`**, whatever it is set to. There the page is the scroller, and
    * reserving a gutter on the document is the host page's decision — not a list's.
    *

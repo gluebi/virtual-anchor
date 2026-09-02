@@ -21,6 +21,14 @@ import { open } from './helpers.js'
  * equivalent at all. A test written on top of that skips itself out of existence or passes because
  * there was nothing to observe — the first version did both, on CI as well as locally.
  *
+ * The WebKit row is not a quirk of this demo's styling: #116 pinned it down to
+ * `::-webkit-scrollbar` having a width, which is what opts a scroller out of overlay scrollbars.
+ * With one, the scrollport narrows on first overflow despite `stable`; without one, there is
+ * nothing to reserve and the property is moot. So the one configuration in which WebKit could
+ * honour the declaration is the one in which it has no work to do — which is why the table has no
+ * cell showing it held. That is now documented on the prop, since a consumer meets it long before
+ * they read this file.
+ *
  * What the *library* promises is narrower and is entirely testable: the declaration goes on the
  * scrollport it created, unless the consumer says otherwise, and never on a host element that is
  * not a scrollport. What the browser then does with it is the browser's business, and on a

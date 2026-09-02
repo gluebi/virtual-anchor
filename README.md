@@ -263,6 +263,16 @@ on a cold list, which points nowhere near the cause. Opt out with
 way. Under `windowScroller` nothing is written — the document's gutter is the host page's
 decision, not a list's.
 
+**WebKit does not honour the property if you style your scrollbars.** Give
+`::-webkit-scrollbar` a width and the scroller opts out of overlay scrollbars, and the
+scrollport then narrows on first overflow exactly as though no gutter had been asked for —
+400px to 388px in a reduced case where Chromium and Firefox both hold at 400.
+`getComputedStyle` still reads back `stable`, so there is nothing to detect from the
+property. Reserve the width yourself in the stylesheet that took it away, or leave
+`::-webkit-scrollbar` alone and keep the overlay scrollbars that take no space to begin
+with. A development build warns once if the scrollport changes width while the gutter is
+supposed to be holding it still.
+
 ### Content around the list
 
 Four slots hold content that shares the scroller with the items: `header` and
