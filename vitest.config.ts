@@ -87,7 +87,13 @@ export default defineConfig({
         // the behaviour. What proves it is `matrix.spec.ts` in the pinned Playwright image — three
         // failures before, five passes after, byte-identical across runs. Recorded here rather
         // than met with a test that would only restate the mock.
-        'packages/virtual-anchor/src/engine.ts': { branches: 83, functions: 91, lines: 96 },
+        //
+        // Raised with `onLanded` (#115): branches 83 → 87, functions 91 → 93, lines 96 → 98. The
+        // callback's own body is one line, and the rest of the gain is the three anchoring cases
+        // it arrived with reaching code the suite had only ever entered from the scroll handler —
+        // the restore branch after a programmatic landing, which is the window the defect lived
+        // in. Banking that as slack is what this table exists to prevent.
+        'packages/virtual-anchor/src/engine.ts': { branches: 87, functions: 93, lines: 98 },
         // Functions to 100 with the scroller's own writes finally being traced: `scroll.commit`,
         // `flush`, `park` and `wake` had no tests because they emitted nothing to test.
         //
