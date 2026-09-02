@@ -25,6 +25,8 @@ import { createElementViewport, type Viewport } from './viewport.js'
 
 interface Harness {
   engine: Engine
+  /** The scrollport element itself, for the cases whose subject is its own CSS. */
+  scrollport: HTMLElement
   unmount: () => void
   /** Everything the surface was asked to draw, in order. */
   writes: string[]
@@ -176,6 +178,7 @@ const setup = (
 
   return {
     engine,
+    scrollport: scroller,
     unmount,
     writes,
     viewportReadAt,
@@ -700,6 +703,78 @@ describe('engine measurement invalidation', () => {
     expect(h.engine.cache.measuredCount).toBe(12)
     // The eight nobody is looking at are back on their estimates, which is the discard.
     expect(h.engine.cache.totalSize()).toBe(320 + 11 * 250 + 8 * 100)
+  })
+
+  /**
+   * `scrollbar-gutter: stable` is set by the React adapter precisely so the width cannot change
+   * when the scrollbar appears — and WebKit ignores it for a scroller with a styled
+   * `::-webkit-scrollbar`, so the width changes anyway (#116). Nothing here can fix that. What it
+   * can do is say so at the moment the promise breaks, which is the only moment it is knowable:
+   * `getComputedStyle` reads back `stable` whether or not the platform honoured it.
+   *
+   * The scrollport's *outer* box is what separates the broken promise from an ordinary resize. A
+   * scrollbar appearing takes its width out of `clientWidth` and leaves `offsetWidth` alone;
+   * everything else that narrows a scrollport moves both. Warning on the latter would mean a list
+   * in a resizable layout complaining on every drag, which is how a warning gets tuned out.
+   */
+  it('warns once when the scrollbar narrows a scrollport with a stable gutter', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const h = setup({ count: 20 })
+    h.scrollport.style.scrollbarGutter = 'stable'
+
+    // Records the box the narrowing below is recognised against, as the mount-time delivery does.
+    h.observeScrollport()
+    h.resizeWidth(400)
+
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0]?.[0]).toContain('scrollbar-gutter: stable')
+    expect(warn.mock.calls[0]?.[0]).toContain('::-webkit-scrollbar')
+
+    // Once per engine. This reports a stylesheet rather than an event, and the scrollport path
+    // has no rate limit of its own — a horizontal window drag delivers a width per frame.
+    h.resizeWidth(300)
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it('says nothing when the scrollport itself was resized rather than narrowed', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const h = setup({ count: 20 })
+    h.scrollport.style.scrollbarGutter = 'stable'
+
+    // The element's own box follows the width, which is what a window resize looks like and what
+    // the gutter promises nothing about.
+    let outer = 600
+    Object.defineProperty(h.scrollport, 'offsetWidth', {
+      configurable: true,
+      get: () => outer,
+    })
+
+    h.observeScrollport()
+    outer = 400
+    h.resizeWidth(400)
+
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('says nothing when the scroller never asked for a stable gutter', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const h = setup({ count: 20 })
+
+    h.observeScrollport()
+    h.resizeWidth(400)
+
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('says nothing when the scrollport got wider', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const h = setup({ count: 20 })
+    h.scrollport.style.scrollbarGutter = 'stable'
+
+    h.observeScrollport()
+    h.resizeWidth(800)
+
+    expect(warn).not.toHaveBeenCalled()
   })
 
   it('discards measurements when the root font size changes and the scrollport does not', () => {
