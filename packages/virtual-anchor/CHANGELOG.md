@@ -1,5 +1,125 @@
 # virtual-anchor
 
+## 0.11.0
+
+### Minor Changes
+
+- fb3dbd4: A programmatic scroll now updates the anchor where the move is made, instead of waiting for the browser to say it happened.
+  
+  `scrollToKey` and `scrollToIndex` resolve on a synchronous fast path when every row is measured:
+  the write lands, `finish(true, 'converged')` runs inside the promise executor, and the caller gets
+  an honest `settled: true`. But the anchor was only ever derived in the **scroll handler**, and a
+  `scrollTop` write is synchronous while its `scroll` event is not. So for the length of one event
+  delivery the anchor still described where the view *was* — and `isScrolling()` was already false,
+  which is the one thing that had been suppressing a restore from it.
+  
+  Any publish in that window therefore restored the pre-scroll position and teleported the view back,
+  undoing a landing that had already been reported as converged. A `ResizeObserver` callback fits
+  inside the window comfortably, so the trigger was ordinary: a measurement batch, a slot resize, a
+  model change.
+  
+  Three lines that were each right on their own. The comment above the derivation even states the
+  invariant it was breaking — the anchor "follows every intentional move — the user's and the
+  scroller's alike" — and the `followOutput` branch a few hundred lines above had already met the
+  identical race and solved it by deriving synchronously after its own write.
+  
+  The convergence path was never exposed: it keeps a scroll pending across frames, so the guard
+  covered it, and by the time it resolves its own scroll events have long since moved the anchor.
+  **Only the synchronous resolution was affected** — which is the path a fully measured list takes,
+  so a short list, or any list scrolled a second time. Chromium and WebKit both lose the race, on
+  different frames, which is why it was reported as "sometimes, in both browsers".
+  
+  What it cost in the wild: a 13-comment forum thread opened on the reader's first unread comment.
+  The scrollport narrowed by 12px as the content began to overflow, the opening post re-wrapped from
+  232px to 253px, and the `scrollToKey` aimed at the cache still holding 232. The write landed, the
+  row really was at the top, and the promise was right. 18ms later the corrected measurement arrived,
+  the restore ran against the stale anchor, and the offset went to 0. The reader saw a thread that
+  did not scroll while the consumer's log said it landed perfectly. Nothing recovered it, either: the
+  now-meaningless scroll event derived the anchor from the restored 0, making the loss permanent
+  rather than transient.
+  
+  A settled landing now tells the engine, which derives the anchor from the offset it just committed.
+  The scroll event still arrives afterwards and derives the same anchor from the same offset, so it
+  is a second no-op rather than a second correction — and deliberately *not* suppressed the way an
+  anchor-restore's read-back is, because this is a move and the anchor has to follow a move.
+  
+  A cancelled or replaced scroll reports nothing: it leaves the view wherever it happens to be, and
+  an anchor for that position is the scroll handler's business as it always was. A **clamped** landing
+  does report — the view stopped somewhere real, and that somewhere needs an anchor as much as a
+  flush landing does.
+  
+  Both shipping budgets are unchanged; the development bundle grows by 11 bytes and its budget by
+  0.1 kB — the entry whose own description says nobody depends on it.
+  
+  `ScrollerOptions` gains an optional `onLanded?: () => void`, which is the channel. Optional, so a
+  consumer driving `createScroller` themselves has nothing to change; one who is keeping their own
+  record of scroll position will want it for the same reason the engine does. It carries no offset on
+  purpose — `getContentOffset` is already the caller's own reader, so the number would be handed back
+  to whoever computed it.
+  
+  Fixes #115.
+
+### Patch Changes
+
+- 371556d: Documented that `scrollbar-gutter: stable` does not hold on WebKit when the scrollbar has been given a width, and warn in development when the scrollport narrows anyway.
+  
+  `stableScrollbarGutter` is on by default and was documented as taking the scrollbar's width out of
+  the equation — the argument for making it a default at all, and what lets a consumer stop
+  hand-copying the property at every call site. It does not hold on **WebKit** for a scroller whose
+  scrollbar has been given a width, which is every consumer that styles its scrollbars.
+  
+  Measured on a 400×300 scroller with the property set, before and after its content starts to
+  overflow:
+  
+  | engine   | `::-webkit-scrollbar` width | `clientWidth` before → after |             |
+  | -------- | --------------------------- | ---------------------------- | ----------- |
+  | chromium | 12px                        | 388 → 388                    | stable      |
+  | chromium | none                        | 400 → 400                    | stable      |
+  | webkit   | **12px**                    | **400 → 388**                | **narrows** |
+  | webkit   | none                        | 400 → 400                    | stable      |
+  | firefox  | 12px                        | 400 → 400                    | stable      |
+  
+  So WebKit reserves nothing until the scrollbar exists, but only once a custom width has opted the
+  scroller out of overlay scrollbars. Without one there is no space to reserve and the property is
+  moot — which means the one configuration where WebKit could honour the declaration is the one where
+  it has nothing to do. `scrollbar-gutter: stable` is specified to reserve the space whether or not a
+  scrollbar is currently present, so this reads as a conformance bug; either way it is live behaviour
+  a consumer meets today.
+  
+  Nothing in this package can fix it. The property is set correctly, `getComputedStyle` reads back
+  `stable`, and the platform ignores it — so there is not even anything to feature-detect. But the
+  promise was this package's to make, and the failure lands on the geometry this package owns: the
+  scrollport narrows the moment the rows overflow, and every row measured before that is wrong by a
+  re-wrap.
+  
+  The list does recover — a width change invalidates the size cache and the rows still on screen are
+  re-measured — but recovery means every mounted row measuring again and every offset below it moving
+  one frame after a landing. That is the re-entrant correction the width-keyed cache was introduced to
+  avoid, and on 0.10.0 it is also what triggered the stale-anchor restore fixed separately as #115.
+  
+  What changed:
+  
+  - The README and the `stableScrollbarGutter` doc now say what actually happens, and name the fix:
+    a consumer styling `::-webkit-scrollbar` has to reserve the width in that stylesheet, or leave
+    `::-webkit-scrollbar` alone and keep the overlay scrollbars that take no space to begin with.
+  - A development build warns **once** when the scrollport is narrowed while the computed
+    `scrollbar-gutter` is `stable` — the moment the promise breaks, and the consumer's only signal
+    that it did. Read off the element rather than from the React prop, so it also covers a core
+    consumer who set the property by hand because the documentation told them to.
+  
+    Narrowed, not merely changed: a scrollbar appearing takes its width out of `clientWidth` and
+    leaves `offsetWidth` exactly where it was, while a window resize, a flex sibling growing or a
+    media query moves both. The gutter promises nothing about those, so warning on any width change
+    would mean a list in a resizable layout complaining on every drag — which is how a development
+    warning gets tuned out rather than read. Once per engine for the same reason: this reports a
+    stylesheet rather than an event.
+  
+  Nothing is warned about in a production build, and there is no behaviour change in one. Both
+  shipping budgets are unchanged to the byte, which is the check that the guard really does drop the
+  message; the development bundle grows by the length of the sentence and its budget by 0.1 kB.
+  
+  Fixes #116.
+
 ## 0.10.0
 
 ### Minor Changes
