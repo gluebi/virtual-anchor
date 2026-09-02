@@ -16,7 +16,7 @@
   {
     "name": "virtual-anchor (development) — the same core instrumented; the gap above IS the tracing, and nobody depends on this",
     "path": "packages/virtual-anchor/dist/dev/index.js",
-    "limit": "11.3 kB"
+    "limit": "11.4 kB"
   },
   {
     "name": "virtual-anchor/debug — the toolkit, opt-in by import, shipped by nobody who does not",

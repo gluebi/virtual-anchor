@@ -46,6 +46,9 @@ an anchor for that position is the scroll handler's business as it always was. A
 does report — the view stopped somewhere real, and that somewhere needs an anchor as much as a
 flush landing does.
 
+Both shipping budgets are unchanged; the development bundle grows by 11 bytes and its budget by
+0.1 kB — the entry whose own description says nobody depends on it.
+
 `ScrollerOptions` gains an optional `onLanded?: () => void`, which is the channel. Optional, so a
 consumer driving `createScroller` themselves has nothing to change; one who is keeping their own
 record of scroll position will want it for the same reason the engine does. It carries no offset on
